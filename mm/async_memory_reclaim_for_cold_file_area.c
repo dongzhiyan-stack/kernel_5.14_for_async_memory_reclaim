@@ -41,14 +41,14 @@ static int inline is_file_area_move_list_head(struct file_area *p_file_area)
 #else
 	/*如果上个周期file_area被访问过，下个周期file_area又被访问，则也把file_area移动到链表头。file_area_access_count_get(p_file_area) > 0
 	 *表示上个周期file_area被访问过，hot_cold_file_global_info.global_age - p_file_area->file_area_age == 1表示是连续的两个周期*/
-	if((hot_cold_file_global_info.global_age - p_file_area->file_area_age == 1) && (file_area_access_count_get(p_file_area) > 0)){
+	if((hot_cold_file_global_info.global_age - p_file_area->file_area_age == 1) && (file_area_access_count_get(p_file_area) > 0))
 		return 1;
 #endif	
 	return 0;
 }
 static int inline is_file_area_hot(struct file_area *p_file_area)
 {
-    if(file_stat_in_file_stat_temp_head_list(p_file_stat) && file_area_access_count_get(p_file_area) > FILE_AREA_HOT_LEVEL)
+    if(file_area_in_temp_list(p_file_area) && file_area_access_count_get(p_file_area) > FILE_AREA_HOT_LEVEL)
         return 1;
 
     return 0;
@@ -56,23 +56,25 @@ static int inline is_file_area_hot(struct file_area *p_file_area)
 /* 统计page的冷热信息、是否refault。返回0表示page和file_area没有，需要分配；返回1是成功返回；返回负数有出错
  *
  * */
-int hot_file_update_file_status(address_space *mapping,struct file_stat *p_file_stat,struct file_area *p_file_area,int access_count)
+int hot_file_update_file_status(struct address_space *mapping,struct file_stat *p_file_stat,struct file_area *p_file_area,int access_count)
 {
 	int file_area_move_list_head = 0;
 	int hot_file_area; 
-
-	if(NULL == p_file_stat || file_stat_in_delete(p_file_stat)){
+#if 0
+	//这些判断放到每个使用者函数最初吧，否则每次都执行浪费性能
+	if(NULL == p_file_stat || file_stat_in_delete(p_file_stat) || 0 == access_count){
 		return 0;
 	}
+#endif
+
 #if 0
 	//async_memory_reclaim_status不再使用smp_rmb内存屏障，而直接使用test_and_set_bit_lock/clear_bit_unlock原子操作
 	if(unlikely(!test_bit(ASYNC_MEMORY_RECLAIM_ENABLE,&async_memory_reclaim_status)))
 		return -1;
 #endif		
 	/*1:如果mapping->rh_reserved1被其他代码使用，直接返回错误*/
-	if(p_file_stat->mapping != mapping){
-		ret = -EPERM;
-		printk("%s p_file_stat:0x%llx status:0x%lx error\n",__func__,(u64)p_file_stat,p_file_stat->file_stat_status);
+	if(p_file_stat->mapping != mapping || access_count <= 0){
+		printk("%s p_file_stat:0x%llx status:0x%lx access_count:%d error\n",__func__,(u64)p_file_stat,p_file_stat->file_stat_status,access_count);
 		return -1;
 	}
 	
@@ -402,7 +404,7 @@ static int hot_cold_file_thread(void *p){
 	        //每个周期global_age加1
 	        hot_cold_file_global_info.global_age ++;
 			walk_throuth_all_file_area(p_hot_cold_file_global);
-			walk_throuth_all_mmap_file_area(p_hot_cold_file_global);
+			//walk_throuth_all_mmap_file_area(p_hot_cold_file_global);
 		}
 	}
 	return 0;
@@ -411,12 +413,11 @@ static int hot_cold_file_thread(void *p){
 
 static int __init hot_cold_file_init(void)
 {
-	int node_count,i;
 	hot_cold_file_global_info.file_stat_cachep = kmem_cache_create("file_stat",sizeof(struct file_stat),0,0,NULL);
 	hot_cold_file_global_info.file_area_cachep = kmem_cache_create("file_area",sizeof(struct file_area),0,0,NULL);
 
 	if(!hot_cold_file_global_info.file_stat_cachep || !hot_cold_file_global_info.file_area_cachep){
-	    printk("%s slab 0x%llx 0x%llx 0x%llx error\n",__func__,(u64)hot_cold_file_global_info.file_stat_cachep,(u64)hot_cold_file_global_info.file_area_cachep);
+	    printk("%s slab 0x%llx 0x%llx error\n",__func__,(u64)hot_cold_file_global_info.file_stat_cachep,(u64)hot_cold_file_global_info.file_area_cachep);
 	    return -1;
 	}
 	

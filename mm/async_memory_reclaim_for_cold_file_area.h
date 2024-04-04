@@ -209,7 +209,7 @@ struct hot_cold_file_shrink_counter
 struct file_area
 {
 	//不同取值表示file_area当前处于哪种链表
-	unsigned char file_area_state;
+	unsigned int file_area_state;
 	//该file_area最近被访问时的global_age，长时间不被访问则与global age差很多，则判定file_area是冷file_area，然后释放该file_area的page
 	//如果是mmap文件页，当遍历到文件页的pte置位，才会更新对应的file_area的age为全局age，否则不更新
 	unsigned int file_area_age;
@@ -229,7 +229,7 @@ struct file_area
 	struct list_head file_area_list;
 	//该file_area代表的N个连续page的起始page索引
 	pgoff_t start_index;
-        struct folio *pages[PAGE_COUNT_IN_AREA];
+    struct folio *pages[PAGE_COUNT_IN_AREA];
 };
 struct hot_cold_file_area_tree_node
 {
@@ -628,6 +628,12 @@ FILE_STATUS_ATOMIC(delete)
 FILE_STATUS_ATOMIC(cache_file)
 FILE_STATUS_ATOMIC(mmap_file)
 
+extern struct hot_cold_file_global hot_cold_file_global_info;
+//置1会把内存回收信息详细打印出来
+extern int shrink_page_printk_open1;
+//不怎么关键的调试信息
+extern int shrink_page_printk_open;
+extern unsigned long async_memory_reclaim_status;
 
 static inline void lock_file_stat(struct file_stat * p_file_stat,int not_block){
 	//如果有其他进程对file_stat的lock加锁，while成立，则休眠等待这个进程释放掉lock，然后自己加锁
@@ -661,7 +667,7 @@ static inline int get_page_from_file_area(struct file_stat *p_file_stat,pgoff_t 
 	}
 	return ret;
 }
-static inline struct file_stat *file_stat_alloc_and_init(void)
+static inline struct file_stat *file_stat_alloc_and_init(struct address_space *mapping)
 {
 	struct file_stat * p_file_stat;
 
@@ -739,13 +745,7 @@ out:
 }
 
 
-extern struct hot_cold_file_global hot_cold_file_global_info;
-//置1会把内存回收信息详细打印出来
-extern int shrink_page_printk_open1;
-//不怎么关键的调试信息
-extern int shrink_page_printk_open;
-extern unsigned long async_memory_reclaim_status;
-
+extern int hot_file_update_file_status(struct address_space *mapping,struct file_stat *p_file_stat,struct file_area *p_file_area,int access_count);
 
 extern void printk_shrink_param(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print);
 extern int hot_cold_file_print_all_file_stat(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print);//is_proc_print:1 通过proc触发的打印
@@ -757,5 +757,5 @@ extern int hot_cold_file_proc_exit(struct hot_cold_file_global *p_hot_cold_file_
 extern unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct list_head *file_area_free);
 extern unsigned int cold_mmap_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct file_area *p_file_area,struct page *page_buf[],int cold_page_count);
 
-extern unsigned int async_shrink_free_page(struct pglist_data *pgdat,struct lruvec *lruvec,struct list_head *page_list,struct scan_control_async *sc,struct reclaim_stat *stat);
+//extern unsigned int async_shrink_free_page(struct pglist_data *pgdat,struct lruvec *lruvec,struct list_head *page_list,struct scan_control *sc,struct reclaim_stat *stat);
 #endif
