@@ -677,6 +677,7 @@ static inline struct file_stat *file_stat_alloc_and_init(struct address_space *m
 	//如果两个进程同时访问一个文件，同时执行到这里，需要加锁。第1个进程加锁成功后，分配file_stat并赋值给
 	//mapping->rh_reserved1，第2个进程获取锁后执行到这里mapping->rh_reserved1就会成立
 	if(mapping->rh_reserved1){
+		printk("%s file_stat:0x%llx already alloc\n",__func__,(u64)mapping->rh_reserved1);
 		p_file_stat = (struct file_stat *)mapping->rh_reserved1;
 		goto out;
 	}
