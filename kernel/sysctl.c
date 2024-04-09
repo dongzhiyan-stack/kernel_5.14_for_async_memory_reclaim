@@ -107,6 +107,8 @@
 
 #if defined(CONFIG_SYSCTL)
 
+extern unsigned int xarray_tree_node_cache_hit;
+
 /* Constants used for minimum and  maximum */
 #ifdef CONFIG_LOCKUP_DETECTOR
 static int sixty = 60;
@@ -2572,6 +2574,14 @@ static struct ctl_table vm_table[] = {
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_TWO_HUNDRED,
 	},
+	{
+		.procname	= "xarray_tree_node_cache_hit",
+		.data		= &xarray_tree_node_cache_hit,
+		.maxlen		= sizeof(xarray_tree_node_cache_hit),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+	},
+
 #ifdef CONFIG_HUGETLB_PAGE
 	{
 		.procname	= "nr_hugepages",

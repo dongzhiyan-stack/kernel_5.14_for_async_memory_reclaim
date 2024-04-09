@@ -131,7 +131,6 @@
 #include <linux/sched/mm.h>
 
 #include "internal.h"
-
 /*
  * Initialise a struct file's readahead state.  Assumes that the caller has
  * memset *ra to zero.
@@ -227,7 +226,12 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
 	 * Preallocate as many pages as we will need.
 	 */
 	for (i = 0; i < nr_to_read; i++) {
-		struct folio *folio = xa_load(&mapping->i_pages, index + i);
+		//struct folio *folio = xa_load(&mapping->i_pages, index + i);
+		struct folio *folio ;
+		if(mapping->rh_reserved1)
+			folio = get_folio_from_file_area(mapping,index + i);
+		else
+		    folio = xa_load(&mapping->i_pages, index + i);
 
 		if (folio && !xa_is_value(folio)) {
 			/*
@@ -793,7 +797,12 @@ void readahead_expand(struct readahead_control *ractl,
 	/* Expand the leading edge downwards */
 	while (ractl->_index > new_index) {
 		unsigned long index = ractl->_index - 1;
-		struct page *page = xa_load(&mapping->i_pages, index);
+		//struct page *page = xa_load(&mapping->i_pages, index);
+		struct page *page;
+		if(mapping->rh_reserved1)
+			page = get_folio_from_file_area(mapping,index);
+		else
+		    page = xa_load(&mapping->i_pages, index);
 
 		if (page && !xa_is_value(page))
 			return; /* Page apparently present */
@@ -816,7 +825,12 @@ void readahead_expand(struct readahead_control *ractl,
 	/* Expand the trailing edge upwards */
 	while (ractl->_nr_pages < new_nr_pages) {
 		unsigned long index = ractl->_index + ractl->_nr_pages;
-		struct page *page = xa_load(&mapping->i_pages, index);
+		//struct page *page = xa_load(&mapping->i_pages, index);
+		struct page *page;
+		if(mapping->rh_reserved1)
+			page = get_folio_from_file_area(mapping,index);
+		else
+		    page = xa_load(&mapping->i_pages, index);
 
 		if (page && !xa_is_value(page))
 			return; /* Page apparently present */

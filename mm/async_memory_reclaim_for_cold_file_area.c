@@ -71,12 +71,12 @@ int hot_file_update_file_status(struct address_space *mapping,struct file_stat *
 	//async_memory_reclaim_status不再使用smp_rmb内存屏障，而直接使用test_and_set_bit_lock/clear_bit_unlock原子操作
 	if(unlikely(!test_bit(ASYNC_MEMORY_RECLAIM_ENABLE,&async_memory_reclaim_status)))
 		return -1;
-#endif		
 	/*1:如果mapping->rh_reserved1被其他代码使用，直接返回错误*/
 	if(p_file_stat->mapping != mapping || access_count <= 0){
 		printk("%s p_file_stat:0x%llx status:0x%lx access_count:%d error\n",__func__,(u64)p_file_stat,p_file_stat->file_stat_status,access_count);
 		return -1;
 	}
+#endif		
 	
 	//检测file_area被访问的次数，判断是否有必要移动到file_stat->hot、refault、temp等链表头
 	file_area_move_list_head = is_file_area_move_list_head(p_file_area);
@@ -109,7 +109,9 @@ int hot_file_update_file_status(struct address_space *mapping,struct file_stat *
 		hot_cold_file_global_info.hot_cold_file_shrink_counter.find_file_area_from_tree_not_lock_count ++;
 		goto out;
 	}
-	
+
+	return 1;
+
 	spin_lock(&p_file_stat->file_stat_lock);
 	
 

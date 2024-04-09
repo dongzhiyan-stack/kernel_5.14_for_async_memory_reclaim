@@ -66,7 +66,7 @@
 #define PAGE_BIT_OFFSET_IN_FILE_AREA_BASE (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA)//28
 
 
-unsigned int xarray_tree_node_cache_hit;
+unsigned long xarray_tree_node_cache_hit;
 inline struct file_area *entry_to_file_area(void * file_area_entry)
 {
     return (struct file_area *)((unsigned long)file_area_entry | 0x8000000000000000);
@@ -77,8 +77,8 @@ inline void *file_area_to_entry(struct file_area *p_file_area)
 }
 inline int is_file_area_entry(void *file_area_entry)
 {
-	//最高的4个bit位依次是 0、1、1、1 则说明是file_area_entry
-    return ((unsigned long)file_area_entry & 0xF000000000000000) == 0x7000000000000000;
+	//最高的4个bit位依次是 0、1、1、1 则说明是file_area_entry，bit0和bit1也得是1
+    return ((unsigned long)file_area_entry & 0xF000000000000003) == 0x7000000000000000;
 }
 
 inline void clear_file_area_page_bit(struct file_area *p_file_area,unsigned char page_offset_in_file_area)
@@ -157,9 +157,9 @@ inline struct  file_area * find_file_area_from_xarray_cache_node(struct xa_state
 			p_file_area = xa_node_parent->slots[xa_offset];
 			//保存到xarray tree的file_area指针由我的代码完全控制，故先不考虑xa_is_zero、xa_is_retry、xa_is_value 这些异常判断	
 			//if(p_file_area && !xa_is_zero(p_file_area) && !xa_is_retry(p_file_area) && !xa_is_value(p_file_area) && p_file_area->start_index == index & PAGE_COUNT_IN_AREA){
-			if(p_file_area && !xa_is_retry(p_file_area)){
+			if(is_file_area_entry(p_file_area)){
 				p_file_area = entry_to_file_area(p_file_area);
-				if(p_file_area->start_index == (index & PAGE_COUNT_IN_AREA)){
+				if(p_file_area->start_index == (index & ~PAGE_COUNT_IN_AREA_MASK)){
 				    xas->xa_offset = xa_offset;
 				    xas->xa_node = xa_node_parent;
 					/*这里有个重大的隐藏bug，在从cache node找到匹配的file_area后，必须把它的索引更新给xas->xa_index。
@@ -2695,6 +2695,7 @@ static void *mapping_get_entry_for_file_area(struct address_space *mapping, pgof
 	rcu_read_lock();
 
 	p_file_stat = (struct file_stat *)mapping->rh_reserved1;
+#if 0
 	if(!file_stat_in_delete(p_file_stat)){
 		    //如果此时这个file_area正在被释放，这里还能正常被使用吗？用了rcu机制做防护，后续会写详细分析!!!!!!!!!!!!!!!!!!!!!
             p_file_area = find_file_area_from_xarray_cache_node(&xas,p_file_stat,index);
@@ -2712,7 +2713,7 @@ static void *mapping_get_entry_for_file_area(struct address_space *mapping, pgof
 				xas.xa_node = XAS_RESTART;
 	       }
     }
-
+#endif
 repeat:
 	xas_reset(&xas);
 
@@ -2743,7 +2744,7 @@ find_folio:
 	}
     //统计page引用计数
 	hot_file_update_file_status(mapping,p_file_stat,p_file_area,1);
-
+#if 0
     //如果本次查找的page所在xarray tree的父节点变化了，则把最新的保存到mapping->rh_reserved2
 	if(p_file_stat->xa_node_cache != xas.xa_node){
 	    /*保存父节点node和这个node节点slots里最小的page索引。这两个赋值可能被多进程并发赋值，导致
@@ -2752,12 +2753,35 @@ find_folio:
 	    p_file_stat->xa_node_cache = xas.xa_node;
 	    p_file_stat->xa_node_cache_base_index = index & (~FILE_AREA_PAGE_COUNT_MASK);
 	}
-
+#endif
 out:
 	rcu_read_unlock();
 
 	return folio;
 }
+//这个函数可以加入node cache机制
+void *get_folio_from_file_area(struct address_space *mapping,pgoff_t index)
+{
+	struct file_area *p_file_area;
+	struct folio *folio;
+
+	rcu_read_lock();
+
+	p_file_area = xa_load(&mapping->i_pages,index >> PAGE_COUNT_IN_AREA_SHIFT);
+	if(!p_file_area)
+	{
+		folio = NULL;
+		goto out;
+	}
+	p_file_area = entry_to_file_area(p_file_area);
+	folio = p_file_area->pages[index & PAGE_COUNT_IN_AREA_MASK];
+
+out:
+	rcu_read_unlock();
+	
+	return (void *)folio;
+}
+EXPORT_SYMBOL(get_folio_from_file_area);
 #endif
 static void *mapping_get_entry(struct address_space *mapping, pgoff_t index)
 {
@@ -3918,13 +3942,15 @@ static void filemap_get_read_batch_for_file_area(struct address_space *mapping,
 	int page_offset_in_file_area_origin = page_offset_in_file_area;
 	
 	rcu_read_lock();
-
     p_file_stat = (struct file_stat *)mapping->rh_reserved1;
+
 	if(!file_stat_in_delete(p_file_stat)){
 		    //如果此时这个file_area正在被释放，这里还能正常被使用吗？用了rcu机制做防护，后续会写详细分析!!!!!!!!!!!!!!!!!!!!!
             p_file_area = find_file_area_from_xarray_cache_node(&xas,p_file_stat,index);
-            if(p_file_area)
+            if(p_file_area){
+				xarray_tree_node_cache_hit ++;
 				goto find_page_from_file_area;
+			}
 		    //xas->xa_offset = 0;
 		    //xas->xa_node = XAS_RESTART;
     }
@@ -3932,15 +3958,16 @@ static void filemap_get_read_batch_for_file_area(struct address_space *mapping,
 	//for (folio = xas_load(&xas); folio; folio = xas_next(&xas)) {
 	for (p_file_area = xas_load(&xas); p_file_area; p_file_area = xas_next(&xas)) {
 
-		//if(!p_file_area || !is_file_area_entry(p_file_area)) 为了提升性能，这些判断去掉
-		//	panic("%s mapping:0x%llx p_file_area:0x%llx NULL\n",__func__,(u64)mapping,(u64)p_file_area);
+		if(!is_file_area_entry(p_file_area))
+			panic("%s mapping:0x%llx p_file_area:0x%llx NULL\n",__func__,(u64)mapping,(u64)p_file_area);
 
 		/*xas_retry()里有xas->xa_node = XAS_RESTART，这个隐藏的很深，这样执行xas_next(&xas)时，if(xas_not_node(node))成立，直接从
 		 *xarray tree按照老的xas->xa_index重新查找，不会再执行xas->xa_index++和xas->xa_offset++而从父节点直接获取下一个索引的成员了*/
+#if 0	
 		//if (xas_retry(&xas, folio))
 		if (xas_retry(&xas, p_file_area))
 			continue;
-
+#endif
 		/*if(xas.xa_index > max)判断放到下边了，因为这里只能file_area的索引，不能判断page的索引。
 		 *另外两个判断放到一起，其实这两个判断可以放到__filemap_add_folio()里，在保存file_area到xarray tree时就判断，在查询时不再判断*/
 
@@ -3949,12 +3976,13 @@ static void filemap_get_read_batch_for_file_area(struct address_space *mapping,
 		if (xa_is_sibling(folio))
 			break;
         */
+#if 0		
         if(xa_is_value(p_file_area) || xa_is_sibling(p_file_area))
 			panic("%s p_file_area:0x%llx error\n",__func__,(u64)p_file_area);
-
+#endif
 		p_file_area = entry_to_file_area(p_file_area);
 
-        printk("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index,page_offset_in_file_area);
+        //printk("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index,page_offset_in_file_area);
 find_page_from_file_area:
 		folio = p_file_area->pages[page_offset_in_file_area];
 		/*这个跟filemap_get_read_batch()里for (folio = xas_load(&xas); folio; folio = xas_next(&xas))判断出folio是NULL则结束循环是一个效果*/
@@ -3976,7 +4004,7 @@ find_page_from_file_area:
 			//goto put_folio;
 			goto next_folio;
         }
-        printk("%s mapping:0x%llx folio:0x%llx index:%ld\n",__func__,(u64)mapping,(u64)folio,index);
+        //printk("%s mapping:0x%llx folio:0x%llx index:%ld\n",__func__,(u64)mapping,(u64)folio,folio->index);
 		if (!folio_batch_add(fbatch, folio))
 			break;
 		/*执行到这里，才真正获取到当前folio，然后才能令page_offset_in_file_area加1。但为了兼容还是加1放到next_folio那里了。
@@ -4032,12 +4060,13 @@ next_folio:
 retry:
 		xas_reset(&xas);
 	}
+#if 0	
 	//做个测试，测试从xarray tree找到的page是否合法
 	folio = fbatch->folios[0];
     if(folio && (folio->index != index)){
         printk("%s mapping:0x%llx folio->index:%ld index:%ld\n",__func__,(u64)mapping,folio->index,index);
 	}
-
+#endif
     /*如果前边for循环异常break了，就无法统计最后file_area的访问计数了，那就在这里统计*/
 	if(page_offset_in_file_area_origin == -1){
 		if(page_offset_in_file_area)/*可能这个file_area一个page都没有获取到，要过滤掉*/
@@ -4078,7 +4107,7 @@ find_file_area:
 		/*如果fbatch->nr非0，说明下边for循环已经找到了一些page，那就清0失效，现在执行filemap_get_read_batch_for_file_area重新查找*/
 		if(fbatch->nr)
 			fbatch->nr = 0;
-        printk("%s mapping:0x%llx index:%ld find\n",__func__,(u64)mapping,index);
+        //printk("%s mapping:0x%llx index:%ld find\n",__func__,(u64)mapping,index);
 		return filemap_get_read_batch_for_file_area(mapping,index,max,fbatch);
 	}
 #endif	
