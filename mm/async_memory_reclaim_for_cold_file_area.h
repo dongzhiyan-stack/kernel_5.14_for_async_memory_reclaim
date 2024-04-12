@@ -80,16 +80,21 @@
 #define TREE_ENTRY_MASK 3
 #define TREE_INTERNAL_NODE 1
 
-//热file_area经过FILE_AREA_HOT_to_TEMP_AGE_DX个周期后，还没有被访问，则移动到file_area_temp链表
+/*热file_area经过FILE_AREA_HOT_to_TEMP_AGE_DX个周期后，还没有被访问，则移动到file_area_temp链表*/
 #define FILE_AREA_HOT_to_TEMP_AGE_DX  5
-//发生refault的file_area经过FILE_AREA_REFAULT_TO_TEMP_AGE_DX个周期后，还没有被访问，则移动到file_area_temp链表
+/*发生refault的file_area经过FILE_AREA_REFAULT_TO_TEMP_AGE_DX个周期后，还没有被访问，则移动到file_area_temp链表*/
 #define FILE_AREA_REFAULT_TO_TEMP_AGE_DX 20
-//普通的file_area在FILE_AREA_TEMP_TO_COLD_AGE_DX个周期内没有被访问则被判定是冷file_area，然后释放这个file_area的page
+/*普通的file_area在FILE_AREA_TEMP_TO_COLD_AGE_DX个周期内没有被访问则被判定是冷file_area，然后释放这个file_area的page*/
 #define FILE_AREA_TEMP_TO_COLD_AGE_DX  5
-//一个冷file_area，如果经过FILE_AREA_FREE_AGE_DX个周期，仍然没有被访问，则释放掉file_area结构
+/*一个冷file_area，如果经过FILE_AREA_FREE_AGE_DX个周期，仍然没有被访问，则释放掉file_area结构*/
 #define FILE_AREA_FREE_AGE_DX  10
-//当一个file_area在一个周期内访问超过FILE_AREA_HOT_LEVEL次数，则判定是热的file_area
-#define FILE_AREA_HOT_LEVEL (PAGE_COUNT_IN_AREA << 1)
+/*当一个file_area在一个周期内访问超过FILE_AREA_HOT_LEVEL次数，则判定是热的file_area*/
+#define FILE_AREA_HOT_LEVEL (PAGE_COUNT_IN_AREA << 2)
+/*如果一个file_area在FILE_AREA_MOVE_HEAD_DX个周期内被访问了两次，然后才能移动到链表头*/
+#define FILE_AREA_MOVE_HEAD_DX 3
+/*在file_stat被判定为热文件后，记录当时的global_age。在未来HOT_FILE_COLD_AGE_DX时间内该文件进去冷却期：hot_file_update_file_status()函数中
+  *只更新该文件file_area的age后，然后函数返回，不再做其他操作，节省性能*/
+#define HOT_FILE_COLD_AGE_DX 10
 
 /**针对mmap文件新加的******************************/
 #define MMAP_FILE_NAME_LEN 16
@@ -221,7 +226,7 @@ struct file_area
 		atomic_t   access_count;
 		/*处于file_stat->refault、hot、free等链表上file_area，被遍历到时记录当时的global age，不理会文件页page是否被访问了。
 		 *由于和access_count是共享枚举变量，当file_area从file_stat->temp链表移动到file_stat->refault、hot、free等链表时，要对file_area_access_age清0*/
-		unsigned long file_area_access_age;
+		unsigned int file_area_access_age;
 	};
 	//该file_area里的某个page最近一次被回收的时间点，单位秒
 	unsigned int shrink_time;
@@ -267,10 +272,14 @@ struct file_stat
 	spinlock_t file_stat_lock;
 	//file_stat里age最大的file_area的age，调试用
 	unsigned long max_file_area_age;
-	//最近一次访问的page的file_area所在的父节点，通过它直接得到file_area，然后得到page，不用每次都遍历xarray tree
+	/*最近一次访问的page的file_area所在的父节点，通过它直接得到file_area，然后得到page，不用每次都遍历xarray tree*/
 	struct xa_node *xa_node_cache;
-	//xa_node_cache父节点保存的起始file_area索引
+	/*xa_node_cache父节点保存的起始file_area的page的索引*/
 	pgoff_t  xa_node_cache_base_index;
+	/*在file_stat被判定为热文件后，记录当时的global_age。在未来HOT_FILE_COLD_AGE_DX时间内该文件进去冷却期：hot_file_update_file_status()函数中
+	 *只更新该文件file_area的age后，然后函数返回，不再做其他操作，节省性能*/
+	unsigned int file_stat_hot_base_age;
+
 
 	union{
 		//cache文件file_stat最近一次被异步内存回收访问时的age，调试用

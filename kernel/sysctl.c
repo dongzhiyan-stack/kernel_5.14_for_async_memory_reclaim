@@ -107,7 +107,9 @@
 
 #if defined(CONFIG_SYSCTL)
 
-extern unsigned int xarray_tree_node_cache_hit;
+extern unsigned long xarray_tree_node_cache_hit;
+extern unsigned long file_area_in_update_count;
+extern unsigned long file_area_in_update_lock_count;
 
 /* Constants used for minimum and  maximum */
 #ifdef CONFIG_LOCKUP_DETECTOR
@@ -2581,6 +2583,22 @@ static struct ctl_table vm_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 	},
+	{
+		.procname	= "file_area_in_update_count",
+		.data		= &file_area_in_update_count,
+		.maxlen		= sizeof(file_area_in_update_count),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+	},
+	{
+		.procname	= "file_area_in_update_lock_count",
+		.data		= &file_area_in_update_lock_count,
+		.maxlen		= sizeof(file_area_in_update_lock_count),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+	},
+
+
 
 #ifdef CONFIG_HUGETLB_PAGE
 	{

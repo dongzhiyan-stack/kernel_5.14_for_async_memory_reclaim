@@ -5,7 +5,10 @@ struct hot_cold_file_global hot_cold_file_global_info;
 int shrink_page_printk_open1 = 0;
 //不怎么关键的调试信息
 int shrink_page_printk_open = 0;
-unsigned long async_memory_reclaim_status = 0;
+unsigned long async_memory_reclaim_status = 1;
+
+unsigned long file_area_in_update_count;
+unsigned long file_area_in_update_lock_count;
 
 static void inline file_area_access_count_clear(struct file_area *p_file_area)
 {
@@ -39,16 +42,21 @@ static int inline is_file_area_move_list_head(struct file_area *p_file_area)
 		return 1;
 	}
 #else
-	/*如果上个周期file_area被访问过，下个周期file_area又被访问，则也把file_area移动到链表头。file_area_access_count_get(p_file_area) > 0
-	 *表示上个周期file_area被访问过，hot_cold_file_global_info.global_age - p_file_area->file_area_age == 1表示是连续的两个周期*/
-	if((hot_cold_file_global_info.global_age - p_file_area->file_area_age == 1) && (file_area_access_count_get(p_file_area) > 0))
+	/*如果file_area在两个周期及以上，至少有两个周期file_aera被访问了，才把file_area移动到各自的链表头。比如在global_age周期5被访问了1次，
+	 *file_area->file_area_age被赋值5 ,file_area->access_count被赋值1。等到global_age周期7，file_area又被访问了。此时age_dx=7-5=2，大于0且小于
+	 FILE_AREA_MOVE_HEAD_DX，file_area->access_count又大于0，说明file_area在周期5或6被访问过一次而大于0 。那也有可能是周期7被访问导致大于0
+	 的呀????????不可能，因为file_area在新的周期被访问后，要先对file_area=global_age，且对file_area->access_count清0 .age_dx大于0且
+	 ,file_area->access_count大于1，一定file_area在前几个周期被访问过。现在执行is_file_area_move_list_head()函数说明当前周期又被访问了。
+	 最终效果，检测出file_area至少在连续的多个周期被访问了两次，则都移动链表头。不是一次就移动链表头主要是为了过滤一时的抖动访问。*/
+	int age_dx = hot_cold_file_global_info.global_age - p_file_area->file_area_age;
+	if((age_dx > 0 && age_dx < FILE_AREA_MOVE_HEAD_DX) && (file_area_access_count_get(p_file_area) > 0))
 		return 1;
 #endif	
 	return 0;
 }
 static int inline is_file_area_hot(struct file_area *p_file_area)
 {
-    if(file_area_in_temp_list(p_file_area) && file_area_access_count_get(p_file_area) > FILE_AREA_HOT_LEVEL)
+    if(file_area_access_count_get(p_file_area) > FILE_AREA_HOT_LEVEL)
         return 1;
 
     return 0;
@@ -56,6 +64,201 @@ static int inline is_file_area_hot(struct file_area *p_file_area)
 /* 统计page的冷热信息、是否refault。返回0表示page和file_area没有，需要分配；返回1是成功返回；返回负数有出错
  *
  * */
+#if 1
+int hot_file_update_file_status(struct address_space *mapping,struct file_stat *p_file_stat,struct file_area *p_file_area,int access_count)
+{
+	//检测file_area被访问的次数，判断是否有必要移动到file_stat->hot、refault、temp等链表头
+	int file_area_move_list_head = is_file_area_move_list_head(p_file_area);
+    
+	file_area_in_update_count ++;
+	/*hot_cold_file_global_info.global_age更新了，把最新的global age更新到本次访问的file_area->file_area_age。并对
+	 * file_area->access_count清0，本周期被访问1次则加1.这段代码不管理会并发，只是一个赋值*/
+	if(p_file_area->file_area_age < hot_cold_file_global_info.global_age){
+		p_file_area->file_area_age = hot_cold_file_global_info.global_age;
+
+		/*file_area访问计数清0，这个必须放到is_file_area_move_list_head()后边，因为is_file_area_move_list_head()依赖这个访问计数*/
+		if(file_area_access_count_get(p_file_area))
+		    file_area_access_count_clear(p_file_area);
+	}
+
+	/*在file_stat被判定为热文件后，记录当时的global_age。在未来HOT_FILE_COLD_AGE_DX时间内该文件进去冷却期：hot_file_update_file_status()函数中
+	 *只更新该文件file_area的age后，然后函数返回，不再做其他操作，节省性能*/
+	if(p_file_stat->file_stat_hot_base_age && (p_file_stat->file_stat_hot_base_age + HOT_FILE_COLD_AGE_DX > hot_cold_file_global_info.global_age))
+		goto out;
+
+	/*file_area访问的次数加access_count，是原子操作，不用担心并发*/
+	file_area_access_count_add(p_file_area,access_count);
+
+    /*只有以下几种情况，才会执行下边spin_lock(&p_file_stat->file_stat_lock)里的代码
+	1：不管file_area处于file_stat的哪个链表，只要file_area_move_list_head大于0，就要移动到所处file_stat->file_area_temp、file_area_hot、
+	file_area_refault、file_area_free_temp、file_area_free 链表头
+	2: file_area处于 tmemp链表，但是单个周期内访问计数大于热file_area阀值，要晋级为热file_area
+	3：file_area处于in-free-list 链表，要晋级到refault链表
+	*/
+    if(file_area_in_temp_list(p_file_area)){
+		int hot_file_area = is_file_area_hot(p_file_area);
+
+        /*file_area连续几个周期访问且不是热文件，需要移动到file_stat->temp链表头*/
+		if(!hot_file_area && file_area_move_list_head){
+			/*能否把加锁代码放到if判断里边呢？这就违反加锁后判断状态原则了，因为在加锁过程file_area状态可能就变了。
+			 *解决办法是加锁后再判断一次状态。否则，可能发生file_area被其他进程并发移动到了file_stat->hot链表，
+			 这里却把它移动到了file_stat->temp链表头，状态错乱了。*/
+		    spin_lock(&p_file_stat->file_stat_lock);
+			file_area_in_update_lock_count ++;
+			if(file_area_in_temp_list(p_file_area) && !list_is_first(&p_file_area->file_area_list,&p_file_stat->file_area_temp)){
+				list_move(&p_file_area->file_area_list,&p_file_stat->file_area_temp);
+			}
+		    spin_unlock(&p_file_stat->file_stat_lock);
+		}
+		 /*上边只是file_area移动到各自的链表头，不能跨链表移动。因为异步内存回收线程可能正在回收当前file_stat各种链表上的file_area，
+		 *会把file_area移动到file_stat的各种链表，这里就不能随便移动该file_stat各种链表上的file_area了，会发生"遍历的链表成员被移动
+		 到其他链表，因为链表头变了导致的遍历陷入死循环"问题。跨链表移动是在下边进行，保证此时异步内存回收线程没有对file_stat在内存回收。*/
+
+		/*如果file_stat的file_area正处于正释放page状态，此时异步内存回收线程会遍历file_stat->file_area_temp、file_area_hot、file_area_refault、
+		 * file_area_free_temp、file_area_free 链表上的file_area。此时禁止hot_file_update_file_status()函数里将file_stat这些链表上的file_area
+		 * 跨链表移动。为什么？比如异步内存回收线程正遍历file_stat->file_area_free_temp 链表上的file_area1，但是hot_file_update_file_status()
+		 * 函数里因为这个file_area1被访问了，而把file_area1移动到了file_stat->file_area_refault链表头。然后异步内存回收线程与得到
+		 * file_area1在file_stat->file_area_free_temp链表的上一个file_area，此时得到到确是file_stat->file_area_refault链表头。相当于中途从
+		 * file_stat->file_area_free_temp链表跳到了file_stat->file_area_refault链表，遍历file_area。这样遍历链表将陷入死循环，因为这个循环的
+		 * 退出条件是遍历到最初的file_stat->file_area_free_temp链表头，但是现在只会遍历到file_stat->file_area_refault链表头，永远退不出循环。
+		 * 这种现象这里称为"遍历的链表成员被移动到其他链表，因为链表头变了导致的遍历陷入死循环"*/
+
+		else if(hot_file_area){/*file_area是热的*/
+		    spin_lock(&p_file_stat->file_stat_lock);
+			file_area_in_update_lock_count ++;
+			/*如果file_stat正在经历内存回收，则只是把热file_area移动到file_stat->temp链表头。否则直接移动到file_stat->hot链表*/
+	        //if(0 == file_stat_in_free_page(p_file_stat) && 0 == file_stat_in_free_page_done(p_file_stat))
+			if(file_stat_in_file_stat_temp_head_list(p_file_stat)){
+				/*热file_area，则把该file_area移动到file_area_hot链表。必须这里加锁后再判断一次file_area状态，因为可能异步内存回收线程里改变了
+				 *它的状态并移动到了其他file_stat的file_area链表。这就是加锁后再判断一次状态理论*/
+				if(file_area_in_temp_list(p_file_area)){
+					clear_file_area_in_temp_list(p_file_area);
+					//设置file_area 处于 file_area_hot链表
+					set_file_area_in_hot_list(p_file_area);
+					//把file_area移动到file_area_hot链表头，将来这些file_area很少访问了，还会再降级移动回file_area_temp链表头
+					list_move(&p_file_area->file_area_list,&p_file_stat->file_area_hot);
+					//一个周期内产生的热file_area个数
+					hot_cold_file_global_info.hot_cold_file_shrink_counter.hot_file_area_count_one_period ++;
+					//该文件的热file_stat数加1
+					p_file_stat->file_area_hot_count ++;
+
+					/*这段代码测试热文件的，后续删除掉!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+					 *!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+					 *!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!*/
+					if(p_file_stat->file_area_hot_count > 100){
+                        spin_lock(&hot_cold_file_global_info.global_lock);
+						set_file_stat_in_file_stat_hot_head_list(p_file_stat);
+						list_move(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.file_stat_hot_head);
+						spin_unlock(&hot_cold_file_global_info.global_lock);
+						p_file_stat->file_stat_hot_base_age = hot_cold_file_global_info.global_age;
+					}
+				}
+			}else{
+				/*否则，说明file_stat此时正在内存回收，不能跨链表移动，只能先暂时移动到链表头。等内存回收结束，会遍历链表头的file_area
+				 *此时会把这些file_area移动到file_stat->hot链表*/
+				if(!list_is_first(&p_file_area->file_area_list,&p_file_stat->file_area_temp))
+					list_move(&p_file_area->file_area_list,&p_file_stat->file_area_temp);
+			}
+		    spin_unlock(&p_file_stat->file_stat_lock);
+		}
+		/*如果file_area处于temp链表，但是p_file_area->shrink_time不是0.这说明该file_area在之前walk_throuth_all_file_area()函数中扫描
+		  判定该file_area是冷的，然后回收内存page。但是回收内存时，正好这个file_area又被访问了，则把file_area移动到file_stat->file_area_temp
+		  链表。但是内存回收流程执行到cold_file_isolate_lru_pages()函数因并发问题没发现该file_area最近被访问了，只能继续回收该file_area的page。
+		  需要避免回收这种热file_area的page。于是等该file_area下次被访问，执行到这里，if成立，把该file_area移动到file_stat->file_area_refault
+		  链表。这样未来一段较长时间可以避免再次回收该file_area的page。具体详情看cold_file_isolate_lru_pages()函数里的注释*/
+		else if(p_file_area->shrink_time != 0){//这个if是可能成立的，不能删除!!!!!!!!!!!!!!!
+			printk("%s refaut 0x%llx shrink_time:%d\n",__func__,(u64)p_file_area,p_file_area->shrink_time);
+			p_file_area->shrink_time = 0;
+		    
+			spin_lock(&p_file_stat->file_stat_lock);
+			clear_file_area_in_temp_list(p_file_area);
+			set_file_area_in_refault_list(p_file_area);
+			list_move(&p_file_area->file_area_list,&p_file_stat->file_area_refault);
+		    spin_unlock(&p_file_stat->file_stat_lock);
+
+			//一个周期内产生的refault file_area个数
+			hot_cold_file_global_info.hot_cold_file_shrink_counter.refault_file_area_count_one_period ++;
+			hot_cold_file_global_info.all_refault_count ++;
+			hot_cold_file_global_info.refault_file_area_count_in_free_page ++;
+		}
+	}else if(file_area_in_free_list(p_file_area)){
+		
+		spin_lock(&p_file_stat->file_stat_lock);
+
+		file_area_in_update_lock_count ++;
+		/*file_stat处于内存回收时，只是把file_area移动到file_stat->free链表头。否则直接把file_area移动到file_stat->temp或file_stat->refault链表*/
+		if(file_stat_in_file_stat_temp_head_list(p_file_stat)){
+
+			clear_file_area_in_free_list(p_file_area);
+			//file_area 的page被内存回收后，过了仅N秒左右就又被访问则发生了refault，把该file_area移动到file_area_refault链表，不再参与内存回收扫描!!!!需要设个保护期限制
+			smp_rmb();
+			if(p_file_area->shrink_time && (ktime_to_ms(ktime_get()) - (p_file_area->shrink_time << 10) < 60000)){
+				p_file_area->shrink_time = 0;
+				set_file_area_in_refault_list(p_file_area);
+				list_move(&p_file_area->file_area_list,&p_file_stat->file_area_refault);
+				//一个周期内产生的refault file_area个数
+				hot_cold_file_global_info.hot_cold_file_shrink_counter.refault_file_area_count_one_period ++;
+				hot_cold_file_global_info.all_refault_count ++;
+				hot_cold_file_global_info.refault_file_area_count_in_free_page ++;
+			}else{
+				p_file_area->shrink_time = 0;
+				//file_area此时正在被内存回收而移动到了file_stat的free_list或free_temp_list链表，则直接移动到file_stat->file_area_temp链表头
+				set_file_area_in_temp_list(p_file_area);
+				list_move(&p_file_area->file_area_list,&p_file_stat->file_area_temp);
+			}
+        }
+		/*如果file_area处于in_free_list链表，第1次访问就移动到链表头。因为这种file_area可能被判定为refault file_araa，精度要求高.file_area在内存回收
+		 *时一直是in_free_list状态，状态不会改变，也不会移动到其他链表！这个时间可能被频繁访问，只有每个周期内第一次被访问才移动到俩表头*/
+		//if(file_area_in_free_list(p_file_area) && file_area_access_count_get(p_file_area) == 1)
+		else
+		{
+			if(file_stat_in_free_page(p_file_stat)){//file_stat是in_free_page状态且file_area在file_stat->file_area_free_temp链表
+				if(!list_is_first(&p_file_area->file_area_list,&p_file_stat->file_area_free_temp))
+					list_move(&p_file_area->file_area_list,&p_file_stat->file_area_free_temp);
+			}else if(file_stat_in_free_page_done(p_file_stat)){//file_stat是in_free_page_done状态且file_area在file_stat->file_area_free链表
+				if(!list_is_first(&p_file_area->file_area_list,&p_file_stat->file_area_free))
+					list_move(&p_file_area->file_area_list,&p_file_stat->file_area_free);
+			}else{
+                panic("%s file_stat:0x%llx status:0x%lx error\n",__func__,(u64)p_file_stat,p_file_stat->file_stat_status);
+			}
+		}
+
+		spin_unlock(&p_file_stat->file_stat_lock);
+	}else{
+	/*如果file_area在当前周期第2次被访问，则把移动到file_stat->file_area_temp、file_area_hot、file_area_refault等链表头，该链表头的file_area
+	 *访问比较频繁，链表尾的file_area很少访问。将来walk_throuth_all_file_area()内存回收时，直接从这些链表尾遍历file_area即可，链表尾的都是冷
+	 file_area。随之而来一个难题就是，file_area每个周期第几次被访问移动到链表头呢？最开始是1，现在改成每个周期第2次被访问再移动到链表头了。
+	 因为可能有不少file_area一个周期就访问一次，就移动到链表头，性能损耗比较大，因为这个过程要spin_lock加锁。这样的话就又有一个新的问题，
+	 如果file_area不是第一次访问就移动到链表头，那链表尾的file_area就不全是冷file_area了。因为链表头掺杂着最近刚访问但是只访问了一次的file_area，
+	 这是热file_area！针对这个问题的解决方法是，在异步内存回收线程依次执行get_file_area_from_file_stat_list、free_page_from_file_area、
+	 walk_throuth_all_file_area函数，从file_stat->file_area_temp、file_area_hot、file_area_refault链表尾遍历file_area时，发现了热file_area，即
+	 file_area的age接近global age，但是file_area的访问次数是1，那还要继续遍历链表，直到连续遇到3~5个热file_area时，才能说明这个链表没冷file_area
+	 了，再结束遍历。
+	 
+	 这是最初的策略，现在修改成file_area被访问则移动到file_stat的hot、refault、temp链表头，要经过前边的
+	 file_area_move_list_head = is_file_area_move_list_head(p_file_area)判断，file_area_move_list_head为1才会把file_area移动到链表头
+	 */
+
+		if(file_area_move_list_head){
+			/*能否把加锁代码放到if判断里边呢？这就违反加锁后判断状态原则了，因为在加锁过程file_area状态可能就变了。
+			 *解决办法是加锁后再判断一次状态，太麻烦了。后续看情况再决定咋优化吧*/
+	        spin_lock(&p_file_stat->file_stat_lock);
+			file_area_in_update_lock_count ++;
+			
+			if(file_area_in_hot_list(p_file_area) && !list_is_first(&p_file_area->file_area_list,&p_file_stat->file_area_hot)){
+				list_move(&p_file_area->file_area_list,&p_file_stat->file_area_hot);
+			}else if(file_area_in_refault_list(p_file_area) && !list_is_first(&p_file_area->file_area_list,&p_file_stat->file_area_refault)){
+				list_move(&p_file_area->file_area_list,&p_file_stat->file_area_refault);
+			}
+
+	        spin_unlock(&p_file_stat->file_stat_lock);
+		}
+	}
+
+out:
+    return 1;
+}
+#else
 int hot_file_update_file_status(struct address_space *mapping,struct file_stat *p_file_stat,struct file_area *p_file_area,int access_count)
 {
 	int file_area_move_list_head = 0;
@@ -109,8 +312,6 @@ int hot_file_update_file_status(struct address_space *mapping,struct file_stat *
 		hot_cold_file_global_info.hot_cold_file_shrink_counter.find_file_area_from_tree_not_lock_count ++;
 		goto out;
 	}
-
-	return 1;
 
 	spin_lock(&p_file_stat->file_stat_lock);
 	
@@ -232,6 +433,7 @@ int hot_file_update_file_status(struct address_space *mapping,struct file_stat *
 out:
         return 1;
 }
+#endif
 EXPORT_SYMBOL(hot_file_update_file_status);
 
 static int walk_throuth_all_file_area(struct hot_cold_file_global *p_hot_cold_file_global)
@@ -405,6 +607,8 @@ static int hot_cold_file_thread(void *p){
 		{
 	        //每个周期global_age加1
 	        hot_cold_file_global_info.global_age ++;
+			file_area_in_update_lock_count = 0;
+			file_area_in_update_count = 0;
 			walk_throuth_all_file_area(p_hot_cold_file_global);
 			//walk_throuth_all_mmap_file_area(p_hot_cold_file_global);
 		}
@@ -469,6 +673,6 @@ static int __init hot_cold_file_init(void)
 
 	}
 	
-        return 0;
+    return 0;
 }
 subsys_initcall(hot_cold_file_init);
