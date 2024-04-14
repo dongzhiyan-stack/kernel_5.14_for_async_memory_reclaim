@@ -9,6 +9,7 @@ unsigned long async_memory_reclaim_status = 1;
 
 unsigned long file_area_in_update_count;
 unsigned long file_area_in_update_lock_count;
+unsigned long file_area_move_to_head_count;
 
 static void inline file_area_access_count_clear(struct file_area *p_file_area)
 {
@@ -105,6 +106,7 @@ int hot_file_update_file_status(struct address_space *mapping,struct file_stat *
 			 这里却把它移动到了file_stat->temp链表头，状态错乱了。*/
 		    spin_lock(&p_file_stat->file_stat_lock);
 			file_area_in_update_lock_count ++;
+			file_area_move_to_head_count ++;
 			if(file_area_in_temp_list(p_file_area) && !list_is_first(&p_file_area->file_area_list,&p_file_stat->file_area_temp)){
 				list_move(&p_file_area->file_area_list,&p_file_stat->file_area_temp);
 			}
@@ -154,6 +156,7 @@ int hot_file_update_file_status(struct address_space *mapping,struct file_stat *
 					}
 				}
 			}else{
+				file_area_move_to_head_count ++;
 				/*否则，说明file_stat此时正在内存回收，不能跨链表移动，只能先暂时移动到链表头。等内存回收结束，会遍历链表头的file_area
 				 *此时会把这些file_area移动到file_stat->hot链表*/
 				if(!list_is_first(&p_file_area->file_area_list,&p_file_stat->file_area_temp))
@@ -212,6 +215,7 @@ int hot_file_update_file_status(struct address_space *mapping,struct file_stat *
 		//if(file_area_in_free_list(p_file_area) && file_area_access_count_get(p_file_area) == 1)
 		else
 		{
+			file_area_move_to_head_count ++;
 			if(file_stat_in_free_page(p_file_stat)){//file_stat是in_free_page状态且file_area在file_stat->file_area_free_temp链表
 				if(!list_is_first(&p_file_area->file_area_list,&p_file_stat->file_area_free_temp))
 					list_move(&p_file_area->file_area_list,&p_file_stat->file_area_free_temp);
@@ -244,6 +248,7 @@ int hot_file_update_file_status(struct address_space *mapping,struct file_stat *
 			 *解决办法是加锁后再判断一次状态，太麻烦了。后续看情况再决定咋优化吧*/
 	        spin_lock(&p_file_stat->file_stat_lock);
 			file_area_in_update_lock_count ++;
+			file_area_move_to_head_count ++;
 			
 			if(file_area_in_hot_list(p_file_area) && !list_is_first(&p_file_area->file_area_list,&p_file_stat->file_area_hot)){
 				list_move(&p_file_area->file_area_list,&p_file_stat->file_area_hot);
@@ -609,6 +614,7 @@ static int hot_cold_file_thread(void *p){
 	        hot_cold_file_global_info.global_age ++;
 			file_area_in_update_lock_count = 0;
 			file_area_in_update_count = 0;
+			file_area_move_to_head_count = 0;
 			walk_throuth_all_file_area(p_hot_cold_file_global);
 			//walk_throuth_all_mmap_file_area(p_hot_cold_file_global);
 		}

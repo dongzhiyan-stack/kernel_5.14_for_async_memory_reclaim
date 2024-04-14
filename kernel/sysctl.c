@@ -110,6 +110,8 @@
 extern unsigned long xarray_tree_node_cache_hit;
 extern unsigned long file_area_in_update_count;
 extern unsigned long file_area_in_update_lock_count;
+extern unsigned long file_area_move_to_head_count;
+extern unsigned long open_file_area_printk;
 
 /* Constants used for minimum and  maximum */
 #ifdef CONFIG_LOCKUP_DETECTOR
@@ -2582,6 +2584,8 @@ static struct ctl_table vm_table[] = {
 		.maxlen		= sizeof(xarray_tree_node_cache_hit),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_TWO_HUNDRED,
 	},
 	{
 		.procname	= "file_area_in_update_count",
@@ -2589,6 +2593,8 @@ static struct ctl_table vm_table[] = {
 		.maxlen		= sizeof(file_area_in_update_count),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_TWO_HUNDRED,
 	},
 	{
 		.procname	= "file_area_in_update_lock_count",
@@ -2596,8 +2602,27 @@ static struct ctl_table vm_table[] = {
 		.maxlen		= sizeof(file_area_in_update_lock_count),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_TWO_HUNDRED,
 	},
-
+	{
+		.procname	= "file_area_move_to_head_count",
+		.data		= &file_area_move_to_head_count,
+		.maxlen		= sizeof(file_area_move_to_head_count),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_TWO_HUNDRED,
+	},
+	{
+		.procname	= "open_file_area_printk",
+		.data		= &open_file_area_printk,
+		.maxlen		= sizeof(open_file_area_printk),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_TWO_HUNDRED,
+	},
 
 
 #ifdef CONFIG_HUGETLB_PAGE

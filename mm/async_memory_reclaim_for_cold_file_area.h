@@ -54,9 +54,8 @@
 #include <linux/proc_fs.h>
 #include <linux/xarray.h>
 
-//使能kprobe打点文件页page读写必然执行的copy_page_to_iter、copy_page_from_iter_atomic等函数
-#define CONFIG_ENABLE_KPROBE
 
+#define ASYNC_MEMORY_RECLAIM_IN_KERNEL
 //一个file_stat结构里缓存的热file_area结构个数
 #define FILE_AREA_CACHE_COUNT 3
 //置1才允许异步内存回收
@@ -643,7 +642,62 @@ extern int shrink_page_printk_open1;
 //不怎么关键的调试信息
 extern int shrink_page_printk_open;
 extern unsigned long async_memory_reclaim_status;
+extern unsigned long  open_file_area_printk;
 
+#define FILE_AREA_PAGE_COUNT_SHIFT (XA_CHUNK_SHIFT + PAGE_COUNT_IN_AREA_SHIFT)//6+2
+#define FILE_AREA_PAGE_COUNT_MASK ((1 << FILE_AREA_PAGE_COUNT_SHIFT) - 1)//0xFF 
+
+//file_area->file_area_state 的bit31~bit28 这个4个bit位标志file_area
+//#define PAGE_BIT_OFFSET_IN_FILE_AREA_BASE (sizeof(&p_file_area->file_area_state)*8 - PAGE_COUNT_IN_AREA)//28  这个编译不通过!!!!!!!!!!!!!
+#define PAGE_BIT_OFFSET_IN_FILE_AREA_BASE (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA)//28
+
+static inline struct file_area *entry_to_file_area(void * file_area_entry)
+{
+    return (struct file_area *)((unsigned long)file_area_entry | 0x8000000000000000);
+}
+static inline void *file_area_to_entry(struct file_area *p_file_area)
+{
+    return (void *)((unsigned long)p_file_area & 0x7fffffffffffffff);
+}
+static inline int is_file_area_entry(void *file_area_entry)
+{
+	//最高的4个bit位依次是 0、1、1、1 则说明是file_area_entry，bit0和bit1也得是1
+    return ((unsigned long)file_area_entry & 0xF000000000000003) == 0x7000000000000000;
+}
+static inline void clear_file_area_page_bit(struct file_area *p_file_area,unsigned char page_offset_in_file_area)
+{
+    unsigned int file_area_page_bit_clear = ~(1 << (PAGE_BIT_OFFSET_IN_FILE_AREA_BASE + page_offset_in_file_area));
+    unsigned int file_area_page_bit_set = 1 << (PAGE_BIT_OFFSET_IN_FILE_AREA_BASE + page_offset_in_file_area);
+	//如果这个page在 p_file_area->file_area_state对应的bit位没有置1，触发panic
+	//if((p_file_area->file_area_state | file_area_page_bit_clear) != (sizeof(&p_file_area->file_area_state)*8 - 1))
+	if((p_file_area->file_area_state & file_area_page_bit_set) == 0)
+		panic("%s file_area:0x%llx file_area_state:0x%x page_offset_in_file_area:%d file_area_page_bit_set:0x%x already clear\n",__func__,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,file_area_page_bit_set);
+    
+	//page在 p_file_area->file_area_state对应的bit位清0
+	p_file_area->file_area_state = p_file_area->file_area_state & file_area_page_bit_clear;
+
+}
+static inline void set_file_area_page_bit(struct file_area *p_file_area,unsigned char page_offset_in_file_area)
+{
+    unsigned int file_area_page_bit_set = 1 << (PAGE_BIT_OFFSET_IN_FILE_AREA_BASE + page_offset_in_file_area);
+	//如果这个page在 p_file_area->file_area_state对应的bit位已经置1了，触发panic
+	if(p_file_area->file_area_state & file_area_page_bit_set)
+		panic("%s file_area:0x%llx file_area_state:0x%x page_offset_in_file_area:%d file_area_page_bit_set:0x%x already set\n",__func__,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,file_area_page_bit_set);
+    
+	//page在 p_file_area->file_area_state对应的bit位置1
+	p_file_area->file_area_state = p_file_area->file_area_state | file_area_page_bit_set;
+}
+//测试page_offset_in_file_area这个位置的page在p_file_area->file_area_state对应的bit位是否置1了
+static inline int is_file_area_page_bit_set(struct file_area *p_file_area,unsigned char page_offset_in_file_area)
+{
+	 unsigned int file_area_page_bit_set = 1 << (PAGE_BIT_OFFSET_IN_FILE_AREA_BASE + page_offset_in_file_area);
+
+     return (p_file_area->file_area_state & file_area_page_bit_set);
+}
+static inline int file_area_have_page(struct file_area *p_file_area)
+{
+    return  (p_file_area->file_area_state & ~((1 << PAGE_BIT_OFFSET_IN_FILE_AREA_BASE) - 1));//0XF000 0000
+}
 static inline void lock_file_stat(struct file_stat * p_file_stat,int not_block){
 	//如果有其他进程对file_stat的lock加锁，while成立，则休眠等待这个进程释放掉lock，然后自己加锁
 	while(test_and_set_bit_lock(F_file_stat_lock, &p_file_stat->file_stat_status)){

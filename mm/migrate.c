@@ -56,6 +56,7 @@
 #include <trace/events/migrate.h>
 
 #include "internal.h"
+#include "async_memory_reclaim_for_cold_file_area.h"
 
 int isolate_movable_page(struct page *page, isolate_mode_t mode)
 {
@@ -369,14 +370,20 @@ static int expected_page_refs(struct address_space *mapping, struct page *page)
  * 2 for pages with a mapping
  * 3 for pages with a mapping and PagePrivate/PagePrivate2 set.
  */
-int folio_migrate_mapping(struct address_space *mapping,
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+int folio_migrate_mapping_for_file_area(struct address_space *mapping,
 		struct folio *newfolio, struct folio *folio, int extra_count)
 {
-	XA_STATE(xas, &mapping->i_pages, folio_index(folio));
+	//XA_STATE(xas, &mapping->i_pages, folio_index(folio));
+	XA_STATE(xas, &mapping->i_pages, folio_index(folio) >> PAGE_COUNT_IN_AREA_SHIFT);
 	struct zone *oldzone, *newzone;
 	int dirty;
 	int expected_count = expected_page_refs(mapping, &folio->page) + extra_count;
 	long nr = folio_nr_pages(folio);
+
+	struct file_area *p_file_area;
+    //令page索引与上0x3得到它在file_area的pages[]数组的下标
+	unsigned int page_offset_in_file_area = folio_index(folio) & PAGE_COUNT_IN_AREA_MASK;
 
 	if (!mapping) {
 		/* Anonymous page without mapping */
@@ -391,6 +398,134 @@ int folio_migrate_mapping(struct address_space *mapping,
 
 		return MIGRATEPAGE_SUCCESS;
 	}
+
+	oldzone = folio_zone(folio);
+	newzone = folio_zone(newfolio);
+
+	xas_lock_irq(&xas);
+	if (!folio_ref_freeze(folio, expected_count)) {
+		xas_unlock_irq(&xas);
+		return -EAGAIN;
+	}
+
+	/*
+	 * Now we know that no one else is looking at the folio:
+	 * no turning back from here.
+	 */
+	newfolio->index = folio->index;
+	newfolio->mapping = folio->mapping;
+	folio_ref_add(newfolio, nr); /* add cache reference */
+	if (folio_test_swapbacked(folio)) {
+		__folio_set_swapbacked(newfolio);
+		if (folio_test_swapcache(folio)) {
+			folio_set_swapcache(newfolio);
+			newfolio->private = folio_get_private(folio);
+		}
+	} else {
+		VM_BUG_ON_FOLIO(folio_test_swapcache(folio), folio);
+	}
+
+	/* Move dirty while page refs frozen and newpage not yet exposed */
+	dirty = folio_test_dirty(folio);
+	if (dirty) {
+		folio_clear_dirty(folio);
+		folio_set_dirty(newfolio);
+	}
+
+	//xas_store(&xas, newfolio);
+	p_file_area = (struct file_area *)xas_load(&xas);
+	if(!p_file_area || !is_file_area_entry(p_file_area))
+        panic("%s mapping:0x%llx p_file_area:0x%llx error\n",__func__,(u64)mapping,(u64)p_file_area);
+
+	p_file_area = entry_to_file_area(p_file_area);
+    if(folio != (struct folio *)p_file_area->pages[page_offset_in_file_area]){
+        panic("%s mapping:0x%llx folio:0x%llx != p_file_area->pages:0x%llx\n",__func__,(u64)mapping,(u64)folio,(u64)p_file_area->pages[page_offset_in_file_area]);
+	}
+	p_file_area->pages[page_offset_in_file_area] = newfolio;
+	if(open_file_area_printk)
+        printk("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx newfolio:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,(u64)newfolio,page_offset_in_file_area);
+
+
+	/*
+	 * Drop cache reference from old page by unfreezing
+	 * to one less reference.
+	 * We know this isn't the last reference.
+	 */
+	folio_ref_unfreeze(folio, expected_count - nr);
+
+	xas_unlock(&xas);
+	/* Leave irq disabled to prevent preemption while updating stats */
+
+	/*
+	 * If moved to a different zone then also account
+	 * the page for that zone. Other VM counters will be
+	 * taken care of when we establish references to the
+	 * new page and drop references to the old page.
+	 *
+	 * Note that anonymous pages are accounted for
+	 * via NR_FILE_PAGES and NR_ANON_MAPPED if they
+	 * are mapped to swap space.
+	 */
+	if (newzone != oldzone) {
+		struct lruvec *old_lruvec, *new_lruvec;
+		struct mem_cgroup *memcg;
+
+		memcg = folio_memcg(folio);
+		old_lruvec = mem_cgroup_lruvec(memcg, oldzone->zone_pgdat);
+		new_lruvec = mem_cgroup_lruvec(memcg, newzone->zone_pgdat);
+
+		__mod_lruvec_state(old_lruvec, NR_FILE_PAGES, -nr);
+		__mod_lruvec_state(new_lruvec, NR_FILE_PAGES, nr);
+		if (folio_test_swapbacked(folio) && !folio_test_swapcache(folio)) {
+			__mod_lruvec_state(old_lruvec, NR_SHMEM, -nr);
+			__mod_lruvec_state(new_lruvec, NR_SHMEM, nr);
+		}
+#ifdef CONFIG_SWAP
+		if (folio_test_swapcache(folio)) {
+			__mod_lruvec_state(old_lruvec, NR_SWAPCACHE, -nr);
+			__mod_lruvec_state(new_lruvec, NR_SWAPCACHE, nr);
+		}
+#endif
+		if (dirty && mapping_can_writeback(mapping)) {
+			__mod_lruvec_state(old_lruvec, NR_FILE_DIRTY, -nr);
+			__mod_zone_page_state(oldzone, NR_ZONE_WRITE_PENDING, -nr);
+			__mod_lruvec_state(new_lruvec, NR_FILE_DIRTY, nr);
+			__mod_zone_page_state(newzone, NR_ZONE_WRITE_PENDING, nr);
+		}
+	}
+	local_irq_enable();
+
+	return MIGRATEPAGE_SUCCESS;
+}
+#endif
+int folio_migrate_mapping(struct address_space *mapping,
+		struct folio *newfolio, struct folio *folio, int extra_count)
+{
+	XA_STATE(xas, &mapping->i_pages, folio_index(folio));
+	struct zone *oldzone, *newzone;
+	int dirty;
+	int expected_count = expected_page_refs(mapping, &folio->page) + extra_count;
+	long nr = folio_nr_pages(folio);
+
+
+	if (!mapping) {
+		/* Anonymous page without mapping */
+		if (folio_ref_count(folio) != expected_count)
+			return -EAGAIN;
+
+		/* No turning back from here */
+		newfolio->index = folio->index;
+		newfolio->mapping = folio->mapping;
+		if (folio_test_swapbacked(folio))
+			__folio_set_swapbacked(newfolio);
+
+		return MIGRATEPAGE_SUCCESS;
+	}
+
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+	if(mapping->rh_reserved1)
+		return folio_migrate_mapping_for_file_area(mapping,newfolio,folio,extra_count);
+#endif
 
 	oldzone = folio_zone(folio);
 	newzone = folio_zone(newfolio);
