@@ -88,8 +88,10 @@ inline struct  file_area * find_file_area_from_xarray_cache_node(struct xa_state
     //这段代码必须放到rcu lock里，保证node结构不会被释放
 	//判断要查找的page是否在xarray tree的cache node里
 	if(p_file_stat->xa_node_cache){
-	    //这个内存屏障为了确保delete page函数里，释放掉node后，对p_file_stat->xa_node_cache_base_index 赋值0，执行这个函数的进程在新的rcu周期立即感知到
-	    smp_rmb();
+	    /*这个内存屏障为了确保delete page函数里，释放掉node后，对p_file_stat->xa_node_cache_base_index 赋值0，执行这个函数的进程在新的rcu周期立即感知到。
+		 *调用这个函数的filemap_get_read_batch()和mapping_get_entry()已经执行了smp_rmb()，这里就不用重复调用了*/
+	    //smp_rmb();
+
 	    //要插在的page索引在缓存的node里
 	    if((index >= p_file_stat->xa_node_cache_base_index) && (index <= (p_file_stat->xa_node_cache_base_index + FILE_AREA_PAGE_COUNT_MASK))){
 			//unsigned int xa_offset = index & FILE_AREA_PAGE_COUNT_MASK;
@@ -102,8 +104,9 @@ inline struct  file_area * find_file_area_from_xarray_cache_node(struct xa_state
 			//if(p_file_area && !xa_is_zero(p_file_area) && !xa_is_retry(p_file_area) && !xa_is_value(p_file_area) && p_file_area->start_index == index & PAGE_COUNT_IN_AREA){
 			if(is_file_area_entry(p_file_area)){
 				p_file_area = entry_to_file_area(p_file_area);
-                if(open_file_area_printk)
+                if(open_file_area_printk){
                     printk("%s p_file_stat:0x%llx xa_node_cache:0x%llx cache_base_index:%ld index:%ld %s\n",__func__,(u64)p_file_stat,(u64)p_file_stat->xa_node_cache,p_file_stat->xa_node_cache_base_index,index,p_file_area->start_index == (index & ~PAGE_COUNT_IN_AREA_MASK)?"find ok":"find fail");
+				}
 				if(p_file_area->start_index == (index & ~PAGE_COUNT_IN_AREA_MASK)){
 				    xas->xa_offset = xa_offset;
 				    xas->xa_node = xa_node_parent;
@@ -122,6 +125,14 @@ inline struct  file_area * find_file_area_from_xarray_cache_node(struct xa_state
 	}
     return NULL;
 }
+void disable_mapping_file_area(struct inode *inode)
+{
+    if(open_file_area_printk){	
+        printk("%s mapping:0x%llx file_stat:0x%lx\n",__func__,(u64)inode->i_mapping,inode->i_mapping->rh_reserved1);
+	}
+    inode->i_mapping->rh_reserved1 = 0;
+}
+EXPORT_SYMBOL(disable_mapping_file_area);
 /*
  * Shared mappings implemented 30.11.1994. It's not fully working yet,
  * though.
@@ -223,8 +234,9 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
         panic("%s mapping:0x%llx folio:0x%llx != p_file_area->pages:0x%llx\n",__func__,(u64)mapping,(u64)folio,(u64)p_file_area->pages[page_offset_in_file_area]);
 	}
 	p_file_area->pages[page_offset_in_file_area] = NULL;
-	if(open_file_area_printk)
+	if(open_file_area_printk){
         printk("%s mapping:0x%llx folio:0x%llx index:%ld p_file_area:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)folio,folio->index,(u64)p_file_area,page_offset_in_file_area);
+	}
 	
     folio->mapping = NULL;
     mapping->nrpages -= nr;
@@ -273,8 +285,11 @@ static void page_cache_delete(struct address_space *mapping,
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 	/*page的从xarray tree delete和 保存到xarray tree 两个过程因为加锁防护，不会并发执行，因此不用担心下边的
 	 *找到的folio是file_area*/
-	if(mapping->rh_reserved1)
-		return page_cache_delete_for_file_area(mapping,folio,shadow);
+	if(mapping->rh_reserved1){
+		smp_rmb();
+	    if(mapping->rh_reserved1)
+		    return page_cache_delete_for_file_area(mapping,folio,shadow);
+	}
 #endif	
 
 	mapping_set_update(&xas, mapping);
@@ -506,8 +521,9 @@ find_page_from_file_area:
 		    p_file_stat->xa_node_cache_base_index = -1;
             p_file_stat->xa_node_cache = NULL;
 	    }
-	    if(open_file_area_printk)
+	    if(open_file_area_printk){
             printk("%s mapping:0x%llx folio:0x%llx index:%ld p_file_area:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)folio,folio->index,(u64)p_file_area,page_offset_in_file_area);
+		}
 
 		/*清理这个page在file_area->file_area_statue的对应的bit位，表示这个page被释放了*/
 		clear_file_area_page_bit(p_file_area,page_offset_in_file_area);
@@ -543,8 +559,11 @@ static void page_cache_delete_batch(struct address_space *mapping,
 	struct folio *folio;
 
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
-	if(mapping->rh_reserved1)
-		return page_cache_delete_batch_for_file_area(mapping,fbatch);
+	if(mapping->rh_reserved1){
+		smp_rmb();
+	    if(mapping->rh_reserved1)
+		    return page_cache_delete_batch_for_file_area(mapping,fbatch);
+	}
 #endif
 
 	mapping_set_update(&xas, mapping);
@@ -790,6 +809,9 @@ bool filemap_range_has_page_for_file_area(struct address_space *mapping,
 		break;
 	}
 	rcu_read_unlock();
+    if(open_file_area_printk){
+        printk("%s mapping:0x%llx p_file_area:0x%llx start_byte:%lld end_byte:%lld\n",__func__,(u64)mapping,(u64)p_file_area,start_byte,end_byte);
+	}
 
 	//return page != NULL;
 	
@@ -806,8 +828,11 @@ bool filemap_range_has_page(struct address_space *mapping,
 
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 find_file_area:
-	if(mapping->rh_reserved1)
-		return filemap_range_has_page_for_file_area(mapping,start_byte,end_byte);
+	if(mapping->rh_reserved1){
+		smp_rmb();
+	    if(mapping->rh_reserved1)
+		    return filemap_range_has_page_for_file_area(mapping,start_byte,end_byte);
+	}
 #endif
 
 	if (end_byte < start_byte)
@@ -1045,6 +1070,10 @@ next_page:
 			page_offset_in_file_area = 0;
 	}
 	rcu_read_unlock();
+    if(open_file_area_printk){
+        printk("%s mapping:0x%llx p_file_area:0x%llx start_byte:%lld end_byte:%lld page:0x%llx\n",__func__,(u64)mapping,(u64)p_file_area,start_byte,end_byte,(u64)page);
+	}
+
 	return page != NULL;
 }
 #endif
@@ -1056,8 +1085,11 @@ bool filemap_range_has_writeback(struct address_space *mapping,
 	struct page *page;
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 find_file_area:
-	if(mapping->rh_reserved1)
-		return filemap_range_has_writeback_for_file_area(mapping,start_byte,end_byte);
+	if(mapping->rh_reserved1){
+		smp_rmb();
+	    if(mapping->rh_reserved1)
+		    return filemap_range_has_writeback_for_file_area(mapping,start_byte,end_byte);
+	}
 #endif
 
 	if (end_byte < start_byte)
@@ -1274,8 +1306,9 @@ void replace_page_cache_page_for_file_area(struct page *old, struct page *new)
         panic("%s mapping:0x%llx old:0x%llx != p_file_area->pages:0x%llx\n",__func__,(u64)mapping,(u64)old,(u64)p_file_area->pages[page_offset_in_file_area]);
 	}
 	p_file_area->pages[page_offset_in_file_area] = fnew;
-	if(open_file_area_printk)
+	if(open_file_area_printk){
         printk("%s mapping:0x%llx p_file_area:0x%llx old:0x%llx fnew:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)old,(u64)fnew,page_offset_in_file_area);
+	}
 
 	old->mapping = NULL;
 	/* hugetlb pages do not participate in page cache accounting. */
@@ -1303,8 +1336,11 @@ void replace_page_cache_page(struct page *old, struct page *new)
 	XA_STATE(xas, &mapping->i_pages, offset);
 
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
-	if(mapping->rh_reserved1)
-		return replace_page_cache_page_for_file_area(old,new);
+	if(mapping->rh_reserved1){
+		smp_rmb();
+	    if(mapping->rh_reserved1)
+		    return replace_page_cache_page_for_file_area(old,new);
+	}
 #endif
 
 	VM_BUG_ON_PAGE(!PageLocked(old), old);
@@ -1356,8 +1392,9 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 	VM_BUG_ON_FOLIO(folio_test_swapbacked(folio), folio);
 	//mapping_set_update(&xas, mapping); shadow 操作，这里不再设置
-	if(open_file_area_printk)
+	if(open_file_area_printk){
         printk("%s mapping:0x%llx folio:0x%llx index:%ld area_index_for_page:%d\n",__func__,(u64)mapping,(u64)folio,index,area_index_for_page);
+	}
 
 	p_file_stat = (struct file_stat *)mapping->rh_reserved1;
 	if(!p_file_stat){
@@ -1451,8 +1488,10 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 
 find_file_area:
 	    set_file_area_page_bit(p_file_area,page_offset_in_file_area);
-		if(open_file_area_printk)
+		if(open_file_area_printk){
             printk("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx index:%ld page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,index,page_offset_in_file_area);
+		}
+
 		if(NULL != p_file_area->pages[page_offset_in_file_area])
             panic("%s p_file_area->pages:0x%llx != NULL error folio:0x%llx\n",__func__,(u64)p_file_area->pages[page_offset_in_file_area],(u64)folio);
 
@@ -2495,8 +2534,15 @@ find_page_from_file_area:
 			page_offset_in_file_area = 0;
 	}
 
+    if(open_file_area_printk){
+	    printk("%s mapping:0x%llx index:%ld return:%ld\n",__func__,(u64)mapping,index,xas.xa_index + page_offset_in_file_area);
+	}
 	//return xas.xa_index;
-	return (xas.xa_index + page_offset_in_file_area);
+	//return (xas.xa_index + page_offset_in_file_area);
+	
+	/*这里要返回第一个空洞page的索引，但xas.xa_index加1代表个(1<< PAGE_COUNT_IN_AREA_SHIFT)个page，因此
+	 * xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT才是真实的page索引*/
+	return ((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area);
 }
 #endif
 pgoff_t page_cache_next_miss(struct address_space *mapping,
@@ -2505,8 +2551,11 @@ pgoff_t page_cache_next_miss(struct address_space *mapping,
 	XA_STATE(xas, &mapping->i_pages, index);
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 find_file_area:
-	if(mapping->rh_reserved1)
-		return page_cache_next_miss_for_file_area(mapping,index,max_scan);
+	if(mapping->rh_reserved1){
+		smp_rmb();
+	    if(mapping->rh_reserved1)
+		    return page_cache_next_miss_for_file_area(mapping,index,max_scan);
+	}
 #endif
 
 	while (max_scan--) {
@@ -2595,8 +2644,12 @@ find_page_from_file_area:
 		}
 	}
 
+    if(open_file_area_printk){
+	    printk("%s mapping:0x%llx index:%ld return:%ld\n",__func__,(u64)mapping,index,xas.xa_index + page_offset_in_file_area);
+	}
 	//return xas.xa_index;
-	return (xas.xa_index + page_offset_in_file_area);
+	//return (xas.xa_index + page_offset_in_file_area);
+	return ((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area);
 }
 #endif
 pgoff_t page_cache_prev_miss(struct address_space *mapping,
@@ -2605,8 +2658,11 @@ pgoff_t page_cache_prev_miss(struct address_space *mapping,
 	XA_STATE(xas, &mapping->i_pages, index);
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 find_file_area:
-	if(mapping->rh_reserved1)
-		return page_cache_prev_miss_for_file_area(mapping,index,max_scan);
+	if(mapping->rh_reserved1){
+		smp_rmb();
+	    if(mapping->rh_reserved1)
+		    return page_cache_prev_miss_for_file_area(mapping,index,max_scan);
+	}
 #endif
 
 	while (max_scan--) {
@@ -2759,29 +2815,33 @@ out:
 	rcu_read_unlock();
     if(open_file_area_printk){
         printk("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx index:%ld xa_node_cache:0x%llx cache_base_index:%ld\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,index,(u64)p_file_stat->xa_node_cache,p_file_stat->xa_node_cache_base_index);
-    }
-
+	}
+    
 	return folio;
 }
-//这个函数可以加入node cache机制
+/*这个函数可以加入node cache机制*/
 void *get_folio_from_file_area(struct address_space *mapping,pgoff_t index)
 {
 	struct file_area *p_file_area;
-	struct folio *folio;
+	struct folio *folio = NULL;
 
 	rcu_read_lock();
-
-	p_file_area = xa_load(&mapping->i_pages,index >> PAGE_COUNT_IN_AREA_SHIFT);
-	if(!p_file_area)
-	{
-		folio = NULL;
-		goto out;
-	}
-	p_file_area = entry_to_file_area(p_file_area);
-	folio = p_file_area->pages[index & PAGE_COUNT_IN_AREA_MASK];
-
+	/*内存屏障后再探测mapping->rh_reserved1是否是0，即对应文件inode已经被释放了。那mapping已经失效*/
+    smp_rmb();
+	if(mapping->rh_reserved1){
+		p_file_area = xa_load(&mapping->i_pages,index >> PAGE_COUNT_IN_AREA_SHIFT);
+		if(!p_file_area)
+		{
+			goto out;
+		}
+		p_file_area = entry_to_file_area(p_file_area);
+		folio = p_file_area->pages[index & PAGE_COUNT_IN_AREA_MASK];
+    }
 out:
 	rcu_read_unlock();
+    if(open_file_area_printk){
+        printk("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx index:%ld\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,index);
+	}
 	
 	return (void *)folio;
 }
@@ -2801,7 +2861,9 @@ find_file_area:
 	 * 重新跳到filemap_get_read_batch_for_file_area()去xarray tree查找file_area
 	 * */
 	if(mapping->rh_reserved1){
-		return mapping_get_entry_for_file_area(mapping,index);
+		smp_rmb();
+	    if(mapping->rh_reserved1)
+		    return mapping_get_entry_for_file_area(mapping,index);
 	}
 #endif	
 
@@ -2986,8 +3048,12 @@ retry:
 		//folio = xas_find_marked(xas, max, mark);
 		*p_file_area = xas_find_marked(xas, file_area_max, mark);
 
-	if (!*p_file_area)
+	if (!*p_file_area){
+        if(open_file_area_printk){
+            printk("%s p_file_area NULL max:%ld xas.xa_index:%ld\n",__func__,max,xas->xa_index);
+		}
 		return NULL;
+	}
 
 	//if (xas_retry(xas, folio))
 	if (xas_retry(xas, *p_file_area))
@@ -3014,8 +3080,12 @@ find_page_from_file_area:
 	//if(!folio || folio->index > max)
 	if(!folio)
 		goto next_folio;
-	if(folio->index > max)
+	if(folio->index > max){
+        if(open_file_area_printk){
+            printk("%s p_file_area:0x%llx folio:0x%llx folio->index:%ld max:%ld xas.xa_index:%ld\n",__func__,(u64)*p_file_area,(u64)folio,folio->index,max,xas->xa_index);
+		}
 		return NULL;
+    }
 
 	if (!folio_try_get_rcu(folio))
 		goto reset;
@@ -3045,6 +3115,9 @@ next_folio:
 		 *然后调用者下次执行该函数，因为 *p_file_area 不是NULL，直接获取这个file_area的下一个page*/
 		if(!folio)
             goto find_page_from_file_area;
+	}
+    if(open_file_area_printk){
+        printk("%s p_file_area:0x%llx folio:0x%llx max:%ld xas.xa_index:%ld\n",__func__,(u64)*p_file_area,(u64)folio,max,xas->xa_index);
 	}
 	return folio;
 reset:
@@ -3131,6 +3204,10 @@ unsigned find_get_entries_for_file_area(struct address_space *mapping, pgoff_t s
 	}
 	rcu_read_unlock();
 
+    if(open_file_area_printk){
+        printk("%s mapping:0x%llx start:%ld end:%ld\n",__func__,(u64)mapping,start,end);
+	}
+
 	return folio_batch_count(fbatch);
 }
 #endif
@@ -3143,10 +3220,13 @@ unsigned find_get_entries(struct address_space *mapping, pgoff_t start,
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 find_file_area:
 	if(mapping->rh_reserved1){
-		/*如果fbatch->nr非0，说明下边for循环已经找到了一些page，那就清0失效，现在执行filemap_get_read_batch_for_file_area重新查找*/
-		if(fbatch->nr)
-			fbatch->nr = 0;
-		find_get_entries_for_file_area(mapping,start,end,fbatch,indices);
+		smp_rmb();
+	    if(mapping->rh_reserved1){
+		    /*如果fbatch->nr非0，说明下边for循环已经找到了一些page，那就清0失效，现在执行filemap_get_read_batch_for_file_area重新查找*/
+		    if(fbatch->nr)
+			    fbatch->nr = 0;
+		    find_get_entries_for_file_area(mapping,start,end,fbatch,indices);
+		}
 	}
 #endif
 
@@ -3232,6 +3312,9 @@ put:
 	}
 	rcu_read_unlock();
 
+    if(open_file_area_printk){
+        printk("%s mapping:0x%llx start:%ld end:%ld\n",__func__,(u64)mapping,start,end);
+	}
 	return folio_batch_count(fbatch);
 }
 #endif
@@ -3244,10 +3327,13 @@ unsigned find_lock_entries(struct address_space *mapping, pgoff_t start,
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 find_file_area:
 	if(mapping->rh_reserved1){
-		/*如果fbatch->nr非0，说明下边for循环已经找到了一些page，那就清0失效，现在执行filemap_get_read_batch_for_file_area重新查找*/
-		if(fbatch->nr)
-			fbatch->nr = 0;
-		return find_lock_entries_for_file_area(mapping,start,end,fbatch,indices);
+		smp_rmb();
+	    if(mapping->rh_reserved1){
+		    /*如果fbatch->nr非0，说明下边for循环已经找到了一些page，那就清0失效，现在执行filemap_get_read_batch_for_file_area重新查找*/
+		    if(fbatch->nr)
+			    fbatch->nr = 0;
+		    return find_lock_entries_for_file_area(mapping,start,end,fbatch,indices);
+	    }
 	}
 #endif
 
@@ -3339,6 +3425,10 @@ unsigned find_get_pages_range_for_file_area(struct address_space *mapping, pgoff
 	if (unlikely(!nr_pages))
 		return 0;
 
+    if(open_file_area_printk){
+        printk("%s mapping:0x%llx start:%ld end:%ld nr_pages:%d\n",__func__,(u64)mapping,*start,end,nr_pages);
+	}
+
 	rcu_read_lock();
 	while ((folio = find_get_entry_for_file_area(&xas, end, XA_PRESENT,&p_file_area,&page_offset_in_file_area))) {
 		/* Skip over shadow, swap and DAX entries */
@@ -3390,8 +3480,11 @@ unsigned find_get_pages_range(struct address_space *mapping, pgoff_t *start,
 
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 find_file_area:
-	if(mapping->rh_reserved1)
-		return find_get_pages_range_for_file_area(mapping,start,end,nr_pages,pages);
+	if(mapping->rh_reserved1){
+		smp_rmb();
+	    if(mapping->rh_reserved1)
+		    return find_get_pages_range_for_file_area(mapping,start,end,nr_pages,pages);
+	}
 #endif
 
 	if (unlikely(!nr_pages))
@@ -3471,6 +3564,10 @@ unsigned find_get_pages_contig_for_file_area(struct address_space *mapping, pgof
 
 	if (unlikely(!nr_pages))
 		return 0;
+
+    if(open_file_area_printk){
+        printk("%s mapping:0x%llx index:%ld nr_pages:%d\n",__func__,(u64)mapping,index,nr_pages);
+	}
 
 	rcu_read_lock();
 	//for (folio = xas_load(&xas); folio; folio = xas_next(&xas)) {
@@ -3565,7 +3662,9 @@ unsigned find_get_pages_contig(struct address_space *mapping, pgoff_t index,
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 find_file_area:
 	if(mapping->rh_reserved1){
-		return find_get_pages_contig_for_file_area(mapping,index,nr_pages,pages);
+		smp_rmb();
+	    if(mapping->rh_reserved1)
+		    return find_get_pages_contig_for_file_area(mapping,index,nr_pages,pages);
 	}
 #endif	
 
@@ -3651,6 +3750,10 @@ unsigned find_get_pages_range_tag_for_file_area(struct address_space *mapping, p
 	if (unlikely(!nr_pages))
 		return 0;
 
+    if(open_file_area_printk){
+        printk("%s mapping:0x%llx index:%ld nr_pages:%d end:%ld tag:%d\n",__func__,(u64)mapping,*index,nr_pages,end,tag);
+	}
+
 	rcu_read_lock();
 	while ((folio = find_get_entry_for_file_area(&xas, end, tag,&p_file_area,&page_offset_in_file_area))) {
 		/*
@@ -3697,8 +3800,11 @@ unsigned find_get_pages_range_tag(struct address_space *mapping, pgoff_t *index,
 
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 find_file_area:
-	if(mapping->rh_reserved1)
-		return find_get_pages_range_tag_for_file_area(mapping,index,end,tag,nr_pages,pages);
+	if(mapping->rh_reserved1){
+		smp_rmb();
+	    if(mapping->rh_reserved1)
+		    return find_get_pages_range_tag_for_file_area(mapping,index,end,tag,nr_pages,pages);
+	}
 #endif
 
 	if (unlikely(!nr_pages))
@@ -3998,8 +4104,9 @@ static void filemap_get_read_batch_for_file_area(struct address_space *mapping,
 		p_file_area = entry_to_file_area(p_file_area);
 		xa_node_vaild = xas.xa_node;
 
-        if(open_file_area_printk)
+        if(open_file_area_printk){
             printk("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld xas->xa_offset:%d xa_node_cache:0x%llx cache_base_index:%ld index:%ld\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index,xas.xa_offset,(u64)p_file_stat->xa_node_cache,p_file_stat->xa_node_cache_base_index,index);
+		}
 
 find_page_from_file_area:
 		folio = p_file_area->pages[page_offset_in_file_area];
@@ -4031,8 +4138,9 @@ find_page_from_file_area:
 			//goto next_folio;
         }
 
-		if(open_file_area_printk)
+		if(open_file_area_printk){
             printk("%s mapping:0x%llx folio:0x%llx index:%ld page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)folio,folio->index,page_offset_in_file_area);
+		}
 
 		if (!folio_batch_add(fbatch, folio))
 			break;
@@ -4144,10 +4252,16 @@ find_file_area:
 	 * 重新跳到filemap_get_read_batch_for_file_area()去xarray tree查找file_area
 	 * */
 	if(mapping->rh_reserved1){
-		/*如果fbatch->nr非0，说明下边for循环已经找到了一些page，那就清0失效，现在执行filemap_get_read_batch_for_file_area重新查找*/
-		if(fbatch->nr)
-			fbatch->nr = 0;
-		return filemap_get_read_batch_for_file_area(mapping,index,max,fbatch);
+		/*如果iput释放inode时，mapping->rh_reserved1被设置NULL并有内存屏障smp_mb。然后，其他进程会立即分配这个inode和mapping。
+		 *这里smp_rmb()就会获取到最新的mapping->rh_reserved1的值0，if就不成立了。这有效保证不使用已经释放的inode和mapping。这里
+		 *是先if(mapping->rh_reserved1)判断一次，保证过滤掉mapping->rh_reserved1是0的文件，不用执行smp_rmb()节省性能。然后再判断一次if(mapping->rh_reserved1)*/
+		smp_rmb();
+		if(mapping->rh_reserved1){
+		    /*如果fbatch->nr非0，说明下边for循环已经找到了一些page，那就清0失效，现在执行filemap_get_read_batch_for_file_area重新查找*/
+		    if(fbatch->nr)
+			    fbatch->nr = 0;
+		    return filemap_get_read_batch_for_file_area(mapping,index,max,fbatch);
+		}
 	}
 #endif	
 	rcu_read_lock();

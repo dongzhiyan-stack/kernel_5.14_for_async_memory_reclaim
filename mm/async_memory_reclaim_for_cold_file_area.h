@@ -233,7 +233,7 @@ struct file_area
 	struct list_head file_area_list;
 	//该file_area代表的N个连续page的起始page索引
 	pgoff_t start_index;
-    struct folio *pages[PAGE_COUNT_IN_AREA];
+    struct folio __rcu *pages[PAGE_COUNT_IN_AREA];
 };
 struct hot_cold_file_area_tree_node
 {

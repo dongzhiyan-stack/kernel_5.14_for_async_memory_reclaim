@@ -523,8 +523,11 @@ int folio_migrate_mapping(struct address_space *mapping,
 	}
 
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
-	if(mapping->rh_reserved1)
-		return folio_migrate_mapping_for_file_area(mapping,newfolio,folio,extra_count);
+	if(mapping->rh_reserved1){
+		smp_rmb();
+	    if(mapping->rh_reserved1)
+		    return folio_migrate_mapping_for_file_area(mapping,newfolio,folio,extra_count);
+	}
 #endif
 
 	oldzone = folio_zone(folio);
