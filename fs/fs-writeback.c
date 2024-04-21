@@ -31,6 +31,7 @@
 #include <linux/memcontrol.h>
 #include "internal.h"
 
+#include "../mm/async_memory_reclaim_for_cold_file_area.h"
 /*
  * 4MB minimal write chunk size
  */
@@ -366,6 +367,133 @@ static void bdi_up_write_wb_switch_rwsem(struct backing_dev_info *bdi)
 {
 	up_write(&bdi->wb_switch_rwsem);
 }
+static bool inode_do_switch_wbs_for_file_area(struct inode *inode,
+				struct bdi_writeback *old_wb,
+				struct bdi_writeback *new_wb)
+{
+	struct address_space *mapping = inode->i_mapping;
+	XA_STATE(xas, &mapping->i_pages, 0);
+	struct folio *folio;
+	bool switched = false;
+
+	struct file_area *p_file_area;
+	//unsigned int page_offset_in_file_area = 0;
+	int i;
+	int mark_page_count = 0;
+
+	spin_lock(&inode->i_lock);
+	xa_lock_irq(&mapping->i_pages);
+
+	/*
+	 * Once I_FREEING or I_WILL_FREE are visible under i_lock, the eviction
+	 * path owns the inode and we shouldn't modify ->i_io_list.
+	 */
+	if (unlikely(inode->i_state & (I_FREEING | I_WILL_FREE)))
+		goto skip_switch;
+
+	trace_inode_switch_wbs(inode, old_wb, new_wb);
+
+    if(open_file_area_printk){
+        printk("%s %s %d mapping:0x%llx inode:0x%llx\n",__func__,current->comm,current->pid,(u64)mapping,(u64)inode);
+	}
+	/*
+	 * Count and transfer stats.  Note that PAGECACHE_TAG_DIRTY points
+	 * to possibly dirty folios while PAGECACHE_TAG_WRITEBACK points to
+	 * folios actually under writeback.
+	 */
+	//xas_for_each_marked(&xas, folio, ULONG_MAX, PAGECACHE_TAG_DIRTY) {
+	xas_for_each_marked(&xas, p_file_area, ULONG_MAX, PAGECACHE_TAG_DIRTY) {
+		/*原有for循环是遍历保存page指针的xarray tree，统计有多少个dirty mark的page。现在是先统计有多少个有
+		 *dirty mark的file_area，再统计file_area有多少个有dirty mark的page，效果一样。mark_page_count是有dirty mark的page有效性判断*/
+		mark_page_count = 0;
+		for(i = 0;i < PAGE_COUNT_IN_AREA;i ++){
+			if (folio_test_dirty(folio)) {
+				long nr = folio_nr_pages(folio);
+				wb_stat_mod(old_wb, WB_RECLAIMABLE, -nr);
+				wb_stat_mod(new_wb, WB_RECLAIMABLE, nr);
+
+				mark_page_count ++;
+			}
+		}
+		if(mark_page_count != file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_DIRTY)){
+		    panic("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld dirty page count error\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index);
+		}
+		/*这里有个for循环退出的问题需要深思。原本for循环是一直查找page，直至查找的page索引是ULONG_MAX才退出。这里该怎么处理？
+		 *假如一共5个page，对应2个file_area。这个for循环就要循环两次，判断这两个file_area所有page，这样正好不会有遗漏。额外代码不用添加*/
+	}
+
+	xas_set(&xas, 0);
+	//xas_for_each_marked(&xas, folio, ULONG_MAX, PAGECACHE_TAG_WRITEBACK) {
+	xas_for_each_marked(&xas, p_file_area, ULONG_MAX, PAGECACHE_TAG_WRITEBACK) {
+		if(0 == file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_WRITEBACK)){
+		    panic("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld dirty page count error\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index);
+		}
+		mark_page_count = 0;
+		for(i = 0;i < PAGE_COUNT_IN_AREA;i ++){
+		    long nr = folio_nr_pages(folio);
+			/*这个异常判断用两个panic替代*/
+		    //WARN_ON_ONCE(!folio_test_writeback(folio));
+		    wb_stat_mod(old_wb, WB_WRITEBACK, -nr);
+		    wb_stat_mod(new_wb, WB_WRITEBACK, nr);
+			
+			mark_page_count ++;
+		}
+		if(!mark_page_count || (mark_page_count != file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_WRITEBACK))){
+		    panic("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld writeback page count error\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index);
+		}
+	}
+
+	if (mapping_tagged(mapping, PAGECACHE_TAG_WRITEBACK)) {
+		atomic_dec(&old_wb->writeback_inodes);
+		atomic_inc(&new_wb->writeback_inodes);
+	}
+
+	wb_get(new_wb);
+
+	/*
+	 * Transfer to @new_wb's IO list if necessary.  If the @inode is dirty,
+	 * the specific list @inode was on is ignored and the @inode is put on
+	 * ->b_dirty which is always correct including from ->b_dirty_time.
+	 * The transfer preserves @inode->dirtied_when ordering.  If the @inode
+	 * was clean, it means it was on the b_attached list, so move it onto
+	 * the b_attached list of @new_wb.
+	 */
+	if (!list_empty(&inode->i_io_list)) {
+		inode->i_wb = new_wb;
+
+		if (inode->i_state & I_DIRTY_ALL) {
+			struct inode *pos;
+
+			list_for_each_entry(pos, &new_wb->b_dirty, i_io_list)
+				if (time_after_eq(inode->dirtied_when,
+						  pos->dirtied_when))
+					break;
+			inode_io_list_move_locked(inode, new_wb,
+						  pos->i_io_list.prev);
+		} else {
+			inode_cgwb_move_to_attached(inode, new_wb);
+		}
+	} else {
+		inode->i_wb = new_wb;
+	}
+
+	/* ->i_wb_frn updates may race wbc_detach_inode() but doesn't matter */
+	inode->i_wb_frn_winner = 0;
+	inode->i_wb_frn_avg_time = 0;
+	inode->i_wb_frn_history = 0;
+	switched = true;
+skip_switch:
+	/*
+	 * Paired with load_acquire in unlocked_inode_to_wb_begin() and
+	 * ensures that the new wb is visible if they see !I_WB_SWITCH.
+	 */
+	smp_store_release(&inode->i_state, inode->i_state & ~I_WB_SWITCH);
+
+	xa_unlock_irq(&mapping->i_pages);
+	spin_unlock(&inode->i_lock);
+
+	return switched;
+}
 
 static bool inode_do_switch_wbs(struct inode *inode,
 				struct bdi_writeback *old_wb,
@@ -375,6 +503,16 @@ static bool inode_do_switch_wbs(struct inode *inode,
 	XA_STATE(xas, &mapping->i_pages, 0);
 	struct folio *folio;
 	bool switched = false;
+
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+	/*page的从xarray tree delete和 保存到xarray tree 两个过程因为加锁防护，不会并发执行，因此不用担心下边的
+	 *找到的folio是file_area*/
+	if(mapping->rh_reserved1){
+		smp_rmb();
+	    if(mapping->rh_reserved1)
+		    return inode_do_switch_wbs_for_file_area(inode,old_wb,new_wb);
+	}
+#endif	
 
 	spin_lock(&inode->i_lock);
 	xa_lock_irq(&mapping->i_pages);

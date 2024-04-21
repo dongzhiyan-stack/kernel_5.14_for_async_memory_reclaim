@@ -40,7 +40,7 @@
 #include <trace/events/writeback.h>
 
 #include "internal.h"
-
+#include "async_memory_reclaim_for_cold_file_area.h"
 /*
  * Sleep at most 200ms at a time in balance_dirty_pages().
  */
@@ -2109,12 +2109,80 @@ void __init page_writeback_init(void)
  * dirty pages in the file (thus it is important for this function to be quick
  * so that it can tag pages faster than a dirtying process can create them).
  */
+void tag_pages_for_writeback_for_file_area(struct address_space *mapping,
+			     pgoff_t start, pgoff_t end)
+{
+	//XA_STATE(xas, &mapping->i_pages, start);
+	XA_STATE(xas, &mapping->i_pages, start >> PAGE_COUNT_IN_AREA_SHIFT);
+	unsigned int tagged = 0;
+	void *page;
+
+	struct file_area *p_file_area;
+	//令page索引与上0x3得到它在file_area的pages[]数组的下标
+	unsigned int page_offset_in_file_area = start & PAGE_COUNT_IN_AREA_MASK;
+	pgoff_t file_area_end_index = end >> PAGE_COUNT_IN_AREA_SHIFT;
+
+    if(open_file_area_printk){
+        printk("%s %s %d mapping:0x%llx start:%ld end:%ld\n",__func__,current->comm,current->pid,(u64)mapping,start,end);
+	}
+
+	xas_lock_irq(&xas);
+	//xas_for_each_marked(&xas, page, end, PAGECACHE_TAG_DIRTY) {
+	xas_for_each_marked(&xas, p_file_area, file_area_end_index, PAGECACHE_TAG_DIRTY) {
+		if(!is_file_area_entry(p_file_area))
+			panic("%s mapping:0x%llx p_file_area:0x%llx  error\n",__func__,(u64)mapping,(u64)p_file_area);
+
+find_page_from_file_area:
+        set_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_TOWRITE);
+		/*file_area里的4个page都是dirty页吗，那可不一定，必须检测是否有脏页mark*/
+		if(is_file_area_page_mark_bit_set(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY)){
+			page = p_file_area->pages[page_offset_in_file_area];
+			if(!page || !PageDirty(page)){
+			    panic("%s mapping:0x%llx p_file_area:0x%llx page:0x%llx not dirty\n",__func__,(u64)mapping,(u64)p_file_area,(u64)page);
+			}
+		    /*file_area可能会重复设置towrite mark，这个函数里做的有防护，为了不大改，维持老代码*/
+		    xas_set_mark(&xas, PAGECACHE_TAG_TOWRITE);
+        }
+		page_offset_in_file_area ++;
+		/*有个重大bug需要注意。这里是模拟原for循环里page索引大于end后就退出，现在for循环是搜索file_area，判断page索引是否
+		 * 超出end必须在这里单独判断。但是，xas->xa_index索引是file_area的，不是page的，要乘以4才是page的索引*/
+		//if(xas->xa_index + page_offset_in_file_area > ){
+		if((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area > end){
+            break;
+		}
+
+        if(page_offset_in_file_area < PAGE_COUNT_IN_AREA)
+			goto find_page_from_file_area;
+		else
+			page_offset_in_file_area = 0;
+
+		if (++tagged % XA_CHECK_SCHED)
+			continue;
+
+		/*重置xas->xa_node=XAS_RESTART，更新xas->xa_index，确定下次查找的page的索引!!!!!!!!!!!!!!*/
+		xas_pause(&xas);
+		xas_unlock_irq(&xas);
+		cond_resched();
+		xas_lock_irq(&xas);
+	}
+	xas_unlock_irq(&xas);
+}
+
 void tag_pages_for_writeback(struct address_space *mapping,
 			     pgoff_t start, pgoff_t end)
 {
 	XA_STATE(xas, &mapping->i_pages, start);
 	unsigned int tagged = 0;
 	void *page;
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+	/*page的从xarray tree delete和 保存到xarray tree 两个过程因为加锁防护，不会并发执行，因此不用担心下边的
+	 *找到的folio是file_area*/
+	if(mapping->rh_reserved1){
+		smp_rmb();
+	    if(mapping->rh_reserved1)
+		    return tag_pages_for_writeback_for_file_area(mapping,start,end);
+	}
+#endif	
 
 	xas_lock_irq(&xas);
 	xas_for_each_marked(&xas, page, end, PAGECACHE_TAG_DIRTY) {
@@ -2488,10 +2556,51 @@ void folio_account_cleaned(struct folio *folio, struct bdi_writeback *wb)
  * lock).  This can also be called from mark_buffer_dirty(), which I
  * cannot prove is always protected against truncate.
  */
+void __folio_mark_dirty_for_file_area(struct folio *folio, struct address_space *mapping,
+			     int warn)
+{
+	unsigned long flags;
+
+    if(open_file_area_printk){
+        printk("%s %s %d mapping:0x%llx folio:0x%llx\n",__func__,current->comm,current->pid,(u64)mapping,(u64)folio);
+	}
+
+	xa_lock_irqsave(&mapping->i_pages, flags);
+	if (folio->mapping) {	/* Race with truncate? */
+		XA_STATE(xas, &mapping->i_pages, folio_index(folio) >> PAGE_COUNT_IN_AREA_SHIFT);
+		struct file_area *p_file_area;
+	    //令page索引与上0x3得到它在file_area的pages[]数组的下标
+	    unsigned int page_offset_in_file_area = folio_index(folio) & PAGE_COUNT_IN_AREA_MASK;
+
+		WARN_ON_ONCE(warn && !folio_test_uptodate(folio));
+		folio_account_dirtied(folio, mapping);
+		//__xa_set_mark(&mapping->i_pages, folio_index(folio),
+		//		PAGECACHE_TAG_DIRTY);
+		p_file_area = xas_load(&xas);
+		if(p_file_area){
+		    /*先标记file_area是dirtry，然后在file_area的page的dirty*/
+			xas_set_mark(&xas, PAGECACHE_TAG_DIRTY);
+            /*存在page被多次标记writeback的情况，这里不做page多次标记writeback就panic的判断*/
+			clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY);
+		}
+
+	}
+	xa_unlock_irqrestore(&mapping->i_pages, flags);
+}
+
 void __folio_mark_dirty(struct folio *folio, struct address_space *mapping,
 			     int warn)
 {
 	unsigned long flags;
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+	/*page的从xarray tree delete和 保存到xarray tree 两个过程因为加锁防护，不会并发执行，因此不用担心下边的
+	 *找到的folio是file_area*/
+	if(mapping->rh_reserved1){
+		smp_rmb();
+	    if(mapping->rh_reserved1)
+		    return __folio_mark_dirty_for_file_area(folio,mapping,warn);
+	}
+#endif	
 
 	xa_lock_irqsave(&mapping->i_pages, flags);
 	if (folio->mapping) {	/* Race with truncate? */
@@ -2788,12 +2897,84 @@ static void wb_inode_writeback_end(struct bdi_writeback *wb)
 		queue_delayed_work(bdi_wq, &wb->bw_dwork, BANDWIDTH_INTERVAL);
 	spin_unlock_irqrestore(&wb->work_lock, flags);
 }
+bool __folio_end_writeback_for_file_area(struct folio *folio)
+{
+	long nr = folio_nr_pages(folio);
+	struct address_space *mapping = folio_mapping(folio);
+	bool ret;
 
+	folio_memcg_lock(folio);
+	if (mapping && mapping_use_writeback_tags(mapping)) {
+		struct inode *inode = mapping->host;
+		struct backing_dev_info *bdi = inode_to_bdi(inode);
+		unsigned long flags;
+        if(open_file_area_printk){
+            printk("%s %s %d mapping:0x%llx folio:0x%llx\n",__func__,current->comm,current->pid,(u64)mapping,(u64)folio);
+		}
+
+		xa_lock_irqsave(&mapping->i_pages, flags);
+		ret = folio_test_clear_writeback(folio);
+		if (ret) {
+			XA_STATE(xas, &mapping->i_pages, folio_index(folio) >> PAGE_COUNT_IN_AREA_SHIFT);
+			struct file_area *p_file_area;
+	        //令page索引与上0x3得到它在file_area的pages[]数组的下标
+	        unsigned int page_offset_in_file_area = folio_index(folio) & PAGE_COUNT_IN_AREA_MASK;
+
+			//__xa_clear_mark(&mapping->i_pages, folio_index(folio),
+			//			PAGECACHE_TAG_WRITEBACK);
+			p_file_area = xas_load(&xas);
+			if(p_file_area){
+				/*先清理file_area的writeback标记，再清理file_area里的page的writeback mark*/
+                xas_clear_mark(&xas, PAGECACHE_TAG_WRITEBACK);
+			    if(is_file_area_page_mark_bit_set(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_WRITEBACK)){
+			        panic("%s mapping:0x%llx p_file_area:0x%llx page:0x%llx not writeback\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio);
+				}
+
+			    clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_WRITEBACK);
+			}
+
+			if (bdi->capabilities & BDI_CAP_WRITEBACK_ACCT) {
+				struct bdi_writeback *wb = inode_to_wb(inode);
+
+				wb_stat_mod(wb, WB_WRITEBACK, -nr);
+				__wb_writeout_add(wb, nr);
+				if (!mapping_tagged(mapping,
+						    PAGECACHE_TAG_WRITEBACK))
+					wb_inode_writeback_end(wb);
+			}
+		}
+
+		if (mapping->host && !mapping_tagged(mapping,
+						     PAGECACHE_TAG_WRITEBACK))
+			sb_clear_inode_writeback(mapping->host);
+
+		xa_unlock_irqrestore(&mapping->i_pages, flags);
+	} else {
+		ret = folio_test_clear_writeback(folio);
+	}
+	if (ret) {
+		lruvec_stat_mod_folio(folio, NR_WRITEBACK, -nr);
+		zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, -nr);
+		node_stat_mod_folio(folio, NR_WRITTEN, nr);
+	}
+	folio_memcg_unlock(folio);
+	return ret;
+}
 bool __folio_end_writeback(struct folio *folio)
 {
 	long nr = folio_nr_pages(folio);
 	struct address_space *mapping = folio_mapping(folio);
 	bool ret;
+
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+	/*page的从xarray tree delete和 保存到xarray tree 两个过程因为加锁防护，不会并发执行，因此不用担心下边的
+	 *找到的folio是file_area*/
+	if(mapping->rh_reserved1){
+		smp_rmb();
+	    if(mapping->rh_reserved1)
+		    return __folio_end_writeback_for_file_area(folio);
+	}
+#endif	
 
 	folio_memcg_lock(folio);
 	if (mapping && mapping_use_writeback_tags(mapping)) {
@@ -2833,6 +3014,90 @@ bool __folio_end_writeback(struct folio *folio)
 	folio_memcg_unlock(folio);
 	return ret;
 }
+bool __folio_start_writeback_for_file_area(struct folio *folio, bool keep_write)
+{
+	long nr = folio_nr_pages(folio);
+	struct address_space *mapping = folio_mapping(folio);
+	bool ret;
+	int access_ret;
+
+	folio_memcg_lock(folio);
+	if (mapping && mapping_use_writeback_tags(mapping)) {
+		//XA_STATE(xas, &mapping->i_pages, folio_index(folio));
+		XA_STATE(xas, &mapping->i_pages, folio_index(folio) >> PAGE_COUNT_IN_AREA_SHIFT);
+		struct inode *inode = mapping->host;
+		struct backing_dev_info *bdi = inode_to_bdi(inode);
+		unsigned long flags;
+
+		struct file_area *p_file_area;
+		//令page索引与上0x3得到它在file_area的pages[]数组的下标
+		unsigned int page_offset_in_file_area = folio_index(folio) & PAGE_COUNT_IN_AREA_MASK;
+        
+		if(open_file_area_printk){
+            printk("%s %s %d mapping:0x%llx folio:0x%llx\n",__func__,current->comm,current->pid,(u64)mapping,(u64)folio);
+		}
+
+		xas_lock_irqsave(&xas, flags);
+		//xas_load(&xas);
+		p_file_area = xas_load(&xas);
+		/*此时file_area不可能非法*/
+		if(!is_file_area_entry(p_file_area)){
+			panic("%s mapping:0x%llx p_file_area:0x%llx  error\n",__func__,(u64)mapping,(u64)p_file_area);
+		}
+		ret = folio_test_set_writeback(folio);
+		if (!ret) {
+			bool on_wblist;
+
+			on_wblist = mapping_tagged(mapping,
+						   PAGECACHE_TAG_WRITEBACK);
+
+			xas_set_mark(&xas, PAGECACHE_TAG_WRITEBACK);
+			/*上边此时只是标记file_area的writeback mark，这里标记file_area里的page的writeback mark*/
+            set_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_WRITEBACK);
+			if (bdi->capabilities & BDI_CAP_WRITEBACK_ACCT) {
+				struct bdi_writeback *wb = inode_to_wb(inode);
+
+				wb_stat_mod(wb, WB_WRITEBACK, nr);
+				if (!on_wblist)
+					wb_inode_writeback_start(wb);
+			}
+
+			/*
+			 * We can come through here when swapping
+			 * anonymous folios, so we don't necessarily
+			 * have an inode to track for sync.
+			 */
+			if (mapping->host && !on_wblist)
+				sb_mark_inode_writeback(mapping->host);
+		}
+		if (!folio_test_dirty(folio)){
+			xas_clear_mark(&xas, PAGECACHE_TAG_DIRTY);
+			/*上边此时只是标记file_area的dirty mark，这里标记file_area里的page的dirty mark*/
+			clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY);
+		}
+		if (!keep_write){
+			xas_clear_mark(&xas, PAGECACHE_TAG_TOWRITE);
+			/*上边此时只是标记file_area的towrite mark，这里标记file_area里的page的towrite mark*/
+			clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_TOWRITE);
+		}
+		xas_unlock_irqrestore(&xas, flags);
+	} else {
+		ret = folio_test_set_writeback(folio);
+	}
+	if (!ret) {
+		lruvec_stat_mod_folio(folio, NR_WRITEBACK, nr);
+		zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, nr);
+	}
+	folio_memcg_unlock(folio);
+	access_ret = arch_make_folio_accessible(folio);
+	/*
+	 * If writeback has been triggered on a page that cannot be made
+	 * accessible, it is too late to recover here.
+	 */
+	VM_BUG_ON_FOLIO(access_ret != 0, folio);
+
+	return ret;
+}
 
 bool __folio_start_writeback(struct folio *folio, bool keep_write)
 {
@@ -2840,6 +3105,16 @@ bool __folio_start_writeback(struct folio *folio, bool keep_write)
 	struct address_space *mapping = folio_mapping(folio);
 	bool ret;
 	int access_ret;
+
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+	/*page的从xarray tree delete和 保存到xarray tree 两个过程因为加锁防护，不会并发执行，因此不用担心下边的
+	 *找到的folio是file_area*/
+	if(mapping->rh_reserved1){
+		smp_rmb();
+	    if(mapping->rh_reserved1)
+		    return __folio_start_writeback_for_file_area(folio,keep_write);
+	}
+#endif	
 
 	folio_memcg_lock(folio);
 	if (mapping && mapping_use_writeback_tags(mapping)) {

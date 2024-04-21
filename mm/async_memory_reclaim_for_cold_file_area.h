@@ -637,19 +637,23 @@ FILE_STATUS_ATOMIC(cache_file)
 FILE_STATUS_ATOMIC(mmap_file)
 
 extern struct hot_cold_file_global hot_cold_file_global_info;
-//置1会把内存回收信息详细打印出来
-extern int shrink_page_printk_open1;
-//不怎么关键的调试信息
-extern int shrink_page_printk_open;
 extern unsigned long async_memory_reclaim_status;
 extern unsigned long  open_file_area_printk;
-
+/** file_area的page bit/writeback mark bit/dirty mark bit/towrite mark bit统计**************************************************************/
 #define FILE_AREA_PAGE_COUNT_SHIFT (XA_CHUNK_SHIFT + PAGE_COUNT_IN_AREA_SHIFT)//6+2
 #define FILE_AREA_PAGE_COUNT_MASK ((1 << FILE_AREA_PAGE_COUNT_SHIFT) - 1)//0xFF 
 
-//file_area->file_area_state 的bit31~bit28 这个4个bit位标志file_area
-//#define PAGE_BIT_OFFSET_IN_FILE_AREA_BASE (sizeof(&p_file_area->file_area_state)*8 - PAGE_COUNT_IN_AREA)//28  这个编译不通过!!!!!!!!!!!!!
-#define PAGE_BIT_OFFSET_IN_FILE_AREA_BASE (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA)//28
+/*file_area->file_area_state 的bit31~bit28 这个4个bit位标志file_area。注意，现在按照一个file_area只有4个page在
+ *p_file_area->file_area_state的bit28~bit31写死了。如果file_area代表8个page，这里就得改动了!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ * */
+//#define PAGE_BIT_OFFSET_IN_FILE_AREA_BASE (sizeof(&p_file_area->file_area_state)*8 - PAGE_COUNT_IN_AREA)//28  这个编译不通过
+#define PAGE_BIT_OFFSET_IN_FILE_AREA_BASE (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA)
+
+/*dirty mark:bit27~bit24 writeback mark:bit23~bit20  towrite mark:bit19~bit16*/
+#define WRITEBACK_MARK_IN_FILE_AREA_BASE (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA*2)
+#define DIRTY_MARK_IN_FILE_AREA_BASE     (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA*3)
+#define TOWRITE_MARK_IN_FILE_AREA_BASE   (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA*4)
 
 static inline struct file_area *entry_to_file_area(void * file_area_entry)
 {
@@ -698,6 +702,88 @@ static inline int file_area_have_page(struct file_area *p_file_area)
 {
     return  (p_file_area->file_area_state & ~((1 << PAGE_BIT_OFFSET_IN_FILE_AREA_BASE) - 1));//0XF000 0000
 }
+
+static inline void clear_file_area_page_mark_bit(struct file_area *p_file_area,unsigned char page_offset_in_file_area,xa_mark_t type)
+{
+    unsigned int file_area_page_bit_clear;
+    
+	if(PAGECACHE_TAG_DIRTY == type){
+        file_area_page_bit_clear = ~(1 << (WRITEBACK_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area));
+	}else if (PAGECACHE_TAG_WRITEBACK == type){
+        file_area_page_bit_clear = ~(1 << (DIRTY_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area));
+	}else{
+        if(PAGECACHE_TAG_TOWRITE != type)
+		    panic("%s file_area:0x%llx file_area_state:0x%x page_offset_in_file_area:%d type:%d\n",__func__,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,type);
+		
+        file_area_page_bit_clear = ~(1 << (TOWRITE_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area));
+	}
+	//page在 p_file_area->file_area_state对应的bit位清0
+	p_file_area->file_area_state = p_file_area->file_area_state & file_area_page_bit_clear;
+
+}
+static inline void set_file_area_page_mark_bit(struct file_area *p_file_area,unsigned char page_offset_in_file_area,xa_mark_t type)
+{
+    unsigned int file_area_page_mark_bit_set;
+	
+	if(PAGECACHE_TAG_DIRTY == type){
+        file_area_page_mark_bit_set = 1 << (WRITEBACK_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area);
+	}else if (PAGECACHE_TAG_WRITEBACK == type){
+        file_area_page_mark_bit_set = 1 << (DIRTY_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area);
+	}else{
+        if(PAGECACHE_TAG_TOWRITE != type)
+		    panic("%s file_area:0x%llx file_area_state:0x%x page_offset_in_file_area:%d type:%d\n",__func__,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,type);
+		
+        file_area_page_mark_bit_set = 1 << (TOWRITE_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area);
+	}
+
+	//page在 p_file_area->file_area_state对应的bit位置1
+	p_file_area->file_area_state = p_file_area->file_area_state | file_area_page_mark_bit_set;
+}
+//测试page_offset_in_file_area这个位置的page在p_file_area->file_area_state对应的bit位是否置1了
+static inline int is_file_area_page_mark_bit_set(struct file_area *p_file_area,unsigned char page_offset_in_file_area,xa_mark_t type)
+{
+	 unsigned int file_area_page_mark_bit_set = 1 << (PAGE_BIT_OFFSET_IN_FILE_AREA_BASE + page_offset_in_file_area);
+
+    if(PAGECACHE_TAG_DIRTY == type){
+        file_area_page_mark_bit_set = 1 << (WRITEBACK_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area);
+	}else if (PAGECACHE_TAG_WRITEBACK == type){
+        file_area_page_mark_bit_set = 1 << (DIRTY_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area);
+	}else{
+        if(PAGECACHE_TAG_TOWRITE != type)
+		    panic("%s file_area:0x%llx file_area_state:0x%x page_offset_in_file_area:%d type:%d\n",__func__,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,type);
+		
+        file_area_page_mark_bit_set = 1 << (TOWRITE_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area);
+	}
+
+    return (p_file_area->file_area_state & file_area_page_mark_bit_set);
+}
+
+/*统计有多少个 mark page置位了，比如file_area有3个page是writeback，则返回3*/
+static inline int file_area_page_mark_bit_count(struct file_area *p_file_area,char type)
+{
+	unsigned int file_area_page_mark = 0;
+	int count = 0;
+
+    if(PAGECACHE_TAG_DIRTY == type){
+        file_area_page_mark = (p_file_area->file_area_state >> WRITEBACK_MARK_IN_FILE_AREA_BASE) & PAGE_COUNT_IN_AREA_MASK;
+	}else if (PAGECACHE_TAG_WRITEBACK == type){
+        file_area_page_mark = (p_file_area->file_area_state >> PAGECACHE_TAG_WRITEBACK) & PAGE_COUNT_IN_AREA_MASK;
+	}else{
+        if(PAGECACHE_TAG_TOWRITE != type)
+		    panic("%s file_area:0x%llx file_area_state:0x%x type:%d\n",__func__,(u64)p_file_area,p_file_area->file_area_state,type);
+		
+        file_area_page_mark = (p_file_area->file_area_state >> PAGECACHE_TAG_TOWRITE) & PAGE_COUNT_IN_AREA_MASK;
+	}
+    while(file_area_page_mark){
+		if(file_area_page_mark & 0x1)
+		    count ++;
+
+		file_area_page_mark = file_area_page_mark >> 1;
+	}
+
+	return count;
+}
+/*****************************************************************************************************************************************************/
 static inline void lock_file_stat(struct file_stat * p_file_stat,int not_block){
 	//如果有其他进程对file_stat的lock加锁，while成立，则休眠等待这个进程释放掉lock，然后自己加锁
 	while(test_and_set_bit_lock(F_file_stat_lock, &p_file_stat->file_stat_status)){
