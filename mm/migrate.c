@@ -382,7 +382,7 @@ int folio_migrate_mapping_for_file_area(struct address_space *mapping,
 	long nr = folio_nr_pages(folio);
 
 	struct file_area *p_file_area;
-    //令page索引与上0x3得到它在file_area的pages[]数组的下标
+	//令page索引与上0x3得到它在file_area的pages[]数组的下标
 	unsigned int page_offset_in_file_area = folio_index(folio) & PAGE_COUNT_IN_AREA_MASK;
 
 	if (!mapping) {
@@ -435,15 +435,15 @@ int folio_migrate_mapping_for_file_area(struct address_space *mapping,
 	//xas_store(&xas, newfolio);
 	p_file_area = (struct file_area *)xas_load(&xas);
 	if(!p_file_area || !is_file_area_entry(p_file_area))
-        panic("%s mapping:0x%llx p_file_area:0x%llx error\n",__func__,(u64)mapping,(u64)p_file_area);
+		panic("%s mapping:0x%llx p_file_area:0x%llx error\n",__func__,(u64)mapping,(u64)p_file_area);
 
 	p_file_area = entry_to_file_area(p_file_area);
-    if(folio != (struct folio *)p_file_area->pages[page_offset_in_file_area]){
-        panic("%s mapping:0x%llx folio:0x%llx != p_file_area->pages:0x%llx\n",__func__,(u64)mapping,(u64)folio,(u64)p_file_area->pages[page_offset_in_file_area]);
+	if(folio != (struct folio *)p_file_area->pages[page_offset_in_file_area]){
+		panic("%s mapping:0x%llx folio:0x%llx != p_file_area->pages:0x%llx\n",__func__,(u64)mapping,(u64)folio,(u64)p_file_area->pages[page_offset_in_file_area]);
 	}
 	p_file_area->pages[page_offset_in_file_area] = newfolio;
 	if(open_file_area_printk)
-        printk("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx newfolio:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,(u64)newfolio,page_offset_in_file_area);
+		printk("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx newfolio:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,(u64)newfolio,page_offset_in_file_area);
 
 
 	/*
@@ -525,8 +525,8 @@ int folio_migrate_mapping(struct address_space *mapping,
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 	if(mapping->rh_reserved1){
 		smp_rmb();
-	    if(mapping->rh_reserved1)
-		    return folio_migrate_mapping_for_file_area(mapping,newfolio,folio,extra_count);
+		if(mapping->rh_reserved1)
+			return folio_migrate_mapping_for_file_area(mapping,newfolio,folio,extra_count);
 	}
 #endif
 

@@ -1197,10 +1197,10 @@ static inline struct folio *__readahead_folio(struct readahead_control *ractl)
 		ractl->_batch_count = 0;
 		return NULL;
 	}
-    if(ractl->mapping->rh_reserved1)
+	if(ractl->mapping->rh_reserved1)
 		folio = get_folio_from_file_area(ractl->mapping,ractl->_index);
 	else
-	    folio = xa_load(&ractl->mapping->i_pages, ractl->_index);
+		folio = xa_load(&ractl->mapping->i_pages, ractl->_index);
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 	ractl->_batch_count = folio_nr_pages(folio);
 

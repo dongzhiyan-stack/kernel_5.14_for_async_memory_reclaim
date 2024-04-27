@@ -231,7 +231,7 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
 		if(mapping->rh_reserved1)
 			folio = get_folio_from_file_area(mapping,index + i);
 		else
-		    folio = xa_load(&mapping->i_pages, index + i);
+			folio = xa_load(&mapping->i_pages, index + i);
 
 		if (folio && !xa_is_value(folio)) {
 			/*
@@ -802,7 +802,7 @@ void readahead_expand(struct readahead_control *ractl,
 		if(mapping->rh_reserved1)
 			page = get_folio_from_file_area(mapping,index);
 		else
-		    page = xa_load(&mapping->i_pages, index);
+			page = xa_load(&mapping->i_pages, index);
 
 		if (page && !xa_is_value(page))
 			return; /* Page apparently present */
@@ -830,7 +830,7 @@ void readahead_expand(struct readahead_control *ractl,
 		if(mapping->rh_reserved1)
 			page = get_folio_from_file_area(mapping,index);
 		else
-		    page = xa_load(&mapping->i_pages, index);
+			page = xa_load(&mapping->i_pages, index);
 
 		if (page && !xa_is_value(page))
 			return; /* Page apparently present */

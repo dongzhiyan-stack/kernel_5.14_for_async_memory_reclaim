@@ -282,8 +282,8 @@ static void destroy_inode(struct inode *inode)
 
 	BUG_ON(!list_empty(&inode->i_lru));
 	if(inode->i_mapping && inode->i_mapping->rh_reserved1){
-	    disable_mapping_file_area(inode);
-    }
+		disable_mapping_file_area(inode);
+	}
 	__destroy_inode(inode);
 	if (ops->destroy_inode) {
 		ops->destroy_inode(inode);
