@@ -2132,18 +2132,11 @@ void tag_pages_for_writeback_for_file_area(struct address_space *mapping,
 		if(!is_file_area_entry(p_file_area))
 			panic("%s mapping:0x%llx p_file_area:0x%llx  error\n",__func__,(u64)mapping,(u64)p_file_area);
 
+        p_file_area = entry_to_file_area(p_file_area);
+		/*file_area可能会重复设置towrite mark，这个函数里做的有防护，为了不大改，维持老代码*/
+		xas_set_mark(&xas, PAGECACHE_TAG_TOWRITE);
+
 find_page_from_file_area:
-        set_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_TOWRITE);
-		/*file_area里的4个page都是dirty页吗，那可不一定，必须检测是否有脏页mark*/
-		if(is_file_area_page_mark_bit_set(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY)){
-			page = p_file_area->pages[page_offset_in_file_area];
-			if(!page || !PageDirty(page)){
-			    panic("%s mapping:0x%llx p_file_area:0x%llx page:0x%llx not dirty\n",__func__,(u64)mapping,(u64)p_file_area,(u64)page);
-			}
-		    /*file_area可能会重复设置towrite mark，这个函数里做的有防护，为了不大改，维持老代码*/
-		    xas_set_mark(&xas, PAGECACHE_TAG_TOWRITE);
-        }
-		page_offset_in_file_area ++;
 		/*有个重大bug需要注意。这里是模拟原for循环里page索引大于end后就退出，现在for循环是搜索file_area，判断page索引是否
 		 * 超出end必须在这里单独判断。但是，xas->xa_index索引是file_area的，不是page的，要乘以4才是page的索引*/
 		//if(xas->xa_index + page_offset_in_file_area > ){
@@ -2151,6 +2144,16 @@ find_page_from_file_area:
             break;
 		}
 
+		/*file_area里的4个page都是dirty页吗，那可不一定，必须检测是否有脏页mark的page，才能在file_area里设置towrite mark*/
+		if(is_file_area_page_mark_bit_set(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY)){
+			page = p_file_area->pages[page_offset_in_file_area];
+			if(!page || !PageDirty(page)){
+			    panic("%s mapping:0x%llx p_file_area:0x%llx page:0x%llx not dirty\n",__func__,(u64)mapping,(u64)p_file_area,(u64)page);
+			}
+			set_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_TOWRITE);
+        }
+		
+		page_offset_in_file_area ++;
         if(page_offset_in_file_area < PAGE_COUNT_IN_AREA)
 			goto find_page_from_file_area;
 		else
@@ -2577,13 +2580,15 @@ void __folio_mark_dirty_for_file_area(struct folio *folio, struct address_space 
 		//__xa_set_mark(&mapping->i_pages, folio_index(folio),
 		//		PAGECACHE_TAG_DIRTY);
 		p_file_area = xas_load(&xas);
-		if(p_file_area){
-		    /*先标记file_area是dirtry，然后在file_area的page的dirty*/
-			xas_set_mark(&xas, PAGECACHE_TAG_DIRTY);
-            /*存在page被多次标记writeback的情况，这里不做page多次标记writeback就panic的判断*/
-			clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY);
+		if(!is_file_area_entry(p_file_area)){
+			panic("%s mapping:0x%llx p_file_area:0x%llx  error\n",__func__,(u64)mapping,(u64)p_file_area);
 		}
+        p_file_area = entry_to_file_area(p_file_area);
 
+		/*先标记file_area是dirtry，然后在file_area的page的dirty*/
+		xas_set_mark(&xas, PAGECACHE_TAG_DIRTY);
+        /*存在page被多次标记writeback的情况，这里不做page多次标记writeback就panic的判断*/
+		set_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY);
 	}
 	xa_unlock_irqrestore(&mapping->i_pages, flags);
 }
@@ -2909,7 +2914,7 @@ bool __folio_end_writeback_for_file_area(struct folio *folio)
 		struct backing_dev_info *bdi = inode_to_bdi(inode);
 		unsigned long flags;
         if(open_file_area_printk){
-            printk("%s %s %d mapping:0x%llx folio:0x%llx\n",__func__,current->comm,current->pid,(u64)mapping,(u64)folio);
+            printk("%s %s %d mapping:0x%llx folio:0x%llx index:%ld\n",__func__,current->comm,current->pid,(u64)mapping,(u64)folio,folio->index);
 		}
 
 		xa_lock_irqsave(&mapping->i_pages, flags);
@@ -2923,15 +2928,22 @@ bool __folio_end_writeback_for_file_area(struct folio *folio)
 			//__xa_clear_mark(&mapping->i_pages, folio_index(folio),
 			//			PAGECACHE_TAG_WRITEBACK);
 			p_file_area = xas_load(&xas);
-			if(p_file_area){
-				/*先清理file_area的writeback标记，再清理file_area里的page的writeback mark*/
-                xas_clear_mark(&xas, PAGECACHE_TAG_WRITEBACK);
-			    if(is_file_area_page_mark_bit_set(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_WRITEBACK)){
-			        panic("%s mapping:0x%llx p_file_area:0x%llx page:0x%llx not writeback\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio);
-				}
+		    if(!is_file_area_entry(p_file_area)){
+			    panic("%s mapping:0x%llx p_file_area:0x%llx  error\n",__func__,(u64)mapping,(u64)p_file_area);
+		    }
+            p_file_area = entry_to_file_area(p_file_area);
 
-			    clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_WRITEBACK);
+			/*先清理file_area的writeback标记，再清理file_area里的page的writeback mark。错了，只有file_area的4个page的writeback
+			 * mark全被清理了，才能清理file_area的writeback mark标记位，因此把清理file_area的writeback mark放到下边了*/
+			//xas_clear_mark(&xas, PAGECACHE_TAG_WRITEBACK);
+			if(!is_file_area_page_mark_bit_set(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_WRITEBACK)){
+				panic("%s mapping:0x%llx p_file_area:0x%llx page:0x%llx not writeback\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio);
 			}
+
+			clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_WRITEBACK);
+			/*只有file_area的4个page的writebackmark全被清理了,才能清理file_area的writeback mark标记位*/
+			if(0 == file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_WRITEBACK))
+				xas_clear_mark(&xas, PAGECACHE_TAG_WRITEBACK);
 
 			if (bdi->capabilities & BDI_CAP_WRITEBACK_ACCT) {
 				struct bdi_writeback *wb = inode_to_wb(inode);
@@ -3044,6 +3056,8 @@ bool __folio_start_writeback_for_file_area(struct folio *folio, bool keep_write)
 		if(!is_file_area_entry(p_file_area)){
 			panic("%s mapping:0x%llx p_file_area:0x%llx  error\n",__func__,(u64)mapping,(u64)p_file_area);
 		}
+        p_file_area = entry_to_file_area(p_file_area);
+
 		ret = folio_test_set_writeback(folio);
 		if (!ret) {
 			bool on_wblist;
@@ -3071,14 +3085,21 @@ bool __folio_start_writeback_for_file_area(struct folio *folio, bool keep_write)
 				sb_mark_inode_writeback(mapping->host);
 		}
 		if (!folio_test_dirty(folio)){
-			xas_clear_mark(&xas, PAGECACHE_TAG_DIRTY);
-			/*上边此时只是标记file_area的dirty mark，这里标记file_area里的page的dirty mark*/
+			//xas_clear_mark(&xas, PAGECACHE_TAG_DIRTY);
+
+			/*上边此时只是标记file_area的dirty mark，这里标记file_area里的page的dirty mark。
+			 *错了，只有file_area的page的dirty mark标记位全被清理掉，才能清理file_area的mark标记*/
 			clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY);
+			if(0 == file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_DIRTY))
+                xas_clear_mark(&xas, PAGECACHE_TAG_DIRTY);
 		}
 		if (!keep_write){
-			xas_clear_mark(&xas, PAGECACHE_TAG_TOWRITE);
-			/*上边此时只是标记file_area的towrite mark，这里标记file_area里的page的towrite mark*/
+			//xas_clear_mark(&xas, PAGECACHE_TAG_TOWRITE);
+			/*上边此时只是标记file_area的towrite mark，这里标记file_area里的page的towrite mark
+			 *错了，只有file_area的page的towrite mark标记位全被清理掉，才能清理file_area的mark标记*/
 			clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_TOWRITE);
+			if(0 == file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_TOWRITE))
+                xas_clear_mark(&xas, PAGECACHE_TAG_TOWRITE);
 		}
 		xas_unlock_irqrestore(&xas, flags);
 	} else {

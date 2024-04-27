@@ -650,7 +650,7 @@ extern unsigned long  open_file_area_printk;
 //#define PAGE_BIT_OFFSET_IN_FILE_AREA_BASE (sizeof(&p_file_area->file_area_state)*8 - PAGE_COUNT_IN_AREA)//28  这个编译不通过
 #define PAGE_BIT_OFFSET_IN_FILE_AREA_BASE (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA)
 
-/*dirty mark:bit27~bit24 writeback mark:bit23~bit20  towrite mark:bit19~bit16*/
+/*writeback mark:bit27~bit24 dirty mark:bit23~bit20  towrite mark:bit19~bit16*/
 #define WRITEBACK_MARK_IN_FILE_AREA_BASE (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA*2)
 #define DIRTY_MARK_IN_FILE_AREA_BASE     (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA*3)
 #define TOWRITE_MARK_IN_FILE_AREA_BASE   (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA*4)
@@ -708,9 +708,9 @@ static inline void clear_file_area_page_mark_bit(struct file_area *p_file_area,u
     unsigned int file_area_page_bit_clear;
     
 	if(PAGECACHE_TAG_DIRTY == type){
-        file_area_page_bit_clear = ~(1 << (WRITEBACK_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area));
-	}else if (PAGECACHE_TAG_WRITEBACK == type){
         file_area_page_bit_clear = ~(1 << (DIRTY_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area));
+	}else if (PAGECACHE_TAG_WRITEBACK == type){
+        file_area_page_bit_clear = ~(1 << (WRITEBACK_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area));
 	}else{
         if(PAGECACHE_TAG_TOWRITE != type)
 		    panic("%s file_area:0x%llx file_area_state:0x%x page_offset_in_file_area:%d type:%d\n",__func__,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,type);
@@ -726,9 +726,9 @@ static inline void set_file_area_page_mark_bit(struct file_area *p_file_area,uns
     unsigned int file_area_page_mark_bit_set;
 	
 	if(PAGECACHE_TAG_DIRTY == type){
-        file_area_page_mark_bit_set = 1 << (WRITEBACK_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area);
-	}else if (PAGECACHE_TAG_WRITEBACK == type){
         file_area_page_mark_bit_set = 1 << (DIRTY_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area);
+	}else if (PAGECACHE_TAG_WRITEBACK == type){
+        file_area_page_mark_bit_set = 1 << (WRITEBACK_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area);
 	}else{
         if(PAGECACHE_TAG_TOWRITE != type)
 		    panic("%s file_area:0x%llx file_area_state:0x%x page_offset_in_file_area:%d type:%d\n",__func__,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,type);
@@ -742,12 +742,12 @@ static inline void set_file_area_page_mark_bit(struct file_area *p_file_area,uns
 //测试page_offset_in_file_area这个位置的page在p_file_area->file_area_state对应的bit位是否置1了
 static inline int is_file_area_page_mark_bit_set(struct file_area *p_file_area,unsigned char page_offset_in_file_area,xa_mark_t type)
 {
-	 unsigned int file_area_page_mark_bit_set = 1 << (PAGE_BIT_OFFSET_IN_FILE_AREA_BASE + page_offset_in_file_area);
+	 unsigned int file_area_page_mark_bit_set;
 
     if(PAGECACHE_TAG_DIRTY == type){
-        file_area_page_mark_bit_set = 1 << (WRITEBACK_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area);
-	}else if (PAGECACHE_TAG_WRITEBACK == type){
         file_area_page_mark_bit_set = 1 << (DIRTY_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area);
+	}else if (PAGECACHE_TAG_WRITEBACK == type){
+        file_area_page_mark_bit_set = 1 << (WRITEBACK_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area);
 	}else{
         if(PAGECACHE_TAG_TOWRITE != type)
 		    panic("%s file_area:0x%llx file_area_state:0x%x page_offset_in_file_area:%d type:%d\n",__func__,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,type);
@@ -761,18 +761,19 @@ static inline int is_file_area_page_mark_bit_set(struct file_area *p_file_area,u
 /*统计有多少个 mark page置位了，比如file_area有3个page是writeback，则返回3*/
 static inline int file_area_page_mark_bit_count(struct file_area *p_file_area,char type)
 {
-	unsigned int file_area_page_mark = 0;
+	unsigned int file_area_page_mark;
 	int count = 0;
+	unsigned long page_mark_mask = (1 << PAGE_COUNT_IN_AREA) - 1;/*与上0xF，得到4个bit哪些置位0*/
 
     if(PAGECACHE_TAG_DIRTY == type){
-        file_area_page_mark = (p_file_area->file_area_state >> WRITEBACK_MARK_IN_FILE_AREA_BASE) & PAGE_COUNT_IN_AREA_MASK;
+        file_area_page_mark = (p_file_area->file_area_state >> DIRTY_MARK_IN_FILE_AREA_BASE) & page_mark_mask;
 	}else if (PAGECACHE_TAG_WRITEBACK == type){
-        file_area_page_mark = (p_file_area->file_area_state >> PAGECACHE_TAG_WRITEBACK) & PAGE_COUNT_IN_AREA_MASK;
+        file_area_page_mark = (p_file_area->file_area_state >> WRITEBACK_MARK_IN_FILE_AREA_BASE) & page_mark_mask;
 	}else{
         if(PAGECACHE_TAG_TOWRITE != type)
 		    panic("%s file_area:0x%llx file_area_state:0x%x type:%d\n",__func__,(u64)p_file_area,p_file_area->file_area_state,type);
 		
-        file_area_page_mark = (p_file_area->file_area_state >> PAGECACHE_TAG_TOWRITE) & PAGE_COUNT_IN_AREA_MASK;
+        file_area_page_mark = (p_file_area->file_area_state >> TOWRITE_MARK_IN_FILE_AREA_BASE) & page_mark_mask;
 	}
     while(file_area_page_mark){
 		if(file_area_page_mark & 0x1)

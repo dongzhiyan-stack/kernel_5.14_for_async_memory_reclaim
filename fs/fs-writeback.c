@@ -403,12 +403,18 @@ static bool inode_do_switch_wbs_for_file_area(struct inode *inode,
 	 */
 	//xas_for_each_marked(&xas, folio, ULONG_MAX, PAGECACHE_TAG_DIRTY) {
 	xas_for_each_marked(&xas, p_file_area, ULONG_MAX, PAGECACHE_TAG_DIRTY) {
+	    long nr;
+		if(!is_file_area_entry(p_file_area))
+			panic("%s mapping:0x%llx p_file_area:0x%llx  error\n",__func__,(u64)mapping,(u64)p_file_area);
+
+        p_file_area = entry_to_file_area(p_file_area);
 		/*原有for循环是遍历保存page指针的xarray tree，统计有多少个dirty mark的page。现在是先统计有多少个有
 		 *dirty mark的file_area，再统计file_area有多少个有dirty mark的page，效果一样。mark_page_count是有dirty mark的page有效性判断*/
 		mark_page_count = 0;
 		for(i = 0;i < PAGE_COUNT_IN_AREA;i ++){
-			if (folio_test_dirty(folio)) {
-				long nr = folio_nr_pages(folio);
+			folio = p_file_area->pages[i];
+			if (folio && folio_test_dirty(folio)) {
+				nr = folio_nr_pages(folio);
 				wb_stat_mod(old_wb, WB_RECLAIMABLE, -nr);
 				wb_stat_mod(new_wb, WB_RECLAIMABLE, nr);
 
@@ -416,30 +422,39 @@ static bool inode_do_switch_wbs_for_file_area(struct inode *inode,
 			}
 		}
 		if(mark_page_count != file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_DIRTY)){
-		    panic("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld dirty page count error\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index);
+		    panic("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld dirty page count %d %d error\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index,mark_page_count,file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_DIRTY));
 		}
 		/*这里有个for循环退出的问题需要深思。原本for循环是一直查找page，直至查找的page索引是ULONG_MAX才退出。这里该怎么处理？
-		 *假如一共5个page，对应2个file_area。这个for循环就要循环两次，判断这两个file_area所有page，这样正好不会有遗漏。额外代码不用添加*/
+		 *假如一共5个page，对应2个file_area。这个for循环里的代码会执行两次，判断这两个file_area所有page，这样正好不会有遗漏。额外代码不用添加*/
 	}
 
 	xas_set(&xas, 0);
 	//xas_for_each_marked(&xas, folio, ULONG_MAX, PAGECACHE_TAG_WRITEBACK) {
 	xas_for_each_marked(&xas, p_file_area, ULONG_MAX, PAGECACHE_TAG_WRITEBACK) {
+	    long nr;
+		if(!is_file_area_entry(p_file_area))
+			panic("%s mapping:0x%llx p_file_area:0x%llx  error\n",__func__,(u64)mapping,(u64)p_file_area);
+
+		p_file_area = entry_to_file_area(p_file_area);
+
 		if(0 == file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_WRITEBACK)){
 		    panic("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld dirty page count error\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index);
 		}
 		mark_page_count = 0;
 		for(i = 0;i < PAGE_COUNT_IN_AREA;i ++){
-		    long nr = folio_nr_pages(folio);
-			/*这个异常判断用两个panic替代*/
-		    //WARN_ON_ONCE(!folio_test_writeback(folio));
-		    wb_stat_mod(old_wb, WB_WRITEBACK, -nr);
-		    wb_stat_mod(new_wb, WB_WRITEBACK, nr);
-			
-			mark_page_count ++;
+			folio = p_file_area->pages[i];
+			if(folio && folio_test_writeback(folio)){
+				nr = folio_nr_pages(folio);
+				/*这个异常判断用两个panic替代*/
+				//WARN_ON_ONCE(!folio_test_writeback(folio));
+				wb_stat_mod(old_wb, WB_WRITEBACK, -nr);
+				wb_stat_mod(new_wb, WB_WRITEBACK, nr);
+				
+				mark_page_count ++;
+			}
 		}
 		if(!mark_page_count || (mark_page_count != file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_WRITEBACK))){
-		    panic("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld writeback page count error\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index);
+		    panic("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld writeback page count %d_%d error\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index,mark_page_count,file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_WRITEBACK));
 		}
 	}
 
