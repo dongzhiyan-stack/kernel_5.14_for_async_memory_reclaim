@@ -16,6 +16,13 @@
 #include <linux/hardirq.h> /* for in_interrupt() */
 #include <linux/hugetlb_inline.h>
 
+#define ASYNC_MEMORY_RECLAIM_IN_KERNEL
+
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL 
+extern void *get_folio_from_file_area(struct address_space *mapping,pgoff_t index);
+extern void disable_mapping_file_area(struct inode *inode);
+#endif
+
 struct folio_batch;
 
 unsigned long invalidate_mapping_pages(struct address_space *mapping,
@@ -1184,7 +1191,6 @@ void page_cache_async_readahead(struct address_space *mapping,
 	page_cache_async_ra(&ractl, page_folio(page), req_count);
 }
 
-extern void *get_folio_from_file_area(struct address_space *mapping,pgoff_t index);
 static inline struct folio *__readahead_folio(struct readahead_control *ractl)
 {
 	struct folio *folio;
@@ -1197,10 +1203,14 @@ static inline struct folio *__readahead_folio(struct readahead_control *ractl)
 		ractl->_batch_count = 0;
 		return NULL;
 	}
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 	if(ractl->mapping->rh_reserved1)
 		folio = get_folio_from_file_area(ractl->mapping,ractl->_index);
-	else
+	else		
 		folio = xa_load(&ractl->mapping->i_pages, ractl->_index);
+#else
+	folio = xa_load(&ractl->mapping->i_pages, ractl->_index);
+#endif	
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 	ractl->_batch_count = folio_nr_pages(folio);
 

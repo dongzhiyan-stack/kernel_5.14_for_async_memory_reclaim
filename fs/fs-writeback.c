@@ -31,7 +31,9 @@
 #include <linux/memcontrol.h>
 #include "internal.h"
 
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 #include "../mm/async_memory_reclaim_for_cold_file_area.h"
+#endif
 /*
  * 4MB minimal write chunk size
  */

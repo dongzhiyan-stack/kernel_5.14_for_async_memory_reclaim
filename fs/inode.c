@@ -275,15 +275,16 @@ void __destroy_inode(struct inode *inode)
 }
 EXPORT_SYMBOL(__destroy_inode);
 
-extern void disable_mapping_file_area(struct inode *inode);
 static void destroy_inode(struct inode *inode)
 {
 	const struct super_operations *ops = inode->i_sb->s_op;
 
 	BUG_ON(!list_empty(&inode->i_lru));
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL	
 	if(inode->i_mapping && inode->i_mapping->rh_reserved1){
 		disable_mapping_file_area(inode);
 	}
+#endif	
 	__destroy_inode(inode);
 	if (ops->destroy_inode) {
 		ops->destroy_inode(inode);

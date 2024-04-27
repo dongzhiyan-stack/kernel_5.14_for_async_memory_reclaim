@@ -1,15 +1,11 @@
 #include "async_memory_reclaim_for_cold_file_area.h"
 
 struct hot_cold_file_global hot_cold_file_global_info;
-//置1会把内存回收信息详细打印出来
-int shrink_page_printk_open1 = 0;
-//不怎么关键的调试信息
-int shrink_page_printk_open = 0;
 unsigned long async_memory_reclaim_status = 1;
 
-unsigned long file_area_in_update_count;
-unsigned long file_area_in_update_lock_count;
-unsigned long file_area_move_to_head_count;
+unsigned int file_area_in_update_count;
+unsigned int file_area_in_update_lock_count;
+unsigned int file_area_move_to_head_count;
 
 static void inline file_area_access_count_clear(struct file_area *p_file_area)
 {

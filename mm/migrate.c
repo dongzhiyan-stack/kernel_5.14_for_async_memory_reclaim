@@ -56,7 +56,10 @@
 #include <trace/events/migrate.h>
 
 #include "internal.h"
+
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 #include "async_memory_reclaim_for_cold_file_area.h"
+#endif
 
 int isolate_movable_page(struct page *page, isolate_mode_t mode)
 {

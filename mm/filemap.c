@@ -56,9 +56,10 @@
 
 #include <asm/mman.h>
 
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 #include "async_memory_reclaim_for_cold_file_area.h"
-unsigned long xarray_tree_node_cache_hit;
-unsigned long  open_file_area_printk = 1;
+unsigned int xarray_tree_node_cache_hit;
+unsigned int open_file_area_printk = 1;
 int is_test_file(struct address_space *mapping)
 {
 #define TEST_FILE_NAME "kern_test_fi"
@@ -82,7 +83,6 @@ int is_test_file(struct address_space *mapping)
 
 	return 0;
 }
-
 inline struct  file_area * find_file_area_from_xarray_cache_node(struct xa_state *xas,struct file_stat *p_file_stat, pgoff_t index)
 {
 	//这段代码必须放到rcu lock里，保证node结构不会被释放
@@ -133,7 +133,8 @@ void disable_mapping_file_area(struct inode *inode)
 	inode->i_mapping->rh_reserved1 = 0;
 }
 EXPORT_SYMBOL(disable_mapping_file_area);
-	/*
+#endif
+/*
  * Shared mappings implemented 30.11.1994. It's not fully working yet,
  * though.
  *

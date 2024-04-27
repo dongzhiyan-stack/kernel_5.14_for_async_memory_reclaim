@@ -54,7 +54,8 @@
 #include <linux/xarray.h>
 
 
-#define ASYNC_MEMORY_RECLAIM_IN_KERNEL
+//#define ASYNC_MEMORY_RECLAIM_IN_KERNEL
+
 //一个file_stat结构里缓存的热file_area结构个数
 #define FILE_AREA_CACHE_COUNT 3
 //置1才允许异步内存回收
@@ -595,7 +596,7 @@ FILE_STAT_STATUS(mapcount_file_area)
 	TEST_FILE_STATUS_ERROR(name)
 
 FILE_STATUS(large_file)
-	//FILE_STATUS(delete)
+//FILE_STATUS(delete)
 FILE_STATUS(drop_cache)
 
 	//清理文件的状态，大小文件等
@@ -622,31 +623,31 @@ FILE_STATUS(drop_cache)
 	SET_FILE_STATUS_ATOMIC(name) \
 	TEST_FILE_STATUS_ATOMIC(name) \
 	TEST_FILE_STATUS_ATOMIC_ERROR(name) \
-	/* 为什么 file_stat的in_free_page、free_page_done的状态要使用test_and_set_bit_lock/clear_bit_unlock，主要是get_file_area_from_file_stat_list()函数开始内存回收，
-	 * 要把file_stat设置成in_free_page状态，此时hot_file_update_file_status()里就不能再把这些file_stat的file_area跨链表移动。而把file_stat设置成
-	 * in_free_page状态，只是加了global global_lock锁，没有加file_stat->file_stat_lock锁。没有加锁file_stat->file_stat_lock锁，就无法避免
-	 * hot_file_update_file_status()把把这些file_stat的file_area跨链表移动。因此，file_stat的in_free_page、free_page_done的状态设置要考虑原子操作吧，
-	 * 并且此时要避免此时有进程在执行hot_file_update_file_status()函数。这些在hot_file_update_file_status()和get_file_area_from_file_stat_list()函数
-	 * 有说明其实file_stat设置in_free_page、free_page_done 状态都有spin lock加锁，不使用test_and_set_bit_lock、clear_bit_unlock也行，
-	 * 目前暂定先用test_and_set_bit_lock、clear_bit_unlock吧，后续再考虑其他优化*/
-	FILE_STATUS_ATOMIC(free_page)
-	FILE_STATUS_ATOMIC(free_page_done)
-	FILE_STATUS_ATOMIC(delete)
-	FILE_STATUS_ATOMIC(cache_file)
+/* 为什么 file_stat的in_free_page、free_page_done的状态要使用test_and_set_bit_lock/clear_bit_unlock，主要是get_file_area_from_file_stat_list()函数开始内存回收，
+ * 要把file_stat设置成in_free_page状态，此时hot_file_update_file_status()里就不能再把这些file_stat的file_area跨链表移动。而把file_stat设置成
+ * in_free_page状态，只是加了global global_lock锁，没有加file_stat->file_stat_lock锁。没有加锁file_stat->file_stat_lock锁，就无法避免
+ * hot_file_update_file_status()把把这些file_stat的file_area跨链表移动。因此，file_stat的in_free_page、free_page_done的状态设置要考虑原子操作吧，
+ * 并且此时要避免此时有进程在执行hot_file_update_file_status()函数。这些在hot_file_update_file_status()和get_file_area_from_file_stat_list()函数
+ * 有说明其实file_stat设置in_free_page、free_page_done 状态都有spin lock加锁，不使用test_and_set_bit_lock、clear_bit_unlock也行，
+ * 目前暂定先用test_and_set_bit_lock、clear_bit_unlock吧，后续再考虑其他优化*/
+FILE_STATUS_ATOMIC(free_page)
+FILE_STATUS_ATOMIC(free_page_done)
+FILE_STATUS_ATOMIC(delete)
+FILE_STATUS_ATOMIC(cache_file)
 FILE_STATUS_ATOMIC(mmap_file)
 
-	extern struct hot_cold_file_global hot_cold_file_global_info;
-	extern unsigned long async_memory_reclaim_status;
-	extern unsigned long  open_file_area_printk;
-	/** file_area的page bit/writeback mark bit/dirty mark bit/towrite mark bit统计**************************************************************/
+extern struct hot_cold_file_global hot_cold_file_global_info;
+extern unsigned long async_memory_reclaim_status;
+extern unsigned int open_file_area_printk;
+/** file_area的page bit/writeback mark bit/dirty mark bit/towrite mark bit统计**************************************************************/
 #define FILE_AREA_PAGE_COUNT_SHIFT (XA_CHUNK_SHIFT + PAGE_COUNT_IN_AREA_SHIFT)//6+2
 #define FILE_AREA_PAGE_COUNT_MASK ((1 << FILE_AREA_PAGE_COUNT_SHIFT) - 1)//0xFF 
 
-	/*file_area->file_area_state 的bit31~bit28 这个4个bit位标志file_area。注意，现在按照一个file_area只有4个page在
-	 *p_file_area->file_area_state的bit28~bit31写死了。如果file_area代表8个page，这里就得改动了!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-	 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-	 * */
-	//#define PAGE_BIT_OFFSET_IN_FILE_AREA_BASE (sizeof(&p_file_area->file_area_state)*8 - PAGE_COUNT_IN_AREA)//28  这个编译不通过
+/*file_area->file_area_state 的bit31~bit28 这个4个bit位标志file_area。注意，现在按照一个file_area只有4个page在
+ *p_file_area->file_area_state的bit28~bit31写死了。如果file_area代表8个page，这里就得改动了!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ * */
+//#define PAGE_BIT_OFFSET_IN_FILE_AREA_BASE (sizeof(&p_file_area->file_area_state)*8 - PAGE_COUNT_IN_AREA)//28  这个编译不通过
 #define PAGE_BIT_OFFSET_IN_FILE_AREA_BASE (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA)
 
 	/*writeback mark:bit27~bit24 dirty mark:bit23~bit20  towrite mark:bit19~bit16*/
