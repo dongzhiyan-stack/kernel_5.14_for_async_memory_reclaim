@@ -62,10 +62,10 @@ unsigned int xarray_tree_node_cache_hit;
 unsigned int open_file_area_printk = 1;
 int is_test_file(struct address_space *mapping)
 {
+#if 0
 #define TEST_FILE_NAME "kern_test_fi"
 	struct dentry *dentry = NULL;
 	struct inode *inode = NULL;
-
 	if(mapping && mapping->host && !hlist_empty(&mapping->host->i_dentry)){
 		inode = mapping->host;
 		spin_lock(&inode->i_lock);
@@ -80,7 +80,14 @@ int is_test_file(struct address_space *mapping)
 		}
 		spin_unlock(&inode->i_lock);
 	}
-
+#else
+	const char *file_system_name;
+	if(mapping && mapping->host && mapping->host->i_sb){
+        file_system_name = mapping->host->i_sb->s_type->name;
+		if(0 == strcmp(file_system_name,"ext4") /*|| 0 == strcmp(file_system_name,"xfs")*/)
+		    return 1;
+	}
+#endif	
 	return 0;
 }
 inline struct  file_area * find_file_area_from_xarray_cache_node(struct xa_state *xas,struct file_stat *p_file_stat, pgoff_t index)
@@ -5260,13 +5267,17 @@ static inline struct folio *next_map_page(struct address_space *mapping,
 //static struct folio *next_uptodate_page_for_file_area(struct folio *folio,
 static struct folio *next_uptodate_page_for_file_area(struct file_area **p_file_area_ori,
 		struct address_space *mapping,
-		struct xa_state *xas, pgoff_t end_pgoff,unsigned long *page_offset_in_file_area,int get_page_from_file_area)
+		struct xa_state *xas, pgoff_t end_pgoff,unsigned int *page_offset_in_file_area,int get_page_from_file_area)
 {
 	unsigned long max_idx;
 	//令page索引与上0x3得到它在file_area的pages[]数组的下标
-	unsigned int page_offset_in_file_area_temp = *page_offset_in_file_area & PAGE_COUNT_IN_AREA_MASK;
+	unsigned int page_offset_in_file_area_temp = *page_offset_in_file_area;
 	struct folio *folio;
 	struct file_area *p_file_area = *p_file_area_ori;
+
+	if(open_file_area_printk){
+	    printk("1:%s %s %d xas.xa_index:%ld page_offset_in_file_area_temp:%d get_page_from_file_area:%d end_pgoff:%ld\n",__func__,current->comm,current->pid,xas->xa_index,page_offset_in_file_area_temp,get_page_from_file_area,end_pgoff);
+	}
 
 	/*file_area还有剩下page没有遍历完，直接goto find_page_from_file_area获取剩下的page*/
 	if(get_page_from_file_area)
@@ -5282,24 +5293,34 @@ static struct folio *next_uptodate_page_for_file_area(struct file_area **p_file_
 			continue;
 		//if (xa_is_value(folio))
 		//	continue;
-		if (xa_is_value(folio) || !is_file_area_entry(p_file_area))
+		if (xa_is_value(p_file_area) || !is_file_area_entry(p_file_area))
 			panic("1:%s %s %d mapping:0x%llx p_file_area:0x%llx file_area_state:0x%x error\n",__func__,current->comm,current->pid,(u64)mapping,(u64)p_file_area,p_file_area->file_area_state);
 
 		p_file_area = entry_to_file_area(p_file_area);
 
 find_page_from_file_area:
 		if(page_offset_in_file_area_temp >= PAGE_COUNT_IN_AREA)
-			panic("1:%s %s %d mapping:0x%llx p_file_area:0x%llx page_offset_in_file_area_temp:%d error\n",__func__,current->comm,current->pid,(u64)mapping,(u64)p_file_area,page_offset_in_file_area_temp);
+			panic("2:%s %s %d mapping:0x%llx p_file_area:0x%llx page_offset_in_file_area_temp:%d error\n",__func__,current->comm,current->pid,(u64)mapping,(u64)p_file_area,page_offset_in_file_area_temp);
 
-		folio = p_file_area->pages[page_offset_in_file_area_temp];
-		if(!folio)
-			goto next_folio;
 		/*原函数在xas_next_entry()里判断要查找的page索引是否超出end_pgoff，超出的话就退出循环。这里因为
 		 *xas_next_entry()查找的是file_area，故在这里要专门判断超找的page索引是否超出end_pgoff*/
-		if((xas->xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area_temp > end_pgoff)
+		if((xas->xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area_temp > end_pgoff){
+			if(open_file_area_printk){
+				printk("2:%s %s %d p_file_area:0x%llx file_area_state:0x%x xas.xa_index:%ld page_offset_in_file_area_temp:%d return NULL\n",__func__,current->comm,current->pid,(u64)p_file_area,p_file_area->file_area_state,xas->xa_index,page_offset_in_file_area_temp);
+			}
+			return NULL;
+		}
+
+		folio = p_file_area->pages[page_offset_in_file_area_temp];
+		if(open_file_area_printk){
+			printk("3:%s %s %d p_file_area:0x%llx file_area_state:0x%x folio:0x%llx xas.xa_index:%ld page_offset_in_file_area_temp:%d folio->index:%ld\n",__func__,current->comm,current->pid,(u64)p_file_area,p_file_area->file_area_state,(u64)folio,xas->xa_index,page_offset_in_file_area_temp,folio != NULL ?folio->index:-1);
+		}
+
+		if(!folio)
+			goto next_folio;
 
 		if (folio_test_locked(folio))
-				goto next_folio;
+			goto next_folio;
 		//continue;不能continue，此时是去查找下一个file_area了，要goto next_folio查找file_area里的下一个page
 		if (!folio_try_get_rcu(folio))
 			goto next_folio;
@@ -5332,7 +5353,8 @@ find_page_from_file_area:
 		 *令上一次传入的file_area失效，这样filemap_map_pages->next_map_page()才会查找新的file_area*/
 		if(page_offset_in_file_area_temp < (PAGE_COUNT_IN_AREA -1)){
 			/*page_offset_in_file_area_temp加1再赋值，下次执行该函数才会从file_area的下一个page开始查找*/
-			*page_offset_in_file_area = page_offset_in_file_area_temp + 1;
+			//*page_offset_in_file_area = page_offset_in_file_area_temp + 1;
+			*page_offset_in_file_area = page_offset_in_file_area_temp;
 			if(p_file_area != *p_file_area_ori)
 				*p_file_area_ori = p_file_area;
 		}
@@ -5341,15 +5363,28 @@ find_page_from_file_area:
 			*p_file_area_ori = NULL;
 		}
 
+		if(open_file_area_printk){
+			printk("4:%s %s %d p_file_area:0x%llx find folio:0x%llx xas page index:%ld folio->index:%ld\n",__func__,current->comm,current->pid,(u64)p_file_area,(u64)folio,(xas->xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area_temp,folio->index);
+		}
 		return folio;
 
 		/*重点，遇到非法的page，不能直接执行下次循环，而是要去next_folio分支，令page_offset_in_file_area_temp加1，查询file_area的下一个page是否合法*/
 unlock:
 		folio_unlock(folio);
+
+	    if(open_file_area_printk){
+	        printk("5:%s %s %d unlock\n",__func__,current->comm,current->pid);
+	    }
 skip:
 		folio_put(folio);
+	    if(open_file_area_printk){
+	        printk("5:%s %s %d skip\n",__func__,current->comm,current->pid);
+	    }
 
 next_folio:
+	    if(open_file_area_printk){
+	        printk("6:%s %s %d next_folio xas page index:%ld\n",__func__,current->comm,current->pid,(xas->xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area_temp);
+	    }
 		page_offset_in_file_area_temp ++;
 		/*如果page_offset_in_file_area_temp小于4则goto find_page_from_file_area查找file_area里的下一个page。否则
 		 *按顺序执行xas_next_entry()去查找下一个索引的file_area*/
@@ -5368,7 +5403,7 @@ next_folio:
 
 static inline struct folio *first_map_page_for_file_area(struct address_space *mapping,
 		struct xa_state *xas,
-		pgoff_t end_pgoff,unsigned long *page_offset_in_file_area,struct file_area **p_file_area)
+		pgoff_t end_pgoff,unsigned int *page_offset_in_file_area,struct file_area **p_file_area)
 {
 	/*找到第一个有效page，一直向后找,直至找到传入的最大索引，依然找不到返回NULL*/
 	//return next_uptodate_page_for_file_area(xas_find(xas, end_pgoff),
@@ -5382,7 +5417,7 @@ static inline struct folio *first_map_page_for_file_area(struct address_space *m
 
 static inline struct folio *next_map_page_for_file_area(struct address_space *mapping,
 		struct xa_state *xas,
-		pgoff_t end_pgoff,unsigned long *page_offset_in_file_area,struct file_area **p_file_area)
+		pgoff_t end_pgoff,unsigned int *page_offset_in_file_area,struct file_area **p_file_area)
 {
 	//return next_uptodate_page(xas_next_entry(xas, end_pgoff),
 	//			  mapping, xas, end_pgoff);
@@ -5396,7 +5431,6 @@ static inline struct folio *next_map_page_for_file_area(struct address_space *ma
 		return next_uptodate_page_for_file_area(p_file_area,mapping, xas, end_pgoff,page_offset_in_file_area,0);
 	}
 }
-#endif
 vm_fault_t filemap_map_pages_for_file_area(struct vm_fault *vmf,
 		pgoff_t start_pgoff, pgoff_t end_pgoff)
 {
@@ -5415,7 +5449,7 @@ vm_fault_t filemap_map_pages_for_file_area(struct vm_fault *vmf,
 	/*初值必须赋于NULL，表示file_area无效，否则会令first_map_page_for_file_area()错误使用这个file_area*/
 	struct file_area *p_file_area = NULL;
 	//令page索引与上0x3得到它在file_area的pages[]数组的下标，记录第一个page在第一个file_area里的偏移
-	unsigned long page_offset_in_file_area = start_pgoff & PAGE_COUNT_IN_AREA_MASK;
+	unsigned int page_offset_in_file_area = start_pgoff & PAGE_COUNT_IN_AREA_MASK;
 	unsigned long folio_index_for_xa_index;
 
 	rcu_read_lock();
@@ -5428,7 +5462,7 @@ vm_fault_t filemap_map_pages_for_file_area(struct vm_fault *vmf,
 		ret = VM_FAULT_NOPAGE;
 		goto out;
 	}
-
+    /*addr是映射start_pgoff这个索引page对应的用户态虚拟地址*/
 	addr = vma->vm_start + ((start_pgoff - vma->vm_pgoff) << PAGE_SHIFT);
 	vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, addr, &vmf->ptl);
 	do {
@@ -5480,15 +5514,15 @@ unlock:
 		}
 		folio_unlock(folio);
 		folio_put(folio);
-		//} while ((folio = next_map_page_for_file_area(mapping, &xas, end_pgoff)) != NULL);
+	//} while ((folio = next_map_page(mapping, &xas, end_pgoff)) != NULL);
 	} while ((folio = next_map_page_for_file_area(mapping, &xas, end_pgoff,&page_offset_in_file_area,&p_file_area)) != NULL);
-		pte_unmap_unlock(vmf->pte, vmf->ptl);
+	pte_unmap_unlock(vmf->pte, vmf->ptl);
 out:
-		rcu_read_unlock();
-		WRITE_ONCE(file->f_ra.mmap_miss, mmap_miss);
-		return ret;
-	}
-
+	rcu_read_unlock();
+	WRITE_ONCE(file->f_ra.mmap_miss, mmap_miss);
+	return ret;
+}
+#endif
 vm_fault_t filemap_map_pages(struct vm_fault *vmf,
 			     pgoff_t start_pgoff, pgoff_t end_pgoff)
 {
