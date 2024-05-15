@@ -59,7 +59,7 @@
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 #include "async_memory_reclaim_for_cold_file_area.h"
 unsigned int xarray_tree_node_cache_hit;
-unsigned int open_file_area_printk = 1;
+unsigned int open_file_area_printk = 0;
 int is_test_file(struct address_space *mapping)
 {
 #if 0
@@ -84,7 +84,7 @@ int is_test_file(struct address_space *mapping)
 	const char *file_system_name;
 	if(mapping && mapping->host && mapping->host->i_sb){
         file_system_name = mapping->host->i_sb->s_type->name;
-		if(0 == strcmp(file_system_name,"ext4") /*|| 0 == strcmp(file_system_name,"xfs")*/)
+		if(0 == strcmp(file_system_name,"ext4") || 0 == strcmp(file_system_name,"xfs"))
 		    return 1;
 	}
 #endif	
@@ -1457,7 +1457,7 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 				p_file_area = entry_to_file_area(entry);
 
 				//page已经添加到file_area了
-				if(folio == p_file_area->pages[page_offset_in_file_area]){
+				if(NULL != p_file_area->pages[page_offset_in_file_area]){
 					xas_set_err(&xas, -EEXIST);
 					goto unlock;
 				}
@@ -4245,7 +4245,7 @@ retry:
 	 p_file_area赋值时，也对xa_node_vaild赋值所在父节点node。保证 p_file_area和xa_node_vaild是一体的。然后到
 	 这里时，p_file_area是最后一次查找的有效page的file_area，xa_node_vaild是它所在的父节点node，可以直接赋值*/
 	//if(xa_is_node(xas.xa_node) && (p_file_stat->xa_node_cache != xas.xa_node)){
-	if(xa_node_vaild && (p_file_stat->xa_node_cache != xa_node_vaild)){
+	if(p_file_area && xa_node_vaild && (p_file_stat->xa_node_cache != xa_node_vaild)){
 	    /*保存父节点node和这个node节点slots里最小的page索引。这两个赋值可能被多进程并发赋值，导致
 	     *mapping->rh_reserved2和mapping->rh_reserved3 可能不是同一个node节点的，错乱了。这就有大问题了！
 	     *没事，这种情况上边的if(page && page->index == offset)就会不成立了*/
@@ -5281,7 +5281,8 @@ static struct folio *next_uptodate_page_for_file_area(struct file_area **p_file_
 
 	/*file_area还有剩下page没有遍历完，直接goto find_page_from_file_area获取剩下的page*/
 	if(get_page_from_file_area)
-		goto find_page_from_file_area;
+		goto next_folio;
+		//goto find_page_from_file_area;
 
 	do {
 		//if (!folio)
@@ -5345,6 +5346,7 @@ find_page_from_file_area:
 		if (((xas->xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area_temp) >= max_idx)
 			goto unlock;
 
+#if 0
 		/*page_offset_in_file_area保存当前查找到的page在file_area的索引，下次filemap_map_pages再次执行next_map_page()
 		 *时，直接令page_offset_in_file_area加1而从file_area查找到下一个索引的page，不用再查找xarray tree得到page。但是有个
 		 *前提，page_offset_in_file_area_temp必须小于3。因为如果page_offset_in_file_area_temp是3，说明当前file_area里的
@@ -5353,8 +5355,7 @@ find_page_from_file_area:
 		 *令上一次传入的file_area失效，这样filemap_map_pages->next_map_page()才会查找新的file_area*/
 		if(page_offset_in_file_area_temp < (PAGE_COUNT_IN_AREA -1)){
 			/*page_offset_in_file_area_temp加1再赋值，下次执行该函数才会从file_area的下一个page开始查找*/
-			//*page_offset_in_file_area = page_offset_in_file_area_temp + 1;
-			*page_offset_in_file_area = page_offset_in_file_area_temp;
+			*page_offset_in_file_area = page_offset_in_file_area_temp + 1;
 			if(p_file_area != *p_file_area_ori)
 				*p_file_area_ori = p_file_area;
 		}
@@ -5362,7 +5363,24 @@ find_page_from_file_area:
 			*page_offset_in_file_area = 0;
 			*p_file_area_ori = NULL;
 		}
-
+#else
+		/*上边的方案有个重大bug，就是令page_offset_in_file_area_temp加1后赋值给*page_offset_in_file_area。这直接导致回到
+		 *filemap_map_pages_for_file_area()函数里执行 
+		 folio_index_for_xa_index = (xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area;
+		 addr += (folio_index_for_xa_index - last_pgoff) << PAGE_SHIFT;
+		 计算page映射的用户态虚拟地址addr就有问题了。因为令page_offset_in_file_area_temp加1后赋值给*page_offset_in_file_area了。
+		 这导致计算出来的page索引folio_index_for_xa_index 比 page真实索引大1，然后page映射的用户态虚拟地址addr也就大了
+		 PAGE_SHIFT即4K。这样就出大问题了，映射page的用户态虚拟地址addr与page 就不一直了，虚拟地址映射的物理地址错乱了！
+		 这导致mmap映射文件后，从0地址读到的4K数据，不是文件地址0~4k的文件数据，而是4k~8K的文件地址数据。因此，这里绝对要
+		 保持page_offset_in_file_area_temp的现在的数据复制给page_offset_in_file_area，保持原值!这样回到
+		 filemap_map_pages_for_file_area()函数里执行folio_index_for_xa_index = (xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area
+		 计算出的page索引folio_index_for_xa_index与page的真实索引是相等的。
+		 **/
+		*page_offset_in_file_area = page_offset_in_file_area_temp;
+		/*即便page_offset_in_file_area是3页不再对*p_file_area_ori=NULL设置NULL了。下次执行next_map_page_for_file_area()函数中处理，
+		 *发现p_file_area有效，但page_offset_in_file_area是3，说明当前file_area的page都用过了，直接查找下一个file_area。*/
+		*p_file_area_ori = p_file_area;
+#endif
 		if(open_file_area_printk){
 			printk("4:%s %s %d p_file_area:0x%llx find folio:0x%llx xas page index:%ld folio->index:%ld\n",__func__,current->comm,current->pid,(u64)p_file_area,(u64)folio,(xas->xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area_temp,folio->index);
 		}
@@ -5414,7 +5432,7 @@ static inline struct folio *first_map_page_for_file_area(struct address_space *m
 	return next_uptodate_page_for_file_area(p_file_area,
 			mapping, xas, end_pgoff,page_offset_in_file_area,0);
 }
-
+#if 0
 static inline struct folio *next_map_page_for_file_area(struct address_space *mapping,
 		struct xa_state *xas,
 		pgoff_t end_pgoff,unsigned int *page_offset_in_file_area,struct file_area **p_file_area)
@@ -5431,6 +5449,29 @@ static inline struct folio *next_map_page_for_file_area(struct address_space *ma
 		return next_uptodate_page_for_file_area(p_file_area,mapping, xas, end_pgoff,page_offset_in_file_area,0);
 	}
 }
+#else
+static inline struct folio *next_map_page_for_file_area(struct address_space *mapping,
+		struct xa_state *xas,
+		pgoff_t end_pgoff,unsigned int *page_offset_in_file_area,struct file_area **p_file_area)
+{
+	//return next_uptodate_page(xas_next_entry(xas, end_pgoff),
+	//			  mapping, xas, end_pgoff);
+
+	/*如果p_file_area不是NULL且page_offset_in_file_area小于3，说明上一次执行当前函数或第一次执行first_map_page_for_file_area()函数，
+	 *找到的file_area还有剩下的page没使用，本次要查找的page在是file_page->pages[page_offset_in_file_area+1]。否则走else分支查找下一个file_area*/
+	if(*p_file_area && *page_offset_in_file_area < (PAGE_COUNT_IN_AREA - 1))
+		return next_uptodate_page_for_file_area(p_file_area,mapping, xas, end_pgoff,page_offset_in_file_area,1);
+	else{
+		/*到这个分支，有两种情况，一种是*p_file_area本身是NULL，必须查找新的file_area。另一种是它非NULL，但是*page_offset_in_file_area是3，此时
+		 * 也要查找下一个file_area，因此它的page都遍历过了。但是需要对 *page_offset_in_file_area强制清0，表示从下一个file_area的第1个page开始遍历*/
+		if(*p_file_area && *page_offset_in_file_area == (PAGE_COUNT_IN_AREA - 1))
+			*page_offset_in_file_area = 0;
+
+		*p_file_area = xas_next_entry(xas, end_pgoff >> PAGE_COUNT_IN_AREA_SHIFT);
+		return next_uptodate_page_for_file_area(p_file_area,mapping, xas, end_pgoff,page_offset_in_file_area,0);
+	}
+}
+#endif
 vm_fault_t filemap_map_pages_for_file_area(struct vm_fault *vmf,
 		pgoff_t start_pgoff, pgoff_t end_pgoff)
 {
