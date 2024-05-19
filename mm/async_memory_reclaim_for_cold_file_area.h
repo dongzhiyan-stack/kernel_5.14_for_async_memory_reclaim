@@ -229,8 +229,12 @@ struct file_area
 	};
 	//该file_area里的某个page最近一次被回收的时间点，单位秒
 	unsigned int shrink_time;
-	//file_area通过file_area_list添加file_stat的各种链表
-	struct list_head file_area_list;
+	union{
+		//file_area通过file_area_list添加file_stat的各种链表
+		struct list_head file_area_list;
+		//rcu_head和list_head都是16个字节
+		struct rcu_head		i_rcu;
+	};
 	//该file_area代表的N个连续page的起始page索引
 	pgoff_t start_index;
 	struct folio __rcu *pages[PAGE_COUNT_IN_AREA];
@@ -257,8 +261,12 @@ struct hot_cold_file_area_tree_root
 struct file_stat
 {
 	struct address_space *mapping;
-	//file_stat通过hot_cold_file_list添加到hot_cold_file_global的file_stat_hot_head链表
-	struct list_head hot_cold_file_list;
+	union{
+		//file_stat通过hot_cold_file_list添加到hot_cold_file_global的file_stat_hot_head链表
+		struct list_head hot_cold_file_list;
+		//rcu_head和list_head都是16个字节
+		struct rcu_head		i_rcu;
+	};
 	//file_stat状态
 	unsigned long file_stat_status;
 	//总file_area个数
@@ -845,7 +853,6 @@ static inline struct file_stat *file_stat_alloc_and_init(struct address_space *m
 	//初始化file_area_hot头结点
 	INIT_LIST_HEAD(&p_file_stat->file_area_hot);
 	INIT_LIST_HEAD(&p_file_stat->file_area_temp);
-	//INIT_LIST_HEAD(&p_file_stat->file_area_cold);
 	INIT_LIST_HEAD(&p_file_stat->file_area_free_temp);
 	INIT_LIST_HEAD(&p_file_stat->file_area_free);
 	INIT_LIST_HEAD(&p_file_stat->file_area_refault);

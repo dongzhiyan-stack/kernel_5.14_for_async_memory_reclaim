@@ -84,7 +84,7 @@ int is_test_file(struct address_space *mapping)
 	const char *file_system_name;
 	if(mapping && mapping->host && mapping->host->i_sb){
         file_system_name = mapping->host->i_sb->s_type->name;
-		if(0 == strcmp(file_system_name,"ext4") || 0 == strcmp(file_system_name,"xfs"))
+		if(0 == strcmp(file_system_name,"ext4") /*|| 0 == strcmp(file_system_name,"xfs")*/)
 		    return 1;
 	}
 #endif	
@@ -132,14 +132,6 @@ inline struct  file_area * find_file_area_from_xarray_cache_node(struct xa_state
 	}
 	return NULL;
 }
-void disable_mapping_file_area(struct inode *inode)
-{
-	if(open_file_area_printk){	
-		printk("%s mapping:0x%llx file_stat:0x%lx\n",__func__,(u64)inode->i_mapping,inode->i_mapping->rh_reserved1);
-	}
-	inode->i_mapping->rh_reserved1 = 0;
-}
-EXPORT_SYMBOL(disable_mapping_file_area);
 #endif
 /*
  * Shared mappings implemented 30.11.1994. It's not fully working yet,
@@ -1447,6 +1439,14 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 					order, gfp);
 		}
 		xas_lock_irq(&xas);
+		/*file_stat可能会被方法删除，则分配一个新的file_stat，具体看cold_file_stat_delete()函数*/
+		if(0 == mapping->rh_reserved1){
+			p_file_stat  = file_stat_alloc_and_init(mapping);
+			if(!p_file_stat){
+				xas_set_err(&xas, -ENOMEM);
+				goto error; 
+			}
+		}
 		xas_for_each_conflict(&xas, entry) {
 			old = entry;
 			//xas_lock_irq加锁后，检测到待添加的file_area已经被其他进程并发添加到xarray tree了
