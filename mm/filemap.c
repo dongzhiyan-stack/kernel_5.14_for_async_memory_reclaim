@@ -267,9 +267,19 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
 	}
 
 	//xas_store(&xas, shadow);不再使用shadow机制
-	xas_store(&xas, NULL);
+	/*这里有个隐藏很深的坑?????????在file_area的page都释放后，file_area还要一直停留在xarray tree。因为后续如果file_area的page又被
+	 *访问了，而对应xarray tree的槽位已经有file_area，依据这点判定发生了refault，file_area是refault file_area，后续长时间不再回收
+	 file_area的page。故正常情况file_area的page全被释放了但file_area不能从xarray tree剔除。只有下边两种情况才行
+     1:file_area的page被释放后，过了很长时间，file_area的page依然没人访问，则异步内存回收线程释放掉file_area结构，并把file_area从xarray tree剔除
+     2:该文件被iput()释放inode了，mapping_exiting(maping)成立，此时执行到该函数也要把没有page的file_area从xarray tree剔除
+    */
+	if(mapping_exiting(mapping))
+		xas_store(&xas, NULL);
+
 	/*清理xarray tree的dirty、writeback、towrite标记，重点!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!*/
 	xas_init_marks(&xas);
+	/*清理file_area所有的towrite、dirty、writeback的mark标记。这个函数是在把file_area从xarray tree剔除时执行的，之后file_area是无效的，有必要吗????????????*/
+	clear_file_area_towrite_dirty_writeback_mark(p_file_area);
 
 	//folio->mapping = NULL;必须放到前边，这个隐藏的问题很深呀
 
@@ -529,8 +539,13 @@ find_page_from_file_area:
 		clear_file_area_page_bit(p_file_area,page_offset_in_file_area);
 		/*只有这个file_area没有page了，才会xas_store(&xas, NULL)清空这个file_area。这种情况完全是可能存在的，比如
 		 *一个file_area有page0、page1、page2、page3，现在从page1开始 delete，并没有从page0，那当delete 到page3时，
-		 *是不能xas_store(&xas, NULL)把file_area清空的*/
-		if(!file_area_have_page(p_file_area))
+		 *是不能xas_store(&xas, NULL)把file_area清空的
+        
+		 正常情况file_area没有page不能直接从xarray tree剔除。只有file_area的page被释放后长时间依然没人访问才能由异
+		 步内存回收线程把file_area从xarray tree剔除 或者 文件iput释放结构时mapping_exiting(mapping)成立，执行到该函数，
+		 才能把file_area从xarray tree剔除
+        */
+		if(!file_area_have_page(p_file_area) && mapping_exiting(mapping))
 			xas_store(&xas, NULL);
 
 next_page:
@@ -3035,7 +3050,7 @@ EXPORT_SYMBOL(__filemap_get_folio);
  *xas_find(xas, max)了，而要去刚才查到的page的file_area里，继续查找其他page。直到一个file_area的page全被获取到
  *才能执行xas_find(xas, max)去查找下一个file_area*/
 static inline struct folio *find_get_entry_for_file_area(struct xa_state *xas, pgoff_t max,
-		xa_mark_t mark,struct file_area **p_file_area,unsigned int *page_offset_in_file_area)
+		xa_mark_t mark,struct file_area **p_file_area,unsigned int *page_offset_in_file_area,struct address_space *mapping)
 {
 	struct folio *folio;
 	//计算要查找的最大page索引对应的file_area索引
@@ -3074,6 +3089,32 @@ retry:
 	//if (!folio || xa_is_value(folio))//注释掉，放到下边判断
 	//	return folio;
 	*p_file_area = entry_to_file_area(*p_file_area);
+	/*当文件iput()后，执行该函数，遇到没有file_area的page，则要强制把xarray tree剔除。原因是：
+	 * iput_final->evict->truncate_inode_pages_final->truncate_inode_pages->truncate_inode_pages_range->find_lock_entries
+	 *调用到该函数，mapping_exiting(mapping)成立。当遇到没有page的file_area，要强制执行xas_store(&xas, NULL)把file_area从xarray tree剔除。
+	 *因为此时file_area没有page，则从find_lock_entries()保存到fbatch->folios[]数组file_area的page是0个，则从find_lock_entries函数返回
+	 *truncate_inode_pages_range后，因为fbatch->folios[]数组没有保存该file_area的page，则不会执行
+	 *delete_from_page_cache_batch(mapping, &fbatch)->page_cache_delete_batch()，把这个没有page的file_area从xarray tree剔除。于是只能在
+	 *truncate_inode_pages_range->find_lock_entries调用到该函数时，遇到没有page的file_area，强制把file_area从xarray tree剔除了*/
+	if(!file_area_have_page(*p_file_area) && mapping_exiting(mapping)){
+		/*为了不干扰原有的xas，重新定义一个xas_del*/
+		XA_STATE(xas_del, &mapping->i_pages, (*p_file_area)->start_index >> PAGE_COUNT_IN_AREA_SHIFT);
+		/*需要用文件xarray tree的lock加锁，因为xas_store()操作必须要xarray tree加锁*/
+		xas_lock_irq(&xas_del);
+		xas_store(&xas_del, NULL);
+		xas_unlock_irq(&xas_del);
+
+		*page_offset_in_file_area = 0;
+		/*goto retry分支里执行xas_find()，会自动令xas->xa_offset++，进而查找下一个索引的file_area*/
+		goto retry;
+	}
+#if 0	
+	/*如果file_area没有page，直接continue遍历下一个file_area，这段代码是否多余?????????????得额外判断file_area的索引是否超出最大值!*/
+	if(!file_area_have_page(*p_file_area)){
+		*page_offset_in_file_area = 0;
+		goto retry;
+	}
+#endif	
 
 find_page_from_file_area:
 	if(*page_offset_in_file_area >= PAGE_COUNT_IN_AREA){
@@ -3219,7 +3260,7 @@ unsigned find_get_entries_for_file_area(struct address_space *mapping, pgoff_t s
 		printk("%s %s %d mapping:0x%llx start:%ld end:%ld\n",__func__,current->comm,current->pid,(u64)mapping,start,end);
 	}
 	rcu_read_lock();
-	while ((folio = find_get_entry_for_file_area(&xas, end, XA_PRESENT,&p_file_area,&page_offset_in_file_area)) != NULL) {
+	while ((folio = find_get_entry_for_file_area(&xas, end, XA_PRESENT,&p_file_area,&page_offset_in_file_area,mapping)) != NULL) {
 		//indices[fbatch->nr] = xas.xa_index; xax.xa_index现在代表的是file_area索引，不是page索引
 		indices[fbatch->nr] = folio->index;
 		if (!folio_batch_add(fbatch, folio))
@@ -3308,7 +3349,7 @@ unsigned find_lock_entries_for_file_area(struct address_space *mapping, pgoff_t 
 		printk("%s %s %d mapping:0x%llx start:%ld end:%ld\n",__func__,current->comm,current->pid,(u64)mapping,start,end);
 	}
 	rcu_read_lock();
-	while ((folio = find_get_entry_for_file_area(&xas, end, XA_PRESENT,&p_file_area,&page_offset_in_file_area))) {
+	while ((folio = find_get_entry_for_file_area(&xas, end, XA_PRESENT,&p_file_area,&page_offset_in_file_area,mapping))) {
 		if (!xa_is_value(folio)) {
 			if (folio->index < start)
 				goto put;
@@ -3451,7 +3492,7 @@ unsigned find_get_pages_range_for_file_area(struct address_space *mapping, pgoff
 	}
 
 	rcu_read_lock();
-	while ((folio = find_get_entry_for_file_area(&xas, end, XA_PRESENT,&p_file_area,&page_offset_in_file_area))) {
+	while ((folio = find_get_entry_for_file_area(&xas, end, XA_PRESENT,&p_file_area,&page_offset_in_file_area,mapping))) {
 		/* Skip over shadow, swap and DAX entries */
 		if (xa_is_value(folio))
 			continue;
@@ -3776,7 +3817,7 @@ unsigned find_get_pages_range_tag_for_file_area(struct address_space *mapping, p
 	}
 
 	rcu_read_lock();
-	while ((folio = find_get_entry_for_file_area(&xas, end, tag,&p_file_area,&page_offset_in_file_area))) {
+	while ((folio = find_get_entry_for_file_area(&xas, end, tag,&p_file_area,&page_offset_in_file_area,mapping))) {
 		/*
 		 * Shadow entries should never be tagged, but this iteration
 		 * is lockless so there is a window for page reclaim to evict

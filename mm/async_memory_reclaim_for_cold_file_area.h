@@ -710,7 +710,11 @@ static inline int file_area_have_page(struct file_area *p_file_area)
 {
 	return  (p_file_area->file_area_state & ~((1 << PAGE_BIT_OFFSET_IN_FILE_AREA_BASE) - 1));//0XF000 0000
 }
-
+/*清理file_area所有的towrite、dirty、writeback的mark标记。这个函数是在把file_area从xarray tree剔除时执行的，之后file_area是无效的，有必要吗????????????*/
+static inline void clear_file_area_towrite_dirty_writeback_mark(struct file_area *p_file_area)
+{
+    
+}
 static inline void clear_file_area_page_mark_bit(struct file_area *p_file_area,unsigned char page_offset_in_file_area,xa_mark_t type)
 {
 	unsigned int file_area_page_bit_clear;

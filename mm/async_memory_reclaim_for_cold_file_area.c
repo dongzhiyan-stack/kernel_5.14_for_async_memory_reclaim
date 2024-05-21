@@ -89,7 +89,7 @@ static int cold_file_area_detele_nolock(struct hot_cold_file_global *p_hot_cold_
 	
 	//xas_lock_irq(&xas);
 	if(file_area_have_page(p_file_area)){
-		printk("%s file_area:0x%llx file_area_state:0x%x\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+		panic("%s file_area:0x%llx file_area_state:0x%x has page\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 		/*那就把它再移动回file_stat->file_area_temp链表头。有这个必要吗？没有必要的!因为该file_area是在file_stat->file_area_free链表上，如果
 		  被访问了而执行hot_file_update_file_status()函数，会把这个file_area立即移动到file_stat->file_area_temp链表，这里就没有必要做了!!!!!*/
 		//xas_unlock_irq(&xas);
@@ -155,8 +155,8 @@ static int  cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_g
 	xa_lock_irq(xarray_i_pages);
     
 	/*正常这里释放文件file_stat结构时，file_area指针的xarray tree的所有成员都已经释放，是个空树，否则就触发panic*/
-	if(p_file_stat->mapping->xa_head != NULL)
-		panic("file_stat_del:0x%llx file_area_count:%d !=0 p_file_stat->mapping:0x%llx !!!!!!!!\n",(u64)p_file_stat_del,p_file_stat_del->file_area_state,(u64)p_file_stat_del->mapping->rh_reserved1);
+	if(p_file_stat_del->mapping->i_pages.xa_head != NULL)
+		panic("file_stat_del:0x%llx 0x%llx !!!!!!!!\n",(u64)p_file_stat_del,(u64)p_file_stat_del->mapping->i_pages.xa_head);
 
 	/*如果file_stat的file_area个数大于0，说明此时该文件被方法访问了，在hot_file_update_file_status()中分配新的file_area。
 	 *此时这个file_stat就不能释放了*/
@@ -211,14 +211,9 @@ static int  cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_g
 static int  cold_file_stat_delete_nolock(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat_del)
 {
 	/*二者先前已经在__destroy_inode_handler_post()处理过，不可能成立*/
-	if(!file_stat_in_delete(p_file_stat_del) || p_file_stat->mapping->rh_reserved1)
-		panic("file_stat_del:0x%llx file_area_count:%d !=0 p_file_stat->mapping:0x%llx !!!!!!!!\n",(u64)p_file_stat_del,p_file_stat_del->file_area_state,(u64)p_file_stat_del->mapping->rh_reserved1);
-
-    /*正常这里释放文件file_stat结构时，file_area指针的xarray tree的所有成员都已经释放，是个空树，否则就触发panic*/
-	if(p_file_stat->mapping->xa_head != NULL)
-		panic("file_stat_del:0x%llx file_area_count:%d !=0 p_file_stat->mapping:0x%llx !!!!!!!!\n",(u64)p_file_stat_del,p_file_stat_del->file_area_state,(u64)p_file_stat_del->mapping->rh_reserved1);
-
-
+	if(!file_stat_in_delete(p_file_stat_del))
+		panic("file_stat_del:0x%llx status:0x%lx!!!!!!!!\n",(u64)p_file_stat_del,p_file_stat_del->file_stat_status);
+    
 	/*使用global_lock加锁是因为要把file_stat从p_hot_cold_file_global的链表中剔除，防止此时其他进程并发向p_hot_cold_file_global的链表添加file_stat,
 	 *是否有必要改为 spin_lock_irqsave，之前就遇到过用spin_lock_irq导致打乱中断状态而造成卡死?????????????????????????????????????????????*/
 	spin_lock_irq(&p_hot_cold_file_global->global_lock);
@@ -288,15 +283,31 @@ static int  cold_file_stat_delete_nolock(struct hot_cold_file_global *p_hot_cold
  直接依赖这个备份的xarray tree，依次执行xas_store(&xas, NULL)释放xarray tree，就可以了xas_store(&xas, NULL)释放xarray tree了。但是
  这个方法感觉是旁门左道。
 
+ 最终敲定的方法是：还是iput_final->evict->truncate_inode_pages_final->truncate_inode_pages->truncate_inode_pages_range中把file_area从
+ xarra tree从剔除释放掉，但是不用修改truncate_inode_pages_range源码，而是修改最后调用到的find_lock_entries->find_get_entry_for_file_area源码
+ 1:在truncate_inode_pages_range->find_lock_entries-> find_get_entry_for_file_area函数中，mapping_exiting(mapping)成立，
+   当遇到没有page的file_area，要强制执行xas_store(&xas, NULL)把file_area从xarray tree剔除。
+   因为此时file_area没有page，则从find_lock_entries()保存到fbatch->folios[]数组file_area的page是0个，则从find_lock_entries函数返回
+   truncate_inode_pages_range后，因为fbatch->folios[]数组没有保存该file_area的page，则不会执行
+   delete_from_page_cache_batch(mapping, &fbatch)->page_cache_delete_batch()，把这个没有page的file_area从xarray tree剔除。于是只能在
+   truncate_inode_pages_range->find_lock_entries调用到该函数时，遇到没有page的file_area，强制把file_area从xarray tree剔除了
+
+2：针对truncate_inode_pages_range->find_lock_entries-> find_get_entry_for_file_area函数中，遇到有page的file_area，则find_lock_entries
+   函数中会把folio保存到batch->folios[]数组，然后会执行到delete_from_page_cache_batch(mapping, &fbatch)->page_cache_delete_batch()，
+   把folio从xarray tree剔除，当剔除file_area最后一个folio时，file_area没有page了，则page_cache_delete_batch()函数中强制
+   执行xas_store(&xas, NULL)把file_area从xarray tree剔除释放。但是，为防止iput最后执行到__destroy_inode_handler_post时，xarray tree
+   是否是空树，即判断inode->i_mapping->i_pages.xa_head是否NULL，否则crash
 */
+
 static void __destroy_inode_handler_post(struct inode *inode)
 {
 	if(inode && inode->i_mapping && inode->i_mapping->rh_reserved1){
 		struct file_stat *p_file_stat = (struct file_stat *)inode->i_mapping->rh_reserved1;
+  
+		if(inode->i_mapping->i_pages.xa_head != NULL)
+			panic("%s xarray tree not clear:0x%llx\n",__func__,(u64)(inode->i_mapping->i_pages.xa_head));
 
 		inode->i_mapping->rh_reserved1 = 0;
-		/*这里不能p_file_stat->mapping清NULL，因为接着执行cold_file_area_detele_nolock()释放该文件file_stat的所有file_area时，
-		 *还要用到p_file_stat->mapping而从xarray tree查找file_area*/
 		p_file_stat->mapping = NULL;
 
 		/*在这个加个内存屏障，保证前后代码隔离开。即file_stat有delete标记后，inode->i_mapping->rh_reserved1一定是0，p_file_stat->mapping一定是NULL*/
@@ -386,7 +397,7 @@ static unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_glo
 	if(file_stat_in_cache_file(p_file_stat_del))
 		cold_file_stat_delete_nolock(p_hot_cold_file_global,p_file_stat_del);
 	else
-		cold_mmap_file_stat_delete_nolock(p_hot_cold_file_global,p_file_stat_del);
+		cold_mmap_file_stat_delete(p_hot_cold_file_global,p_file_stat_del);
 
 	return del_file_area_count;
 }
