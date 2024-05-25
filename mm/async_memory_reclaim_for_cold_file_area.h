@@ -533,22 +533,22 @@ FILE_AREA_LIST_STATUS(mapcount_list)
 FILE_AREA_STATUS(cache)
 
 
-	/*******file_stat状态**********************************************************/
-	enum file_stat_status{//file_area_state是long类型，只有64个bit位可设置
-		F_file_stat_in_file_stat_hot_head_list,
-		F_file_stat_in_file_stat_temp_head_list,
-		F_file_stat_in_zero_file_area_list,
-		F_file_stat_in_mapcount_file_area_list,//文件file_stat是mapcount文件
-		F_file_stat_in_drop_cache,
-		F_file_stat_in_free_page,//正在遍历file_stat的file_area的page，尝试释放page
-		F_file_stat_in_free_page_done,//正在遍历file_stat的file_area的page，完成了page的内存回收,
-		F_file_stat_in_delete,
-		F_file_stat_in_cache_file,//cache文件，sysctl读写产生pagecache。有些cache文件可能还会被mmap映射，要与mmap文件互斥
-		F_file_stat_in_mmap_file,//mmap文件，有些mmap文件可能也会被sysctl读写产生pagecache，要与cache文件互斥
-		F_file_stat_in_large_file,
-		F_file_stat_lock,
-		F_file_stat_lock_not_block,//这个bit位置1，说明inode在删除的，但是获取file_stat锁失败
-	};
+/*******file_stat状态**********************************************************/
+enum file_stat_status{//file_area_state是long类型，只有64个bit位可设置
+	F_file_stat_in_file_stat_hot_head_list,
+	F_file_stat_in_file_stat_temp_head_list,
+	F_file_stat_in_zero_file_area_list,
+	F_file_stat_in_mapcount_file_area_list,//文件file_stat是mapcount文件
+	F_file_stat_in_drop_cache,
+	F_file_stat_in_free_page,//正在遍历file_stat的file_area的page，尝试释放page
+	F_file_stat_in_free_page_done,//正在遍历file_stat的file_area的page，完成了page的内存回收,
+	F_file_stat_in_delete,
+	F_file_stat_in_cache_file,//cache文件，sysctl读写产生pagecache。有些cache文件可能还会被mmap映射，要与mmap文件互斥
+	F_file_stat_in_mmap_file,//mmap文件，有些mmap文件可能也会被sysctl读写产生pagecache，要与cache文件互斥
+	F_file_stat_in_large_file,
+	F_file_stat_lock,
+	F_file_stat_lock_not_block,//这个bit位置1，说明inode在删除的，但是获取file_stat锁失败
+};
 //不能使用 clear_bit_unlock、test_and_set_bit_lock、test_bit，因为要求p_file_stat->file_stat_status是64位数据，但这里只是u8型数据
 
 #define MAX_FILE_STAT_LIST_BIT F_file_stat_in_free_page_done
@@ -905,6 +905,64 @@ out:
 
 	return p_file_area;
 }
+/*对文件inode加锁，如果inode已经处于释放状态则返回0，此时不能再遍历该文件的inode的address_space的radix tree获取page，释放page，
+ *此时inode已经要释放了，inode、address_space、radix tree都是无效内存。否则，令inode引用计数加1，然后其他进程就无法再释放这个
+ *文件的inode，此时返回1*/
+static int inline file_inode_lock(struct file_stat * p_file_stat)
+{
+	struct inode *inode = p_file_stat->mapping->host;
+
+	/*这里有个隐藏很深的bug!!!!!!!!!!!!!!!!如果此时其他进程并发执行iput()最后执行到__destroy_inode_handler_post()触发删除inode，
+	 *然后就会立即把inode结构释放掉。此时当前进程可能执行到file_inode_lock()函数的spin_lock(&inode->i_lock)时，但inode已经被释放了，
+	 则会访问已释放的inode的mapping的xarray 而crash。怎么防止这种并发？*/
+    
+	/*最初方案：当前函数执行lock_file_stat()对file_stat加锁。在__destroy_inode_handler_post()中也会lock_file_stat()加锁。防止
+	 * __destroy_inode_handler_post()中把inode释放了，而当前函数还在遍历该文件inode的mapping的xarray tree
+	 * 查询page，访问已经释放的内存而crash。这个方案太麻烦!!!!!!!!!!!!!!，现在的方案是使用rcu，这里
+	 * rcu_read_lock()和__destroy_inode_handler_post()中标记inode delete形成并发。极端情况是，二者同时执行，
+	 * 但这里rcu_read_lock后，进入rcu宽限期。而__destroy_inode_handler_post()执行后，触发释放inode，然后执行到destroy_inode()里的
+	 * call_rcu(&inode->i_rcu, i_callback)后，无法真正释放掉inode结构。当前函数可以放心使用inode、mapping、xarray tree。
+	 * 但有一点需注意，rcu_read_lock后不能休眠，否则rcu宽限期会无限延长。*/
+
+	//lock_file_stat(p_file_stat,0);
+	rcu_read_lock();
+	if(file_stat_in_delete(p_file_stat) || (NULL == p_file_stat->mapping)){
+		//不要忘了异常return要先释放锁
+		unlock_file_stat(p_file_stat);
+		return 0;
+	}
+
+	spin_lock(&inode->i_lock);
+	/*执行到这里，inode肯定没有被释放，并且inode->i_lock加锁成功，其他进程就无法再释放这个inode了。错了，又一个隐藏很深的bug。
+	 *!!!!!!!!!!!!!!!!因为其他进程此时可能正在iput()->__destroy_inode_handler_post()中触发释放inode。这里rcu_read_unlock后，
+	 *inode就会立即被释放掉，然后下边再使用inode就会访问无效inode结构而crash。rcu_read_unlock要放到对inode引用计数加1后*/
+
+	//unlock_file_stat(p_file_stat);
+	//rcu_read_unlock();
+
+	//如果inode已经被标记释放了，直接return
+	if( ((inode->i_state & (I_FREEING|I_WILL_FREE|I_NEW))) || atomic_read(&inode->i_count) == 0){
+		spin_unlock(&inode->i_lock);
+	    rcu_read_unlock();
+
+		//如果inode已经释放了，则要goto unsed_inode分支释放掉file_stat结构
+		return 0;
+	}
+	//令inode引用计数加1，之后就不用担心inode被其他进程释放掉
+	atomic_inc(&inode->i_count);
+	spin_unlock(&inode->i_lock);
+	
+	rcu_read_unlock();
+
+	return 1;
+}
+/*令inode引用计数减1，如果inode引用计数是0则释放inode结构*/
+static void inline file_inode_unlock(struct file_stat * p_file_stat)
+{
+    struct inode *inode = p_file_stat->mapping->host;
+    //令inode引用计数减1，如果inode引用计数是0则释放inode结构
+	iput(inode);
+}
 
 
 extern int hot_file_update_file_status(struct address_space *mapping,struct file_stat *p_file_stat,struct file_area *p_file_area,int access_count);
@@ -912,12 +970,8 @@ extern int hot_file_update_file_status(struct address_space *mapping,struct file
 extern void printk_shrink_param(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print);
 extern int hot_cold_file_print_all_file_stat(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print);//is_proc_print:1 通过proc触发的打印
 extern void get_file_name(char *file_name_path,struct file_stat * p_file_stat);
-extern void file_stat_free_leak_page(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat);
-extern int drop_cache_truncate_inode_pages(struct hot_cold_file_global *p_hot_cold_file_global);
-extern int hot_cold_file_proc_init(struct hot_cold_file_global *p_hot_cold_file_global);
-extern int hot_cold_file_proc_exit(struct hot_cold_file_global *p_hot_cold_file_global);
 extern unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct list_head *file_area_free);
 extern unsigned int cold_mmap_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct file_area *p_file_area,struct page *page_buf[],int cold_page_count);
 
-//extern unsigned int async_shrink_free_page(struct pglist_data *pgdat,struct lruvec *lruvec,struct list_head *page_list,struct scan_control *sc,struct reclaim_stat *stat);
+extern unsigned long shrink_inactive_list_async(unsigned long nr_to_scan, struct lruvec *lruvec,struct hot_cold_file_global *p_hot_cold_file_global, enum lru_list lru);
 #endif

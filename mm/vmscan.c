@@ -63,6 +63,9 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/vmscan.h>
 
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+#include "async_memory_reclaim_for_cold_file_area.h"
+#endif
 struct scan_control {
 	/* How many pages shrink_list() should reclaim */
 	unsigned long nr_to_reclaim;
@@ -2401,7 +2404,146 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 			nr_scanned, nr_reclaimed, &stat, sc->priority, file);
 	return nr_reclaimed;
 }
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+/*现在对内存回收代码做了很大改进，就是使用内核原生内存回收函数isolate_lru_pages、shrink_page_list、putback_inactive_pages，不再使用自己编写的。
+ *主要是出于稳定性考虑，毕竟使用内核原生的更稳定。这里主要有几点说下
+  1:现在file_area内存回收以memory cgroup为主，参与内存回收的page都保证是一个lruvec的，因此可以直接使用内核内存回收原生的
+    isolate_lru_pages、shrink_page_list、putback_inactive_pages函数了，不用再使用我编写的代码了
+  2:可以直接kprobe内核shrink_inactive_list函数进行内存回收，这样就不用使用复制使用内核原生代码了。但是，shrink_inactive_list里的
+    too_many_isolated()和lru_add_drain()函数就会执行到，影响到内存回收。还有很多冗余的统计代码。都要考虑
+  3:最后，还有一个隐藏很深的知识点。首先cold_file_isolate_lru_pages_and_shrink函数里，把同一个lruvec的32个page移动到inactive lru链表尾，然后
+    里边执行shrink_inactive_list_async函数隔离并释放掉刚才移动到lruvec的inactive lru链表尾的32个page。这里就有个问题，如果隔离这32个page前，
+	其他进程把page移动到lruvec的inactive lru链表尾怎么办？完全有可能，这样的话，这里释放掉的32个page就不是同一个文件的文件页了，有了干扰page。
+	但是情况没那么严重，因为 新的page添加到lru链表时，是添加到inactive lru链表头。active lru链表的page也是移动到inactive lru链表尾。只有
+	有racliam标记的page在writeback完成后，才会移动到inactive lru链表尾。这种page本来就应该释放掉，只不过会被我的异步内存回收线程释放掉而已。
+ */
+static unsigned long
+shrink_inactive_list_for_file_area(unsigned long nr_to_scan, struct lruvec *lruvec,
+		     struct scan_control *sc, enum lru_list lru)
+{
+	LIST_HEAD(page_list);
+	unsigned long nr_scanned;
+	unsigned int nr_reclaimed = 0;
+	unsigned long nr_taken;
+	struct reclaim_stat stat;
+	bool file = is_file_lru(lru);
+	enum vm_event_item item;
+	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
+	bool stalled = false;
 
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+	while (unlikely(too_many_isolated(pgdat, file, sc))) {
+		if (stalled)
+			return 0;
+
+		/* wait a bit for the reclaimer. */
+		stalled = true;
+		reclaim_throttle(pgdat, VMSCAN_THROTTLE_ISOLATED);
+
+		/* We are about to die and free our memory. Return now. */
+		if (fatal_signal_pending(current))
+			return SWAP_CLUSTER_MAX;
+	}
+
+	lru_add_drain();
+#endif
+	spin_lock_irq(&lruvec->lru_lock);
+
+	nr_taken = isolate_lru_pages(nr_to_scan, lruvec, &page_list,
+				     &nr_scanned, sc, lru);
+
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+	__mod_node_page_state(pgdat, NR_ISOLATED_ANON + file, nr_taken);
+	item = current_is_kswapd() ? PGSCAN_KSWAPD : PGSCAN_DIRECT;
+	if (!cgroup_reclaim(sc))
+		__count_vm_events(item, nr_scanned);
+	__count_memcg_events(lruvec_memcg(lruvec), item, nr_scanned);
+	__count_vm_events(PGSCAN_ANON + file, nr_scanned);
+#endif
+	spin_unlock_irq(&lruvec->lru_lock);
+
+	if (nr_taken == 0)
+		return 0;
+
+	nr_reclaimed = shrink_page_list(&page_list, pgdat, sc, &stat, false);
+
+	spin_lock_irq(&lruvec->lru_lock);
+	move_pages_to_lru(lruvec, &page_list);
+
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+	__mod_node_page_state(pgdat, NR_ISOLATED_ANON + file, -nr_taken);
+	item = current_is_kswapd() ? PGSTEAL_KSWAPD : PGSTEAL_DIRECT;
+	if (!cgroup_reclaim(sc))
+		__count_vm_events(item, nr_reclaimed);
+	__count_memcg_events(lruvec_memcg(lruvec), item, nr_reclaimed);
+	__count_vm_events(PGSTEAL_ANON + file, nr_reclaimed);
+#endif	
+	spin_unlock_irq(&lruvec->lru_lock);
+
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+	lru_note_cost(lruvec, file, stat.nr_pageout);
+#endif	
+	mem_cgroup_uncharge_list(&page_list);
+	free_unref_page_list(&page_list);
+
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+	/*
+	 * If dirty pages are scanned that are not queued for IO, it
+	 * implies that flushers are not doing their job. This can
+	 * happen when memory pressure pushes dirty pages to the end of
+	 * the LRU before the dirty limits are breached and the dirty
+	 * data has expired. It can also happen when the proportion of
+	 * dirty pages grows not through writes but through memory
+	 * pressure reclaiming all the clean cache. And in some cases,
+	 * the flushers simply cannot keep up with the allocation
+	 * rate. Nudge the flusher threads in case they are asleep.
+	 */
+	if (stat.nr_unqueued_dirty == nr_taken)
+		wakeup_flusher_threads(WB_REASON_VMSCAN);
+#endif
+	sc->nr.dirty += stat.nr_dirty;
+	sc->nr.congested += stat.nr_congested;
+	sc->nr.unqueued_dirty += stat.nr_unqueued_dirty;
+	sc->nr.writeback += stat.nr_writeback;
+	sc->nr.immediate += stat.nr_immediate;
+	sc->nr.taken += nr_taken;
+	if (file)
+		sc->nr.file_taken += nr_taken;
+
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+	trace_mm_vmscan_lru_shrink_inactive(pgdat->node_id,
+			nr_scanned, nr_reclaimed, &stat, sc->priority, file);
+#endif	
+	return nr_reclaimed;
+}
+unsigned long
+shrink_inactive_list_async(unsigned long nr_to_scan, struct lruvec *lruvec,
+		     struct hot_cold_file_global *p_hot_cold_file_global, enum lru_list lru)
+{
+	unsigned int isolate_pages,nr_reclaimed;
+    struct scan_control sc = {
+		.gfp_mask = __GFP_RECLAIM,
+		.order = 1,
+		.priority = DEF_PRIORITY,
+		.may_writepage = 0,
+		.may_unmap = 0,
+		.may_swap = 0,
+		.reclaim_idx = MAX_NR_ZONES - 1,
+		.no_demotion = 1,
+	};
+
+    nr_reclaimed = shrink_inactive_list_for_file_area(nr_to_scan, lruvec,&sc, lru);
+
+	p_hot_cold_file_global->hot_cold_file_shrink_counter.writeback_count += sc.nr.writeback;
+	p_hot_cold_file_global->hot_cold_file_shrink_counter.dirty_count += sc.nr.dirty;
+	p_hot_cold_file_global->hot_cold_file_shrink_counter.free_pages_count += nr_reclaimed;
+
+	isolate_pages = sc.nr.taken;
+
+	return isolate_pages;
+}
+EXPORT_SYMBOL(shrink_inactive_list_async);
+#endif
 /*
  * shrink_active_list() moves pages from the active LRU to the inactive LRU.
  *
