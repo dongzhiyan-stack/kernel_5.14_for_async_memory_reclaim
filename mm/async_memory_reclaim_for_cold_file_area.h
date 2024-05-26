@@ -797,6 +797,9 @@ static inline int file_area_page_mark_bit_count(struct file_area *p_file_area,ch
 	return count;
 }
 /*****************************************************************************************************************************************************/
+extern int shrink_page_printk_open1;
+extern int shrink_page_printk_open;
+
 static inline void lock_file_stat(struct file_stat * p_file_stat,int not_block){
 	//如果有其他进程对file_stat的lock加锁，while成立，则休眠等待这个进程释放掉lock，然后自己加锁
 	while(test_and_set_bit_lock(F_file_stat_lock, &p_file_stat->file_stat_status)){
@@ -831,7 +834,7 @@ static inline int get_page_from_file_area(struct file_stat *p_file_stat,pgoff_t 
 }
 static inline struct file_stat *file_stat_alloc_and_init(struct address_space *mapping)
 {
-	struct file_stat * p_file_stat;
+	struct file_stat * p_file_stat = NULL;
 
 	/*这里有个问题，hot_cold_file_global_info.global_lock有个全局大锁，每个进程执行到这里就会获取到。合理的是
 	  应该用每个文件自己的spin lock锁!比如file_stat里的spin lock锁，但是在这里，每个文件的file_stat结构还没分配!!!!!!!!!!!!*/
@@ -877,6 +880,99 @@ static inline struct file_stat *file_stat_alloc_and_init(struct address_space *m
 out:	
 	spin_unlock(&hot_cold_file_global_info.global_lock);
 
+	return p_file_stat;
+}
+/*mmap文件跟cache文件的file_stat都保存在mapping->rh_reserved1，这样会不会有冲突?并且，主要有如下几点
+ * 1：cache文件分配file_stat并保存到mapping->rh_reserved1是file_stat_alloc_and_init()函数，mmap文件分配file_stat并
+ * 添添加到mapping->rh_reserved1是add_mmap_file_stat_to_list()。二者第一次执行时，都是该文件被读写，第一次分配page
+ * 然后执行__filemap_add_folio_for_file_area()把page添加到xarray tree。这个过程需要防止并发，对mapping->rh_reserved1同时赋值
+ * 这点，在__filemap_add_folio_for_file_area()开头有详细注释
+ * 2:cache文件和mmap文件一个用的global file_global_lock，一个是global mmap_file_global_lock锁。分开使用，否则这个
+ * 全局锁同时被多个进程抢占，阻塞时间会很长，把大锁分成小锁。但是分开用，就无法防止cache文件和mmap的并发!!!
+ * 3：最重要的，一个文件，即有mmap映射读写、又有cache读写，怎么判断冷热和内存回收？mapping->rh_reserved1代表的file_stat
+ * 是代表cache文件还是mmap文件？按照先到先得处理：
+ *
+ * 如果__filemap_add_folio_for_file_area()中添加该文件的第一个page到xarray tree，
+ * 分配file_stat时，该文件已经建立了mmap映射，即mapping->i_mmap非NULL，则该文件就是mmap文件，然后执行add_mmap_file_stat_to_list()
+ * 分配的file_stat添加global mmap_file_stat_uninit_head链表。后续，如果该文件被cache读写(read/write系统调用读写)，执行到
+ * hot_file_update_file_status()函数时，只更新file_area的age，立即返回，不能再把file_area启动到file_stat->hot、refault等链表。
+ * mmap文件的file_area是否移动到file_stat->hot、refault等链表，在check_file_area_cold_page_and_clear()中进行。其实，这种
+ * 情况下，这些file_area在 hot_file_update_file_status()中把file_area启动到file_stat->hot、refault等链表，似乎也可以????????????
+ *
+ * 相反，如果__filemap_add_folio_for_file_area()中添加该文件的第一个page到xarray tree，该文件没有mmap映射，则判定为cache文件。
+ * 如果后续该文件又mmap映射了，依然判定为cache文件，否则关系会错乱。但不用担心回收内存有问题，因为cache文件内存回收会跳过mmap
+ * 的文件页。
+ * */
+static inline struct file_stat *add_mmap_file_stat_to_list(struct address_space *mapping)
+{
+	struct file_stat *p_file_stat = NULL;
+
+	spin_lock(&hot_cold_file_global_info.mmap_file_global_lock);
+	/*1:如果两个进程同时访问一个文件，同时执行到这里，需要加锁。第1个进程加锁成功后，分配file_stat并赋值给
+	  mapping->rh_reserved1，第2个进程获取锁后执行到这里mapping->rh_reserved1就会成立
+      2:异步内存回收功能禁止了*/
+	if(mapping->rh_reserved1){
+		p_file_stat = (struct file_stat *)mapping->rh_reserved1;
+		spin_unlock(&hot_cold_file_global_info.mmap_file_global_lock);
+		printk("%s file_stat:0x%llx already alloc\n",__func__,(u64)mapping->rh_reserved1);
+		goto out;  
+	}
+
+	p_file_stat = kmem_cache_alloc(hot_cold_file_global_info.file_stat_cachep,GFP_ATOMIC);
+	if (!p_file_stat) {
+		spin_unlock(&hot_cold_file_global_info.mmap_file_global_lock);
+		printk("%s file_stat alloc fail\n",__func__);
+		goto out;
+	}
+	//设置file_stat的in mmap文件状态
+	hot_cold_file_global_info.mmap_file_stat_count++;
+	memset(p_file_stat,0,sizeof(struct file_stat));
+	//设置文件是mmap文件状态，有些mmap文件可能还会被读写，要与cache文件互斥，要么是cache文件要么是mmap文件，不能两者都是 
+	set_file_stat_in_mmap_file(p_file_stat);
+	INIT_LIST_HEAD(&p_file_stat->file_area_hot);
+	INIT_LIST_HEAD(&p_file_stat->file_area_temp);
+	INIT_LIST_HEAD(&p_file_stat->file_area_free_temp);
+	INIT_LIST_HEAD(&p_file_stat->file_area_free);
+	INIT_LIST_HEAD(&p_file_stat->file_area_refault);
+	//file_area对应的page的pagecount大于0的，则把file_area移动到该链表
+	INIT_LIST_HEAD(&p_file_stat->file_area_mapcount);
+
+	//mapping->file_stat记录该文件绑定的file_stat结构，将来判定是否对该文件分配了file_stat
+	mapping->rh_reserved1 = (unsigned long)p_file_stat;
+	p_file_stat->mapping = mapping;
+	/*现在把新的file_stat移动到gloabl  mmap_file_stat_uninit_head了，并且不设置状态图，目前没必要设置状态。
+	 *遍历完一次page后才会移动到temp链表。*/
+#if 1
+	/*新分配的file_stat必须设置in_file_stat_temp_head_list链表。这个设置file_stat状态的操作必须放到 把file_stat添加到
+	 *tmep链表前边，还要加内存屏障。否则会出现一种极端情况，异步内存回收线程从temp链表遍历到这个file_stat，
+	 *但是file_stat还没有设置为in_temp_list状态。这样有问题会触发panic。因为mmap文件异步内存回收线程，
+	 *从temp链表遍历file_stat没有mmap_file_global_lock加锁，所以与这里存在并发操作。而针对cache文件，异步内存回收线程
+	 *从global temp链表遍历file_stat，全程global_lock加锁，不会跟向global temp链表添加file_stat存在方法，但最好改造一下*/
+	set_file_stat_in_file_stat_temp_head_list(p_file_stat);
+	smp_wmb();
+#endif	
+
+	/*把针对该文件分配的file_stat结构添加到hot_cold_file_global_info的mmap_file_stat_uninit_head链表。
+	 * 现在新的方案是直接把刚分配的file_stat添加到global mmap_file_stat_temp_head链表*/
+#if 0	
+	list_add(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_uninit_head);
+#else
+	list_add(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_temp_head);
+#endif	
+	/*新分配的file_stat必须设置in_file_stat_temp_head_list链表。注意，现在新分配的file_stat是先添加到global mmap_file_stat_uninit_head
+	 *链表，而不是添加到global temp链表，因此此时file_stat并没有设置in_file_stat_temp_head_list属性。这点很关键。但是现在
+	 新的方案需要了*/
+
+	//set_file_stat_in_file_stat_temp_head_list(p_file_stat);
+	spin_lock_init(&p_file_stat->file_stat_lock);
+
+	spin_unlock(&hot_cold_file_global_info.mmap_file_global_lock);
+	//strncpy(p_file_stat->file_name,file->f_path.dentry->d_iname,MMAP_FILE_NAME_LEN-1);
+	//p_file_stat->file_name[MMAP_FILE_NAME_LEN-1] = 0;
+	if(shrink_page_printk_open)
+		printk("%s file_stat:0x%llx\n",__func__,(u64)p_file_stat);
+
+out:
 	return p_file_stat;
 }
 static inline struct file_area *file_area_alloc_and_init(unsigned int area_index_for_page,struct file_stat * p_file_stat)
@@ -963,15 +1059,29 @@ static void inline file_inode_unlock(struct file_stat * p_file_stat)
     //令inode引用计数减1，如果inode引用计数是0则释放inode结构
 	iput(inode);
 }
+static void inline file_area_access_count_clear(struct file_area *p_file_area)
+{
+	atomic_set(&p_file_area->access_count,0);
+}
+static void inline file_area_access_count_add(struct file_area *p_file_area,int count)
+{
+	atomic_add(count,&p_file_area->access_count);
+}
+static int inline file_area_access_count_get(struct file_area *p_file_area)
+{
+	return atomic_read(&p_file_area->access_count);
+}
 
 
 extern int hot_file_update_file_status(struct address_space *mapping,struct file_stat *p_file_stat,struct file_area *p_file_area,int access_count);
-
 extern void printk_shrink_param(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print);
 extern int hot_cold_file_print_all_file_stat(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print);//is_proc_print:1 通过proc触发的打印
 extern void get_file_name(char *file_name_path,struct file_stat * p_file_stat);
 extern unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct list_head *file_area_free);
 extern unsigned int cold_mmap_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct file_area *p_file_area,struct page *page_buf[],int cold_page_count);
-
-extern unsigned long shrink_inactive_list_async(unsigned long nr_to_scan, struct lruvec *lruvec,struct hot_cold_file_global *p_hot_cold_file_global, enum lru_list lru);
+extern unsigned long shrink_inactive_list_async(unsigned long nr_to_scan, struct lruvec *lruvec,struct hot_cold_file_global *p_hot_cold_file_global,int is_mmap_file, enum lru_list lru);
+extern int walk_throuth_all_mmap_file_area(struct hot_cold_file_global *p_hot_cold_file_global);
+extern int  cold_mmap_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat_del);
+extern int cold_file_area_detele_quick(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct file_area *p_file_area);
+extern unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat_del);
 #endif

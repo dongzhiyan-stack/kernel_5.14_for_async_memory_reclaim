@@ -1410,17 +1410,26 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 	if(open_file_area_printk){
 		printk("%s mapping:0x%llx folio:0x%llx index:%ld area_index_for_page:%d\n",__func__,(u64)mapping,(u64)folio,index,area_index_for_page);
 	}
-
+	/* 这段代码有个隐藏很深的bug!!!!!!!!!!!!，如果进程1文件open后，mmap映射，然后读写映射的地址产生缺页异常。
+	 * 接着分配新的page并执行该函数：加global mmap_file_global_lock锁后，分配file_stat并赋值给mapping->rh_reserved1。
+	 * 同时，进程2也open该文件，直接读写该文件，然后分配新的page并执行到函数：加global file_global_lock锁后，分配
+	 * file_stat并赋值给mapping->rh_reserved1。因为cache文件mmap文件用的global锁不一样，所以无法避免同时分配
+	 * file_stat并赋值给mapping->rh_reserved1，这位就错乱了。依次，这段分配file_stat并赋值给mapping->rh_reserved1
+	 * 的代码要放到xas_lock_irq(&xas)这个锁里，可以避免这种情况*/
+#if 0
 	p_file_stat = (struct file_stat *)mapping->rh_reserved1;
 	if(!p_file_stat){
 		//分配file_stat
-		p_file_stat  = file_stat_alloc_and_init(mapping);
+		if(RB_EMPTY_ROOT(&mapping->i_mmap.rb_root))
+			p_file_stat  = file_stat_alloc_and_init(mapping);
+		else
+			p_file_stat = add_mmap_file_stat_to_list(mapping);
 		if(!p_file_stat){
 			xas_set_err(&xas, -ENOMEM);
 			goto error; 
 		}
 	}
-
+#endif
 	if (!huge) {
 		int error = mem_cgroup_charge(folio, NULL, gfp);
 		VM_BUG_ON_FOLIO(index & (folio_nr_pages(folio) - 1), folio);
@@ -1456,7 +1465,11 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 		xas_lock_irq(&xas);
 		/*file_stat可能会被方法删除，则分配一个新的file_stat，具体看cold_file_stat_delete()函数*/
 		if(0 == mapping->rh_reserved1){
-			p_file_stat  = file_stat_alloc_and_init(mapping);
+			if(RB_EMPTY_ROOT(&mapping->i_mmap.rb_root))
+			    p_file_stat  = file_stat_alloc_and_init(mapping);
+			else
+                p_file_stat = add_mmap_file_stat_to_list(mapping);
+
 			if(!p_file_stat){
 				xas_set_err(&xas, -ENOMEM);
 				goto error; 

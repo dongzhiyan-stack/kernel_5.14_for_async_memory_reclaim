@@ -2518,7 +2518,7 @@ shrink_inactive_list_for_file_area(unsigned long nr_to_scan, struct lruvec *lruv
 }
 unsigned long
 shrink_inactive_list_async(unsigned long nr_to_scan, struct lruvec *lruvec,
-		     struct hot_cold_file_global *p_hot_cold_file_global, enum lru_list lru)
+		     struct hot_cold_file_global *p_hot_cold_file_global,int is_mmap_file, enum lru_list lru)
 {
 	unsigned int isolate_pages,nr_reclaimed;
     struct scan_control sc = {
@@ -2531,6 +2531,9 @@ shrink_inactive_list_async(unsigned long nr_to_scan, struct lruvec *lruvec,
 		.reclaim_idx = MAX_NR_ZONES - 1,
 		.no_demotion = 1,
 	};
+
+	if(is_mmap_file)
+		sc.may_unmap = 1;
 
     nr_reclaimed = shrink_inactive_list_for_file_area(nr_to_scan, lruvec,&sc, lru);
 

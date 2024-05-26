@@ -85,7 +85,7 @@ static int cold_file_area_detele(struct hot_cold_file_global *p_hot_cold_file_gl
 }
 /*在文件inode被iput释放后，执行该函数释放该文件file_stat的所有file_area，此时肯定没进程再访问该文件的file_stat、file_area，不用考虑并发。
  *错了，此时可能异步内存线程也会因这个文件长时间空闲而释放file_stat和file_area。又错了，当前函数就是异步内存回收线程里执行的，没这种情况*/
-static int cold_file_area_detele_nolock(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct file_area *p_file_area)
+int cold_file_area_detele_quick(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct file_area *p_file_area)
 {
     //XA_STATE(xas, &((struct address_space *)(p_file_stat->mapping))->i_pages, p_file_area->start_index >> PAGE_COUNT_IN_AREA_SHIFT);
 	
@@ -135,6 +135,7 @@ static int cold_file_area_detele_nolock(struct hot_cold_file_global *p_hot_cold_
 
 	return 0;
 }
+EXPORT_SYMBOL(cold_file_area_detele_quick);
 
 /*在判定一个文件file_stat的page全部被释放，然后过了很长时间依然没人访问，执行该函数delete file_stat。必须考虑此时有进程并发访问该文件file_stat*/
 static int  cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat_del)
@@ -252,9 +253,9 @@ static int  cold_file_stat_delete_nolock(struct hot_cold_file_global *p_hot_cold
  struct address_space	i_data的成员struct xarray	i_pages，是个实体数据结构。
 
  因此，在__destroy_inode_handler_post()标记inode、file_stat释放后，接着异步内存回收线程释放该文件file_stat的file_area函数
- cold_file_area_detele_nolock()函数中，执行xas_store(&xas, NULL)，在xarray tree的槽位设置file_area NULL外，还自动逐级向上释放
+ cold_file_area_detele_quick()函数中，执行xas_store(&xas, NULL)，在xarray tree的槽位设置file_area NULL外，还自动逐级向上释放
  父节点xa_node。又错了，这里又有个重大bug!!!!!!!!!!!!!!!!__destroy_inode_handler_post()执行后，inode就会被立即释放掉，然后
- 异步内存回收线程执行到cold_file_area_detele_nolock()函数时，文件inode、mapping、xarray tree都释放了，此时执行
+ 异步内存回收线程执行到cold_file_area_detele_quick()函数时，文件inode、mapping、xarray tree都释放了，此时执行
  xas_store(&xas, NULL)因xarray tree访问无效内存而crash。
  
  这个隐藏很低的问题，也是一点点把思路写出才猛然发现的，空想很难想到！
@@ -274,7 +275,7 @@ static int  cold_file_stat_delete_nolock(struct hot_cold_file_global *p_hot_cold
  再强制执行xas_store(&xas, NULL)释放xarray tree吧。但是这样会造成iput多耗时。
 
  又想到一个方法：当iput执行到evict是，如果inode->i_mapping->rh_reserved1不是NULL，则不再执行destroy_inode，而else执行
- __destroy_inode_handler_post()，标记file_stat delete。然后等异步内存回收线程里，执行cold_file_area_detele_nolock释放掉file_stat的
+ __destroy_inode_handler_post()，标记file_stat delete。然后等异步内存回收线程里，执行cold_file_area_detele_quick释放掉file_stat的
  所有file_area后，再执行destroy_inode释放掉inode、mapping、xarray tree。或者两个方法结合起来，当xarray tree的层数大于1时，是大文件，
  则使用该方法延迟释放inode。当xarray tree的层数是1，是小文件，直接在__destroy_inode_handler_post()里强制执行xas_store(&xas, NULL)
  释放xarray tree。使用延迟释放inode的方法吧，在__destroy_inode_handler_post()里强制释放xarray tree需要编写一个函数：xarray tree
@@ -331,12 +332,8 @@ void disable_mapping_file_area(struct inode *inode)
 }
 EXPORT_SYMBOL(disable_mapping_file_area);
 
-static int  cold_mmap_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat_del)
-{
-    return 0;
-}
 //删除p_file_stat_del对应文件的file_stat上所有的file_area，已经对应hot file tree的所有节点hot_cold_file_area_tree_node结构。最后释放掉p_file_stat_del这个file_stat数据结构
-static unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat_del)
+unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat_del)
 {
 	//struct file_stat * p_file_stat,*p_file_stat_temp;
 	struct file_area *p_file_area,*p_file_area_temp;
@@ -346,7 +343,7 @@ static unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_glo
 		if(!file_area_in_refault_list(p_file_area) || file_area_in_refault_list_error(p_file_area))
 			panic("%s file_area:0x%llx status:%d not in file_area_refault\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 
-		cold_file_area_detele_nolock(p_hot_cold_file_global,p_file_stat_del,p_file_area);
+		cold_file_area_detele_quick(p_hot_cold_file_global,p_file_stat_del,p_file_area);
 		del_file_area_count ++;
 	}
 	//hot链表
@@ -354,7 +351,7 @@ static unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_glo
 		if(!file_area_in_hot_list(p_file_area) || file_area_in_hot_list_error(p_file_area))
 			panic("%s file_area:0x%llx status:%d not in file_area_hot\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 
-		cold_file_area_detele_nolock(p_hot_cold_file_global,p_file_stat_del,p_file_area);
+		cold_file_area_detele_quick(p_hot_cold_file_global,p_file_stat_del,p_file_area);
 		del_file_area_count ++;
 	}
 	//temp链表
@@ -362,7 +359,7 @@ static unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_glo
 		if(!file_area_in_temp_list(p_file_area) || file_area_in_temp_list_error(p_file_area))
 			panic("%s file_area:0x%llx status:%d not in file_area_temp\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 
-		cold_file_area_detele_nolock(p_hot_cold_file_global,p_file_stat_del,p_file_area);
+		cold_file_area_detele_quick(p_hot_cold_file_global,p_file_stat_del,p_file_area);
 		del_file_area_count ++;
 	}
 	//free链表
@@ -370,7 +367,7 @@ static unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_glo
 		if(!file_area_in_free_list(p_file_area) || file_area_in_free_list_error(p_file_area))
 			panic("%s file_area:0x%llx status:%d not in file_area_free\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 
-		cold_file_area_detele_nolock(p_hot_cold_file_global,p_file_stat_del,p_file_area);
+		cold_file_area_detele_quick(p_hot_cold_file_global,p_file_stat_del,p_file_area);
 		del_file_area_count ++;
 	}
 	//free_temp链表
@@ -378,7 +375,7 @@ static unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_glo
 		if(!file_area_in_free_list(p_file_area) || file_area_in_free_list_error(p_file_area))
 			panic("%s file_area:0x%llx status:%d not in file_area_free_temp\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 
-		cold_file_area_detele_nolock(p_hot_cold_file_global,p_file_stat_del,p_file_area);
+		cold_file_area_detele_quick(p_hot_cold_file_global,p_file_stat_del,p_file_area);
 		del_file_area_count ++;
 	}
 	//mapcount链表
@@ -386,7 +383,7 @@ static unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_glo
 		if(!file_area_in_mapcount_list(p_file_area) || file_area_in_free_list_error(p_file_area))
 			panic("%s file_area:0x%llx status:%d not in file_area_mapcount\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 
-		cold_file_area_detele_nolock(p_hot_cold_file_global,p_file_stat_del,p_file_area);
+		cold_file_area_detele_quick(p_hot_cold_file_global,p_file_stat_del,p_file_area);
 		del_file_area_count ++;
 	}
 
@@ -424,6 +421,7 @@ static int inline is_file_stat_hot_file(struct hot_cold_file_global *p_hot_cold_
 	}
 	return ret;
 }
+EXPORT_SYMBOL(cold_file_stat_delete_all_file_area);
 //当文件file_stat的file_area个数超过阀值则判定是大文件
 static int inline is_file_stat_large_file(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat)
 {
@@ -434,18 +432,6 @@ static int inline is_file_stat_large_file(struct hot_cold_file_global *p_hot_col
 }
 /**************************************************************************************/
 
-static void inline file_area_access_count_clear(struct file_area *p_file_area)
-{
-	atomic_set(&p_file_area->access_count,0);
-}
-static void inline file_area_access_count_add(struct file_area *p_file_area,int count)
-{
-	atomic_add(count,&p_file_area->access_count);
-}
-static int inline file_area_access_count_get(struct file_area *p_file_area)
-{
-	return atomic_read(&p_file_area->access_count);
-}
 static int inline is_file_area_move_list_head(struct file_area *p_file_area)
 {
 #if 0	
@@ -493,6 +479,7 @@ int hot_file_update_file_status(struct address_space *mapping,struct file_stat *
 {
 	//检测file_area被访问的次数，判断是否有必要移动到file_stat->hot、refault、temp等链表头
 	int file_area_move_list_head = is_file_area_move_list_head(p_file_area);
+	int is_mmap_file = file_stat_in_mmap_file(p_file_stat);
 
 	file_area_in_update_count ++;
 	/*hot_cold_file_global_info.global_age更新了，把最新的global age更新到本次访问的file_area->file_area_age。并对
@@ -501,9 +488,11 @@ int hot_file_update_file_status(struct address_space *mapping,struct file_stat *
 		p_file_area->file_area_age = hot_cold_file_global_info.global_age;
 
 		/*file_area访问计数清0，这个必须放到is_file_area_move_list_head()后边，因为is_file_area_move_list_head()依赖这个访问计数*/
-		if(file_area_access_count_get(p_file_area))
+		if(file_area_access_count_get(p_file_area) && !is_mmap_file)
 			file_area_access_count_clear(p_file_area);
 	}
+	if(is_mmap_file)
+		return 1;
 
 	/*在file_stat被判定为热文件后，记录当时的global_age。在未来HOT_FILE_COLD_AGE_DX时间内该文件进去冷却期：hot_file_update_file_status()函数中
 	 *只更新该文件file_area的age后，然后函数返回，不再做其他操作，节省性能*/
@@ -1614,7 +1603,7 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 					spin_unlock_irq(&lruvec->lru_lock);
 
 					//回收inactive lru链表尾的page，这些page刚才才移动到inactive lru链表尾
-					isolate_pages += shrink_inactive_list_async(move_page_count,lruvec,p_hot_cold_file_global,LRU_INACTIVE_FILE);
+					isolate_pages += shrink_inactive_list_async(move_page_count,lruvec,p_hot_cold_file_global,0,LRU_INACTIVE_FILE);
 
 					//回收后对move_page_count清0
 					move_page_count = 0;
@@ -1670,7 +1659,7 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 			spin_unlock_irq(&lruvec->lru_lock);
 
 		//回收inactive lru链表尾的page，这些page刚才才移动到inactive lru链表尾
-		isolate_pages += shrink_inactive_list_async(move_page_count,lruvec,p_hot_cold_file_global,LRU_INACTIVE_FILE);
+		isolate_pages += shrink_inactive_list_async(move_page_count,lruvec,p_hot_cold_file_global,0,LRU_INACTIVE_FILE);
 
 	}else{
 		if(lruvec)
@@ -2553,7 +2542,7 @@ static int hot_cold_file_thread(void *p){
 			file_area_in_update_count = 0;
 			file_area_move_to_head_count = 0;
 			walk_throuth_all_file_area(p_hot_cold_file_global);
-			//walk_throuth_all_mmap_file_area(p_hot_cold_file_global);
+			walk_throuth_all_mmap_file_area(p_hot_cold_file_global);
 		}
 	}
 	return 0;
