@@ -1474,7 +1474,12 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 				xas_set_err(&xas, -ENOMEM);
 				goto error; 
 			}
-		}
+		}else
+			p_file_stat = (struct file_stat *)mapping->rh_reserved1;
+
+		if(file_stat_in_delete(p_file_stat))
+			panic("%s %s %d file_stat:0x%llx status:0x%lx in delete\n",__func__,current->comm,current->pid,(u64)p_file_stat,p_file_stat->file_stat_status);
+
 		xas_for_each_conflict(&xas, entry) {
 			old = entry;
 			//xas_lock_irq加锁后，检测到待添加的file_area已经被其他进程并发添加到xarray tree了

@@ -290,9 +290,9 @@ struct file_stat
 
 	union{
 		//cache文件file_stat最近一次被异步内存回收访问时的age，调试用
-		unsigned long recent_access_age;
+		unsigned int recent_access_age;
 		//mmap文件在扫描完一轮file_stat->temp链表上的file_area，进入冷却期，cooling_off_start_age记录当时的global age
-		unsigned long cooling_off_start_age;
+		unsigned int cooling_off_start_age;
 	};
 	//频繁被访问的文件page对应的file_area存入这个头结点
 	struct list_head file_area_hot;
@@ -604,7 +604,7 @@ FILE_STAT_STATUS(mapcount_file_area)
 	TEST_FILE_STATUS_ERROR(name)
 
 FILE_STATUS(large_file)
-//FILE_STATUS(delete)
+FILE_STATUS(delete)
 FILE_STATUS(drop_cache)
 
 	//清理文件的状态，大小文件等
@@ -640,7 +640,8 @@ FILE_STATUS(drop_cache)
  * 目前暂定先用test_and_set_bit_lock、clear_bit_unlock吧，后续再考虑其他优化*/
 FILE_STATUS_ATOMIC(free_page)
 FILE_STATUS_ATOMIC(free_page_done)
-FILE_STATUS_ATOMIC(delete)
+/*标记file_stat delete可能在cold_file_stat_delete()和__destroy_inode_handler_post()并发执行，存在重复设置可能，用FILE_STATUS_ATOMIC会因重复设置而crash*/
+//FILE_STATUS_ATOMIC(delete)
 FILE_STATUS_ATOMIC(cache_file)
 FILE_STATUS_ATOMIC(mmap_file)
 
@@ -995,6 +996,9 @@ static inline struct file_area *file_area_alloc_and_init(unsigned int area_index
 	p_file_area->start_index = area_index_for_page << PAGE_COUNT_IN_AREA_SHIFT;//area_index_for_page * PAGE_COUNT_IN_AREA;
 	p_file_stat->file_area_count ++;//文件file_stat的file_area个数加1
 	set_file_area_in_temp_list(p_file_area);//新分配的file_area必须设置in_temp_list链表
+			
+	//在file_stat->file_area_temp链表的file_area个数加1
+    p_file_stat->file_area_count_in_temp_list ++;
 
 out:
 	spin_unlock(&p_file_stat->file_stat_lock);
@@ -1081,7 +1085,8 @@ extern unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file
 extern unsigned int cold_mmap_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct file_area *p_file_area,struct page *page_buf[],int cold_page_count);
 extern unsigned long shrink_inactive_list_async(unsigned long nr_to_scan, struct lruvec *lruvec,struct hot_cold_file_global *p_hot_cold_file_global,int is_mmap_file, enum lru_list lru);
 extern int walk_throuth_all_mmap_file_area(struct hot_cold_file_global *p_hot_cold_file_global);
-extern int  cold_mmap_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat_del);
-extern int cold_file_area_detele_quick(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct file_area *p_file_area);
+extern int cold_mmap_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat_del);
 extern unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat_del);
+extern int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat_del);
+extern int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct file_area *p_file_area);
 #endif
