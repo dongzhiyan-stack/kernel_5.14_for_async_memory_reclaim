@@ -23,6 +23,9 @@
 #include <trace/events/writeback.h>
 #include "internal.h"
 
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+#include "../mm/async_memory_reclaim_for_cold_file_area.h"
+#endif
 /*
  * Inode locking rules:
  *
@@ -205,6 +208,10 @@ int inode_init_always(struct super_block *sb, struct inode *inode)
 	inode->i_flctx = NULL;
 	this_cpu_inc(nr_inodes);
 
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+	/*不能在这里分配file_stat，因为文件系统有一些文件inode跟元数据有关，不会有pagecache读写*/
+	is_cold_file_area_reclaim_support_fs(mapping,sb);
+#endif
 	return 0;
 out:
 	return -ENOMEM;
@@ -281,7 +288,7 @@ static void destroy_inode(struct inode *inode)
 
 	BUG_ON(!list_empty(&inode->i_lru));
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL	
-	if(inode->i_mapping && inode->i_mapping->rh_reserved1){
+	if(inode->i_mapping && inode->i_mapping->rh_reserved1 > 1){
 		disable_mapping_file_area(inode);
 	}
 #endif	

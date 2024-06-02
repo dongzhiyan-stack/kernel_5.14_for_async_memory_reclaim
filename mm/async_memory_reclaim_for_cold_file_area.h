@@ -95,6 +95,15 @@
  *只更新该文件file_area的age后，然后函数返回，不再做其他操作，节省性能*/
 #define HOT_FILE_COLD_AGE_DX 10
 
+#define SUPPORT_FS_UUID_LEN 50
+#define SUPPORT_FS_NAME_LEN 10
+#define SUPPORT_FS_COUNT 2
+
+#define SUPPORT_FS_ALL  0
+#define SUPPORT_FS_UUID 1
+#define SUPPORT_FS_SINGLE     2
+
+#define SUPPORT_FILE_AREA_INIT_OR_DELETE 1
 /**针对mmap文件新加的******************************/
 #define MMAP_FILE_NAME_LEN 16
 struct mmap_file_shrink_counter
@@ -432,6 +441,10 @@ struct hot_cold_file_global
 	//在内存回收期间产生的refault file_area个数
 	unsigned int refault_file_area_count_in_free_page;
 
+	char support_fs_type;
+	char support_fs_uuid[SUPPORT_FS_UUID_LEN];
+	char support_fs_name[SUPPORT_FS_COUNT][SUPPORT_FS_NAME_LEN];
+
 	/**针对mmap文件新增的****************************/
 	//新分配的文件file_stat默认添加到file_stat_temp_head链表
 	struct list_head mmap_file_stat_uninit_head;
@@ -659,10 +672,16 @@ extern unsigned int open_file_area_printk;
 //#define PAGE_BIT_OFFSET_IN_FILE_AREA_BASE (sizeof(&p_file_area->file_area_state)*8 - PAGE_COUNT_IN_AREA)//28  这个编译不通过
 #define PAGE_BIT_OFFSET_IN_FILE_AREA_BASE (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA)
 
-	/*writeback mark:bit27~bit24 dirty mark:bit23~bit20  towrite mark:bit19~bit16*/
+/*writeback mark:bit27~bit24 dirty mark:bit23~bit20  towrite mark:bit19~bit16*/
 #define WRITEBACK_MARK_IN_FILE_AREA_BASE (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA*2)
 #define DIRTY_MARK_IN_FILE_AREA_BASE     (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA*3)
 #define TOWRITE_MARK_IN_FILE_AREA_BASE   (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA*4)
+
+#define FILE_AREA_PRINT(fmt,...) \
+    do{ \
+        if(open_file_area_printk) \
+			printk(fmt,##__VA_ARGS__); \
+	}while(0);
 
 static inline struct file_area *entry_to_file_area(void * file_area_entry)
 {
@@ -797,6 +816,42 @@ static inline int file_area_page_mark_bit_count(struct file_area *p_file_area,ch
 
 	return count;
 }
+static inline void is_cold_file_area_reclaim_support_fs(struct address_space *mapping,struct super_block *sb)
+{
+	if(SUPPORT_FS_ALL == hot_cold_file_global_info.support_fs_type){
+		if(sb->s_type){
+			if(0 == strcmp(sb->s_type->name,"ext4") || 0 == strcmp(sb->s_type->name,"xfs") || 0 == strcmp(sb->s_type->name,"f2fs"))
+				mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;
+		}
+	}
+	else if(SUPPORT_FS_SINGLE == hot_cold_file_global_info.support_fs_type){
+		if(sb->s_type){
+			int i;
+			for(i = 0;i < SUPPORT_FS_COUNT;i ++){
+				if(0 == strcmp(sb->s_type->name,hot_cold_file_global_info.support_fs_name[i])){
+					mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;
+					break;
+				}
+			}
+		}
+	}
+	else if(SUPPORT_FS_UUID == hot_cold_file_global_info.support_fs_type){
+
+	}
+}
+/* 测试文件支持file_area形式读写文件和内存回收，并且已经分配了file_stat
+ * mapping->rh_reserved1有3种状态
+ *情况1:mapping->rh_reserved1是0：文件所属文件系统不支持file_area形式读写文件和内存回收
+  情况2:mapping->rh_reserved1是1: 文件inode是初始化状态，但还没有读写文件而分配file_stat；或者文件读写后长时间未读写而文件页page全回收，
+     file_stat被释放了。总之此时文件file_stat未分配，一个文件页page都没有
+  情况3:mapping->rh_reserved1大于1：此时文件分配file_stat，走filemap.c里for_file_area正常读写文件流程
+ */
+#define IS_SUPPORT_FILE_AREA_READ_WRITE(mapping) \
+    (mapping->rh_reserved1 > SUPPORT_FILE_AREA_INIT_OR_DELETE)
+/*测试文件支持file_area形式读写文件和内存回收，此时情况2(mapping->rh_reserved1是1)和情况3(mapping->rh_reserved1>1)都要返回true*/
+#define IS_SUPPORT_FILE_AREA(mapping) \
+	(mapping->rh_reserved1 >=  SUPPORT_FILE_AREA_INIT_OR_DELETE)
+
 /*****************************************************************************************************************************************************/
 extern int shrink_page_printk_open1;
 extern int shrink_page_printk_open;
@@ -842,7 +897,7 @@ static inline struct file_stat *file_stat_alloc_and_init(struct address_space *m
 	spin_lock(&hot_cold_file_global_info.global_lock);
 	//如果两个进程同时访问一个文件，同时执行到这里，需要加锁。第1个进程加锁成功后，分配file_stat并赋值给
 	//mapping->rh_reserved1，第2个进程获取锁后执行到这里mapping->rh_reserved1就会成立
-	if(mapping->rh_reserved1){
+	if(mapping->rh_reserved1 > 1){
 		printk("%s file_stat:0x%llx already alloc\n",__func__,(u64)mapping->rh_reserved1);
 		p_file_stat = (struct file_stat *)mapping->rh_reserved1;
 		goto out;
@@ -912,7 +967,7 @@ static inline struct file_stat *add_mmap_file_stat_to_list(struct address_space 
 	/*1:如果两个进程同时访问一个文件，同时执行到这里，需要加锁。第1个进程加锁成功后，分配file_stat并赋值给
 	  mapping->rh_reserved1，第2个进程获取锁后执行到这里mapping->rh_reserved1就会成立
       2:异步内存回收功能禁止了*/
-	if(mapping->rh_reserved1){
+	if(mapping->rh_reserved1 > 1){
 		p_file_stat = (struct file_stat *)mapping->rh_reserved1;
 		spin_unlock(&hot_cold_file_global_info.mmap_file_global_lock);
 		printk("%s file_stat:0x%llx already alloc\n",__func__,(u64)mapping->rh_reserved1);

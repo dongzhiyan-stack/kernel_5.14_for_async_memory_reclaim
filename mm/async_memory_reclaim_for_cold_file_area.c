@@ -78,8 +78,7 @@ int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 	/*rcu延迟释放file_area结构*/
 	call_rcu(&p_file_area->i_rcu, i_file_area_callback);
 
-	if(open_file_area_printk)
-		printk("%s file_area:0x%llx delete !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area);
+	FILE_AREA_PRINT("%s file_area:0x%llx delete !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area);
 
 	return 0;
 }
@@ -132,8 +131,7 @@ int cold_file_area_delete_quick(struct hot_cold_file_global *p_hot_cold_file_glo
 	/*rcu延迟释放file_area结构*/
 	call_rcu(&p_file_area->i_rcu, i_file_area_callback);
 
-	if(open_file_area_printk)
-		printk("%s file_area:0x%llx delete !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area);
+	FILE_AREA_PRINT("%s file_area:0x%llx delete !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area);
 
 	return 0;
 }
@@ -180,7 +178,8 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 	 *并且，如果file_stat在__destroy_inode_handler_post中被释放了，p_file_stat_del->mapping是NULL，这个if的p_file_stat_del->mapping->rh_reserved1=0会crash*/
 	if(0 == file_stat_in_delete(p_file_stat_del)/*p_file_stat_del->mapping*/){
 		/*文件inode的mapping->rh_reserved1清0表示file_stat无效，这__destroy_inode_handler_post()删除inode时，发现inode的mapping->rh_reserved1是0就不再使用file_stat了，会crash*/
-		p_file_stat_del->mapping->rh_reserved1 = 0;
+		//p_file_stat_del->mapping->rh_reserved1 = 0;
+		p_file_stat_del->mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;/*原来赋值0，现在赋值1，原理一样*/
 		barrier();
 		p_file_stat_del->mapping = NULL;
 	}
@@ -219,8 +218,7 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 	/*rcu延迟释放file_stat结构*/
 	call_rcu(&p_file_stat_del->i_rcu, i_file_stat_callback);
 
-	if(open_file_area_printk)
-		printk("%s file_stat:0x%llx delete !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_stat_del);
+	FILE_AREA_PRINT("%s file_stat:0x%llx delete !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_stat_del);
 
 	return 0;
 }
@@ -258,8 +256,7 @@ static int cold_file_stat_delete_quick(struct hot_cold_file_global *p_hot_cold_f
 	/*rcu延迟释放file_stat结构*/
 	call_rcu(&p_file_stat_del->i_rcu, i_file_stat_callback);
 
-	if(open_file_area_printk)
-		printk("%s file_stat:0x%llx delete !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_stat_del);
+	FILE_AREA_PRINT("%s file_stat:0x%llx delete !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_stat_del);
 
 	return 0;
 }
@@ -329,16 +326,16 @@ static int cold_file_stat_delete_quick(struct hot_cold_file_global *p_hot_cold_f
 
 static void __destroy_inode_handler_post(struct inode *inode)
 {
-	if(inode && inode->i_mapping && inode->i_mapping->rh_reserved1){
+	if(inode && inode->i_mapping && inode->i_mapping->rh_reserved1 > 1){
 		struct file_stat *p_file_stat = (struct file_stat *)inode->i_mapping->rh_reserved1;
         /*到这里，文件inode的mapping的xarray tree必然是空树，不是就crash*/  
 		if(inode->i_mapping->i_pages.xa_head != NULL)
 			panic("%s xarray tree not clear:0x%llx\n",__func__,(u64)(inode->i_mapping->i_pages.xa_head));
 
-		inode->i_mapping->rh_reserved1 = 0;
+		inode->i_mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;
 		p_file_stat->mapping = NULL;
 
-		/*在这个加个内存屏障，保证前后代码隔离开。即file_stat有delete标记后，inode->i_mapping->rh_reserved1一定是0，p_file_stat->mapping一定是NULL*/
+		/*在这个加个内存屏障，保证前后代码隔离开。即file_stat有delete标记后，inode->i_mapping->rh_reserved1一定无效，p_file_stat->mapping一定是NULL*/
 		smp_wmb();
         if(file_stat_in_cache_file(p_file_stat)){
 			spin_lock_irq(&hot_cold_file_global_info.global_lock);
@@ -355,8 +352,7 @@ static void __destroy_inode_handler_post(struct inode *inode)
 			list_move(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_delete_head);
 			spin_unlock_irq(&hot_cold_file_global_info.mmap_file_global_lock);
 		}
-		if(open_file_area_printk)
-			printk("%s file_stat:0x%llx iput delete !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_stat);
+		FILE_AREA_PRINT("%s file_stat:0x%llx iput delete !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_stat);
 	}
 }
 void disable_mapping_file_area(struct inode *inode)
@@ -1757,7 +1753,7 @@ static unsigned int get_file_area_from_file_stat_list(struct hot_cold_file_globa
 			clear_file_stat_in_file_stat_temp_head_list(p_file_stat);
 			set_file_stat_in_delete(p_file_stat);
 			list_move(&p_file_stat->hot_cold_file_list,&p_hot_cold_file_global->file_stat_delete_head);
-			p_file_stat->mapping->rh_reserved1 = 0;
+			p_file_stat->mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;
 			printk("%s p_file_stat:0x%llx status:0x%lx in_mmap_file\n",__func__,(u64)p_file_stat,p_file_stat->file_stat_status);
 			continue;
 		}
@@ -2167,6 +2163,7 @@ static unsigned long free_page_from_file_area(struct hot_cold_file_global *p_hot
 					break;
 			}
 		}
+	    cond_resched();
 	}
 
 	/*遍历 file_stat_free_list临时链表上的file_stat，然后看这些file_stat的file_area_refault链表上的file_area，如果长时间没有被访问，
@@ -2625,6 +2622,7 @@ static int __init hot_cold_file_init(void)
 	hot_cold_file_global_info.mmap_file_area_level_for_large_file = (50*1024*1024)/(4096 *PAGE_COUNT_IN_AREA);
 	//64K对应的page数
 	hot_cold_file_global_info.nr_pages_level = 16;
+	hot_cold_file_global_info.support_fs_type = -1;
 
 
 	hot_cold_file_global_info.hot_cold_file_thead = kthread_run(hot_cold_file_thread,&hot_cold_file_global_info, "hot_cold_file_thread");
@@ -2636,3 +2634,59 @@ static int __init hot_cold_file_init(void)
     return hot_cold_file_proc_init(&hot_cold_file_global_info);
 }
 subsys_initcall(hot_cold_file_init);
+
+static int __init setup_cold_file_area_reclaim_support_fs(char *buf)
+{
+	printk("setup_cold_file_area_reclaim_support_fs:%s\n",buf);
+    if(!buf)
+		return 0;
+
+    if (!strncmp(buf, "all", 3)) {
+		hot_cold_file_global_info.support_fs_type = SUPPORT_FS_ALL;
+	}
+	//cold_file_area_reclaim_support_fs=fs=ext4,xfs
+	else if (!strncmp(buf, "fs", 2)) {
+		char *buf_head;
+        unsigned char fs_name_len = 0;
+		unsigned char fs_count = 0;
+
+        hot_cold_file_global_info.support_fs_type = SUPPORT_FS_SINGLE;
+        buf += 3;
+		buf_head = buf;
+	    printk("1:setup_cold_file_area_reclaim_support_fs:%s\n",buf);
+		while(*buf != '\0' && fs_count < SUPPORT_FS_COUNT){
+            if(*buf == ','){
+				if(fs_name_len < SUPPORT_FS_NAME_LEN){
+				    memset(hot_cold_file_global_info.support_fs_name[fs_count],0,SUPPORT_FS_NAME_LEN);
+                    strncpy(hot_cold_file_global_info.support_fs_name[fs_count],buf_head,fs_name_len);
+	                printk("1_2:setup_cold_file_area_reclaim_support_fs:%s fs_count:%d fs_name_len:%d\n",hot_cold_file_global_info.support_fs_name[fs_count],fs_count,fs_name_len);
+				    
+					fs_count ++;
+					fs_name_len = 0;
+					buf_head = buf + 1;
+				}
+			}
+			else
+			    fs_name_len ++;
+
+			buf ++;
+		}
+		if(buf_head != buf){
+			memset(hot_cold_file_global_info.support_fs_name[fs_count],0,SUPPORT_FS_NAME_LEN);
+			strncpy(hot_cold_file_global_info.support_fs_name[fs_count],buf_head,fs_name_len);
+			printk("1_3:setup_cold_file_area_reclaim_support_fs:%s fs_count:%d fs_name_len:%d\n",hot_cold_file_global_info.support_fs_name[fs_count],fs_count,fs_name_len);
+		}
+	}
+	//cold_file_area_reclaim_support_fs=uuid=bee5938b-bdc6-463e-88a0-7eb08eb71dc3
+	else if (!strncmp(buf, "uuid", 4)) {
+        hot_cold_file_global_info.support_fs_type = SUPPORT_FS_SINGLE;
+		buf += 5;
+
+	    printk("2:setup_cold_file_area_reclaim_support_fs:%s\n",buf);
+		memset(hot_cold_file_global_info.support_fs_uuid,0,SUPPORT_FS_UUID_LEN);
+        strncpy(hot_cold_file_global_info.support_fs_uuid,buf,SUPPORT_FS_UUID_LEN);
+	}
+
+    return 0;
+}
+early_param("cold_file_area_reclaim_support_fs", setup_cold_file_area_reclaim_support_fs);
