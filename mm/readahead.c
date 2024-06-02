@@ -228,7 +228,7 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
 	for (i = 0; i < nr_to_read; i++) {
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		struct folio *folio ;
-		if(mapping->rh_reserved1)
+		if(mapping->rh_reserved1 > 1)
 			folio = get_folio_from_file_area(mapping,index + i);
 		else
 			folio = xa_load(&mapping->i_pages, index + i);
@@ -802,7 +802,7 @@ void readahead_expand(struct readahead_control *ractl,
 		unsigned long index = ractl->_index - 1;
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		struct page *page;
-		if(mapping->rh_reserved1)
+		if(mapping->rh_reserved1 > 1)
 			page = get_folio_from_file_area(mapping,index);
 		else
 			page = xa_load(&mapping->i_pages, index);
@@ -833,7 +833,7 @@ void readahead_expand(struct readahead_control *ractl,
 		unsigned long index = ractl->_index + ractl->_nr_pages;
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		struct page *page;
-		if(mapping->rh_reserved1)
+		if(mapping->rh_reserved1 > 1)
 			page = get_folio_from_file_area(mapping,index);
 		else
 			page = xa_load(&mapping->i_pages, index);

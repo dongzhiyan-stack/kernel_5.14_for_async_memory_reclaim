@@ -396,9 +396,7 @@ static bool inode_do_switch_wbs_for_file_area(struct inode *inode,
 
 	trace_inode_switch_wbs(inode, old_wb, new_wb);
 
-	if(open_file_area_printk){
-		printk("%s %s %d mapping:0x%llx inode:0x%llx\n",__func__,current->comm,current->pid,(u64)mapping,(u64)inode);
-	}
+	FILE_AREA_PRINT("%s %s %d mapping:0x%llx inode:0x%llx\n",__func__,current->comm,current->pid,(u64)mapping,(u64)inode);
 	/*
 	 * Count and transfer stats.  Note that PAGECACHE_TAG_DIRTY points
 	 * to possibly dirty folios while PAGECACHE_TAG_WRITEBACK points to
@@ -525,9 +523,9 @@ static bool inode_do_switch_wbs(struct inode *inode,
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 	/*page的从xarray tree delete和 保存到xarray tree 两个过程因为加锁防护，不会并发执行，因此不用担心下边的
 	 *找到的folio是file_area*/
-	if(mapping->rh_reserved1){
+	if(mapping->rh_reserved1 > 1){
 		smp_rmb();
-		if(mapping->rh_reserved1)
+		if(mapping->rh_reserved1 > 1)
 			return inode_do_switch_wbs_for_file_area(inode,old_wb,new_wb);
 	}
 #endif	

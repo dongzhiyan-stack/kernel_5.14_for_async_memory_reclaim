@@ -2123,9 +2123,7 @@ void tag_pages_for_writeback_for_file_area(struct address_space *mapping,
 	unsigned int page_offset_in_file_area = start & PAGE_COUNT_IN_AREA_MASK;
 	pgoff_t file_area_end_index = end >> PAGE_COUNT_IN_AREA_SHIFT;
 
-	if(open_file_area_printk){
-		printk("%s %s %d mapping:0x%llx start:%ld end:%ld\n",__func__,current->comm,current->pid,(u64)mapping,start,end);
-	}
+	FILE_AREA_PRINT("%s %s %d mapping:0x%llx start:%ld end:%ld\n",__func__,current->comm,current->pid,(u64)mapping,start,end);
 
 	xas_lock_irq(&xas);
 	//xas_for_each_marked(&xas, page, end, PAGECACHE_TAG_DIRTY) {
@@ -2181,9 +2179,9 @@ void tag_pages_for_writeback(struct address_space *mapping,
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 	/*page的从xarray tree delete和 保存到xarray tree 两个过程因为加锁防护，不会并发执行，因此不用担心下边的
 	 *找到的folio是file_area*/
-	if(mapping->rh_reserved1){
+	if(mapping->rh_reserved1 > 1){
 		smp_rmb();
-		if(mapping->rh_reserved1)
+		if(mapping->rh_reserved1 > 1)
 			return tag_pages_for_writeback_for_file_area(mapping,start,end);
 	}
 #endif	
@@ -2566,9 +2564,7 @@ void __folio_mark_dirty_for_file_area(struct folio *folio, struct address_space 
 {
 	unsigned long flags;
 
-	if(open_file_area_printk){
-		printk("%s %s %d mapping:0x%llx folio:0x%llx\n",__func__,current->comm,current->pid,(u64)mapping,(u64)folio);
-	}
+	FILE_AREA_PRINT("%s %s %d mapping:0x%llx folio:0x%llx\n",__func__,current->comm,current->pid,(u64)mapping,(u64)folio);
 
 	xa_lock_irqsave(&mapping->i_pages, flags);
 	if (folio->mapping) {	/* Race with truncate? */
@@ -2602,9 +2598,9 @@ void __folio_mark_dirty(struct folio *folio, struct address_space *mapping,
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 	/*page的从xarray tree delete和 保存到xarray tree 两个过程因为加锁防护，不会并发执行，因此不用担心下边的
 	 *找到的folio是file_area*/
-	if(mapping->rh_reserved1){
+	if(mapping->rh_reserved1 > 1){
 		smp_rmb();
-		if(mapping->rh_reserved1)
+		if(mapping->rh_reserved1 > 1)
 			return __folio_mark_dirty_for_file_area(folio,mapping,warn);
 	}
 #endif	
@@ -2916,9 +2912,7 @@ bool __folio_end_writeback_for_file_area(struct folio *folio)
 		struct inode *inode = mapping->host;
 		struct backing_dev_info *bdi = inode_to_bdi(inode);
 		unsigned long flags;
-		if(open_file_area_printk){
-			printk("%s %s %d mapping:0x%llx folio:0x%llx index:%ld\n",__func__,current->comm,current->pid,(u64)mapping,(u64)folio,folio->index);
-		}
+		FILE_AREA_PRINT("%s %s %d mapping:0x%llx folio:0x%llx index:%ld\n",__func__,current->comm,current->pid,(u64)mapping,(u64)folio,folio->index);
 
 		xa_lock_irqsave(&mapping->i_pages, flags);
 		ret = folio_test_clear_writeback(folio);
@@ -2985,9 +2979,9 @@ bool __folio_end_writeback(struct folio *folio)
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 	/*page的从xarray tree delete和 保存到xarray tree 两个过程因为加锁防护，不会并发执行，因此不用担心下边的
 	 *找到的folio是file_area*/
-	if(mapping->rh_reserved1){
+	if(mapping->rh_reserved1 > 1){
 		smp_rmb();
-		if(mapping->rh_reserved1)
+		if(mapping->rh_reserved1 > 1)
 			return __folio_end_writeback_for_file_area(folio);
 	}
 #endif	
@@ -3050,9 +3044,7 @@ bool __folio_start_writeback_for_file_area(struct folio *folio, bool keep_write)
 		//令page索引与上0x3得到它在file_area的pages[]数组的下标
 		unsigned int page_offset_in_file_area = folio_index(folio) & PAGE_COUNT_IN_AREA_MASK;
 
-		if(open_file_area_printk){
-			printk("%s %s %d mapping:0x%llx folio:0x%llx\n",__func__,current->comm,current->pid,(u64)mapping,(u64)folio);
-		}
+		FILE_AREA_PRINT("%s %s %d mapping:0x%llx folio:0x%llx\n",__func__,current->comm,current->pid,(u64)mapping,(u64)folio);
 
 		xas_lock_irqsave(&xas, flags);
 		//xas_load(&xas);
@@ -3135,9 +3127,9 @@ bool __folio_start_writeback(struct folio *folio, bool keep_write)
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 	/*page的从xarray tree delete和 保存到xarray tree 两个过程因为加锁防护，不会并发执行，因此不用担心下边的
 	 *找到的folio是file_area*/
-	if(mapping->rh_reserved1){
+	if(mapping->rh_reserved1 > 1){
 		smp_rmb();
-		if(mapping->rh_reserved1)
+		if(mapping->rh_reserved1 > 1)
 			return __folio_start_writeback_for_file_area(folio,keep_write);
 	}
 #endif	

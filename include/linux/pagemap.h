@@ -1204,7 +1204,7 @@ static inline struct folio *__readahead_folio(struct readahead_control *ractl)
 		return NULL;
 	}
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
-	if(ractl->mapping->rh_reserved1)
+	if(ractl->mapping->rh_reserved1 > 1)
 		folio = get_folio_from_file_area(ractl->mapping,ractl->_index);
 	else		
 		folio = xa_load(&ractl->mapping->i_pages, ractl->_index);

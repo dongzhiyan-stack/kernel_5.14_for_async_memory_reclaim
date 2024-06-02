@@ -445,8 +445,7 @@ int folio_migrate_mapping_for_file_area(struct address_space *mapping,
 		panic("%s mapping:0x%llx folio:0x%llx != p_file_area->pages:0x%llx\n",__func__,(u64)mapping,(u64)folio,(u64)p_file_area->pages[page_offset_in_file_area]);
 	}
 	p_file_area->pages[page_offset_in_file_area] = newfolio;
-	if(open_file_area_printk)
-		printk("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx newfolio:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,(u64)newfolio,page_offset_in_file_area);
+	FILE_AREA_PRINT("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx newfolio:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,(u64)newfolio,page_offset_in_file_area);
 
 
 	/*
@@ -526,9 +525,9 @@ int folio_migrate_mapping(struct address_space *mapping,
 	}
 
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
-	if(mapping->rh_reserved1){
+	if(mapping->rh_reserved1 > 1){
 		smp_rmb();
-		if(mapping->rh_reserved1)
+		if(mapping->rh_reserved1 > 1)
 			return folio_migrate_mapping_for_file_area(mapping,newfolio,folio,extra_count);
 	}
 #endif
