@@ -1,3 +1,55 @@
+#include <linux/sched/mm.h>
+#include <linux/module.h>
+#include <linux/gfp.h>
+#include <linux/kernel_stat.h>
+#include <linux/swap.h>
+#include <linux/pagemap.h>
+#include <linux/init.h>
+#include <linux/highmem.h>
+#include <linux/vmpressure.h>
+#include <linux/vmstat.h>
+#include <linux/file.h>
+#include <linux/writeback.h>
+#include <linux/blkdev.h>
+#include <linux/buffer_head.h>
+#include <linux/mm_inline.h>
+#include <linux/backing-dev.h>
+#include <linux/rmap.h>
+#include <linux/topology.h>
+#include <linux/cpu.h>
+#include <linux/cpuset.h>
+#include <linux/compaction.h>
+#include <linux/notifier.h>
+#include <linux/rwsem.h>
+#include <linux/delay.h>
+#include <linux/kthread.h>
+#include <linux/freezer.h>
+#include <linux/memcontrol.h>
+#include <linux/delayacct.h>
+#include <linux/sysctl.h>
+#include <linux/oom.h>
+#include <linux/pagevec.h>
+#include <linux/prefetch.h>
+#include <linux/printk.h>
+#include <linux/dax.h>
+#include <linux/psi.h>
+
+#include <asm/tlbflush.h>
+#include <asm/div64.h>
+
+#include <linux/swapops.h>
+#include <linux/balloon_compaction.h>
+
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/kprobes.h>
+
+#include <linux/kallsyms.h>
+#include <linux/version.h>
+#include <linux/mm_inline.h>
+#include <linux/proc_fs.h>
+#include <linux/xarray.h>
+
 #include "async_memory_reclaim_for_cold_file_area.h"
 
 #define BUF_PAGE_COUNT (PAGE_COUNT_IN_AREA * 8)
@@ -2121,7 +2173,8 @@ static int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_global *p
 			spin_lock(&p_hot_cold_file_global->mmap_file_global_lock);
 			clear_file_stat_in_file_stat_temp_head_list(p_file_stat);
 			set_file_stat_in_delete(p_file_stat);
-			p_file_stat->mapping->rh_reserved1 = 0;
+			//p_file_stat->mapping->rh_reserved1 = 0;
+			p_file_stat->mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;/*之前赋值0，现在赋值1，一样效果*/
 			list_del(&p_file_stat->hot_cold_file_list);
 			spin_unlock(&p_hot_cold_file_global->mmap_file_global_lock);
 

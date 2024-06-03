@@ -1,6 +1,60 @@
+#include <linux/sched/mm.h>
+#include <linux/module.h>
+#include <linux/gfp.h>
+#include <linux/kernel_stat.h>
+#include <linux/swap.h>
+#include <linux/pagemap.h>
+#include <linux/init.h>
+#include <linux/highmem.h>
+#include <linux/vmpressure.h>
+#include <linux/vmstat.h>
+#include <linux/file.h>
+#include <linux/writeback.h>
+#include <linux/blkdev.h>
+#include <linux/buffer_head.h>
+#include <linux/mm_inline.h>
+#include <linux/backing-dev.h>
+#include <linux/rmap.h>
+#include <linux/topology.h>
+#include <linux/cpu.h>
+#include <linux/cpuset.h>
+#include <linux/compaction.h>
+#include <linux/notifier.h>
+#include <linux/rwsem.h>
+#include <linux/delay.h>
+#include <linux/kthread.h>
+#include <linux/freezer.h>
+#include <linux/memcontrol.h>
+#include <linux/delayacct.h>
+#include <linux/sysctl.h>
+#include <linux/oom.h>
+#include <linux/pagevec.h>
+#include <linux/prefetch.h>
+#include <linux/printk.h>
+#include <linux/dax.h>
+#include <linux/psi.h>
+
+#include <asm/tlbflush.h>
+#include <asm/div64.h>
+
+#include <linux/swapops.h>
+#include <linux/balloon_compaction.h>
+
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/kprobes.h>
+
+#include <linux/kallsyms.h>
+#include <linux/version.h>
+#include <linux/mm_inline.h>
+#include <linux/proc_fs.h>
+#include <linux/xarray.h>
+
 #include "async_memory_reclaim_for_cold_file_area.h"
 
-struct hot_cold_file_global hot_cold_file_global_info;
+struct hot_cold_file_global hot_cold_file_global_info = {
+	.support_fs_type = -1,
+};
 unsigned long async_memory_reclaim_status = 1;
 
 unsigned int file_area_in_update_count;
@@ -326,13 +380,14 @@ static int cold_file_stat_delete_quick(struct hot_cold_file_global *p_hot_cold_f
 
 static void __destroy_inode_handler_post(struct inode *inode)
 {
-	if(inode && inode->i_mapping && inode->i_mapping->rh_reserved1 > 1){
+	if(inode && inode->i_mapping && IS_SUPPORT_FILE_AREA_READ_WRITE(inode->i_mapping)){
 		struct file_stat *p_file_stat = (struct file_stat *)inode->i_mapping->rh_reserved1;
         /*到这里，文件inode的mapping的xarray tree必然是空树，不是就crash*/  
 		if(inode->i_mapping->i_pages.xa_head != NULL)
 			panic("%s xarray tree not clear:0x%llx\n",__func__,(u64)(inode->i_mapping->i_pages.xa_head));
 
-		inode->i_mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;
+		//inode->i_mapping->rh_reserved1 = 0;
+		inode->i_mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;/*之前赋值0，现在赋值1，一样效果*/
 		p_file_stat->mapping = NULL;
 
 		/*在这个加个内存屏障，保证前后代码隔离开。即file_stat有delete标记后，inode->i_mapping->rh_reserved1一定无效，p_file_stat->mapping一定是NULL*/
@@ -2622,7 +2677,8 @@ static int __init hot_cold_file_init(void)
 	hot_cold_file_global_info.mmap_file_area_level_for_large_file = (50*1024*1024)/(4096 *PAGE_COUNT_IN_AREA);
 	//64K对应的page数
 	hot_cold_file_global_info.nr_pages_level = 16;
-	hot_cold_file_global_info.support_fs_type = -1;
+	/*该函数在setup_cold_file_area_reclaim_support_fs()之后，总是导致hot_cold_file_global_info.support_fs_type = -1，导致总file_area内存回收无效*/
+	//hot_cold_file_global_info.support_fs_type = -1;
 
 
 	hot_cold_file_global_info.hot_cold_file_thead = kthread_run(hot_cold_file_thread,&hot_cold_file_global_info, "hot_cold_file_thread");
@@ -2679,7 +2735,7 @@ static int __init setup_cold_file_area_reclaim_support_fs(char *buf)
 	}
 	//cold_file_area_reclaim_support_fs=uuid=bee5938b-bdc6-463e-88a0-7eb08eb71dc3
 	else if (!strncmp(buf, "uuid", 4)) {
-        hot_cold_file_global_info.support_fs_type = SUPPORT_FS_SINGLE;
+        hot_cold_file_global_info.support_fs_type = SUPPORT_FS_UUID;
 		buf += 5;
 
 	    printk("2:setup_cold_file_area_reclaim_support_fs:%s\n",buf);

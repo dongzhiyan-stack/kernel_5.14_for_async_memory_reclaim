@@ -1,60 +1,8 @@
 #ifndef _ASYNC_MEMORY_RECLAIM_BASH_H_
 #define _ASYNC_MEMORY_RECLAIM_BASH_H_
 #include <linux/mm.h>
-#include <linux/sched/mm.h>
-#include <linux/module.h>
-#include <linux/gfp.h>
-#include <linux/kernel_stat.h>
-#include <linux/swap.h>
-#include <linux/pagemap.h>
-#include <linux/init.h>
-#include <linux/highmem.h>
-#include <linux/vmpressure.h>
-#include <linux/vmstat.h>
-#include <linux/file.h>
-#include <linux/writeback.h>
-#include <linux/blkdev.h>
-#include <linux/buffer_head.h>
-#include <linux/mm_inline.h>
-#include <linux/backing-dev.h>
-#include <linux/rmap.h>
-#include <linux/topology.h>
-#include <linux/cpu.h>
-#include <linux/cpuset.h>
-#include <linux/compaction.h>
-#include <linux/notifier.h>
-#include <linux/rwsem.h>
-#include <linux/delay.h>
-#include <linux/kthread.h>
-#include <linux/freezer.h>
-#include <linux/memcontrol.h>
-#include <linux/delayacct.h>
-#include <linux/sysctl.h>
-#include <linux/oom.h>
-#include <linux/pagevec.h>
-#include <linux/prefetch.h>
-#include <linux/printk.h>
-#include <linux/dax.h>
-#include <linux/psi.h>
 
-#include <asm/tlbflush.h>
-#include <asm/div64.h>
-
-#include <linux/swapops.h>
-#include <linux/balloon_compaction.h>
-
-#include <linux/kernel.h>
-#include <linux/module.h>
-#include <linux/kprobes.h>
-
-#include <linux/kallsyms.h>
-#include <linux/version.h>
-#include <linux/mm_inline.h>
-#include <linux/proc_fs.h>
-#include <linux/xarray.h>
-
-
-//#define ASYNC_MEMORY_RECLAIM_IN_KERNEL
+#define ASYNC_MEMORY_RECLAIM_IN_KERNEL
 
 //一个file_stat结构里缓存的热file_area结构个数
 #define FILE_AREA_CACHE_COUNT 3
@@ -856,38 +804,6 @@ static inline void is_cold_file_area_reclaim_support_fs(struct address_space *ma
 extern int shrink_page_printk_open1;
 extern int shrink_page_printk_open;
 
-static inline void lock_file_stat(struct file_stat * p_file_stat,int not_block){
-	//如果有其他进程对file_stat的lock加锁，while成立，则休眠等待这个进程释放掉lock，然后自己加锁
-	while(test_and_set_bit_lock(F_file_stat_lock, &p_file_stat->file_stat_status)){
-		if(not_block){//if成立说明inode在删除的，但是获取file_stat锁失败，此时正获取file_stat锁的进程要立即释放掉file_stat锁
-			if(test_and_set_bit_lock(F_file_stat_lock_not_block,&p_file_stat->file_stat_status)){
-				//F_file_stat_lock_not_block这个bit位可能被多进程并发设置，如果已经被设置了，先不考虑触发crash
-				//panic("file_stat:0x%llx status:0x%x alreay set stat_lock_not_block\n",(u64)p_file_stat,p_file_stat->file_stat_status);
-			}
-			not_block = 0;
-		}
-		/*其实好点是每个file_stat都有休眠等待队列，进程获取file_stat失败则再休眠等待队列休眠，而不是直接msleep，后期改进吧?????*/
-		msleep(1);
-		//dump_stack();
-	}
-}
-static inline void unlock_file_stat(struct file_stat * p_file_stat){
-	//如果file_stat被设置了not_block标记，则要先清理掉
-	test_and_clear_bit(F_file_stat_lock_not_block,&p_file_stat->file_stat_status);
-	clear_bit_unlock(F_file_stat_lock, &p_file_stat->file_stat_status);
-}
-/*根据p_file_area对应的起始文件页page索引从文件mapping radix tree一次性得到PAGE_COUNT_IN_AREA个page，这个遍历一次radix tree
- *就能得到PAGE_COUNT_IN_AREA个page*/
-static inline int get_page_from_file_area(struct file_stat *p_file_stat,pgoff_t file_area_start_page_index,struct page **pages)
-{
-	struct address_space *mapping = p_file_stat->mapping;
-	int i,ret;
-	ret = find_get_pages_contig(mapping,file_area_start_page_index,PAGE_COUNT_IN_AREA,pages);
-	for(i = 0;i < ret;i++){
-		put_page(pages[i]);//上边会令page引用计数加1，这里只能再减1，先强制减1了，后期需要优化find_get_pages_contig()函数
-	}
-	return ret;
-}
 static inline struct file_stat *file_stat_alloc_and_init(struct address_space *mapping)
 {
 	struct file_stat * p_file_stat = NULL;
@@ -897,7 +813,7 @@ static inline struct file_stat *file_stat_alloc_and_init(struct address_space *m
 	spin_lock(&hot_cold_file_global_info.global_lock);
 	//如果两个进程同时访问一个文件，同时执行到这里，需要加锁。第1个进程加锁成功后，分配file_stat并赋值给
 	//mapping->rh_reserved1，第2个进程获取锁后执行到这里mapping->rh_reserved1就会成立
-	if(mapping->rh_reserved1 > 1){
+	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)){
 		printk("%s file_stat:0x%llx already alloc\n",__func__,(u64)mapping->rh_reserved1);
 		p_file_stat = (struct file_stat *)mapping->rh_reserved1;
 		goto out;
@@ -967,7 +883,7 @@ static inline struct file_stat *add_mmap_file_stat_to_list(struct address_space 
 	/*1:如果两个进程同时访问一个文件，同时执行到这里，需要加锁。第1个进程加锁成功后，分配file_stat并赋值给
 	  mapping->rh_reserved1，第2个进程获取锁后执行到这里mapping->rh_reserved1就会成立
       2:异步内存回收功能禁止了*/
-	if(mapping->rh_reserved1 > 1){
+	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)){
 		p_file_stat = (struct file_stat *)mapping->rh_reserved1;
 		spin_unlock(&hot_cold_file_global_info.mmap_file_global_lock);
 		printk("%s file_stat:0x%llx already alloc\n",__func__,(u64)mapping->rh_reserved1);
@@ -1060,6 +976,14 @@ out:
 
 	return p_file_area;
 }
+/*令inode引用计数减1，如果inode引用计数是0则释放inode结构*/
+static void inline file_inode_unlock(struct file_stat * p_file_stat)
+{
+    struct inode *inode = p_file_stat->mapping->host;
+    //令inode引用计数减1，如果inode引用计数是0则释放inode结构
+	iput(inode);
+}
+
 /*对文件inode加锁，如果inode已经处于释放状态则返回0，此时不能再遍历该文件的inode的address_space的radix tree获取page，释放page，
  *此时inode已经要释放了，inode、address_space、radix tree都是无效内存。否则，令inode引用计数加1，然后其他进程就无法再释放这个
  *文件的inode，此时返回1*/
@@ -1083,7 +1007,7 @@ static int inline file_inode_lock(struct file_stat * p_file_stat)
 	rcu_read_lock();
 	if(file_stat_in_delete(p_file_stat) || (NULL == p_file_stat->mapping)){
 		//不要忘了异常return要先释放锁
-		unlock_file_stat(p_file_stat);
+		rcu_read_unlock();
 		return 0;
 	}
 
@@ -1110,13 +1034,6 @@ static int inline file_inode_lock(struct file_stat * p_file_stat)
 	rcu_read_unlock();
 
 	return 1;
-}
-/*令inode引用计数减1，如果inode引用计数是0则释放inode结构*/
-static void inline file_inode_unlock(struct file_stat * p_file_stat)
-{
-    struct inode *inode = p_file_stat->mapping->host;
-    //令inode引用计数减1，如果inode引用计数是0则释放inode结构
-	iput(inode);
 }
 static void inline file_area_access_count_clear(struct file_area *p_file_area)
 {

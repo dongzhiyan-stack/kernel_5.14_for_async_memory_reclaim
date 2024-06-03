@@ -525,9 +525,9 @@ int folio_migrate_mapping(struct address_space *mapping,
 	}
 
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
-	if(mapping->rh_reserved1 > 1){
+	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)){
 		smp_rmb();
-		if(mapping->rh_reserved1 > 1)
+		if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping))
 			return folio_migrate_mapping_for_file_area(mapping,newfolio,folio,extra_count);
 	}
 #endif

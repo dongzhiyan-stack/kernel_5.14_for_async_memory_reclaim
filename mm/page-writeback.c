@@ -2179,9 +2179,9 @@ void tag_pages_for_writeback(struct address_space *mapping,
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 	/*page的从xarray tree delete和 保存到xarray tree 两个过程因为加锁防护，不会并发执行，因此不用担心下边的
 	 *找到的folio是file_area*/
-	if(mapping->rh_reserved1 > 1){
+	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)){
 		smp_rmb();
-		if(mapping->rh_reserved1 > 1)
+		if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping))
 			return tag_pages_for_writeback_for_file_area(mapping,start,end);
 	}
 #endif	
@@ -2598,9 +2598,9 @@ void __folio_mark_dirty(struct folio *folio, struct address_space *mapping,
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 	/*page的从xarray tree delete和 保存到xarray tree 两个过程因为加锁防护，不会并发执行，因此不用担心下边的
 	 *找到的folio是file_area*/
-	if(mapping->rh_reserved1 > 1){
+	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)){
 		smp_rmb();
-		if(mapping->rh_reserved1 > 1)
+		if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping))
 			return __folio_mark_dirty_for_file_area(folio,mapping,warn);
 	}
 #endif	
@@ -2979,9 +2979,9 @@ bool __folio_end_writeback(struct folio *folio)
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 	/*page的从xarray tree delete和 保存到xarray tree 两个过程因为加锁防护，不会并发执行，因此不用担心下边的
 	 *找到的folio是file_area*/
-	if(mapping->rh_reserved1 > 1){
+	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)){
 		smp_rmb();
-		if(mapping->rh_reserved1 > 1)
+		if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping))
 			return __folio_end_writeback_for_file_area(folio);
 	}
 #endif	
@@ -3127,9 +3127,9 @@ bool __folio_start_writeback(struct folio *folio, bool keep_write)
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 	/*page的从xarray tree delete和 保存到xarray tree 两个过程因为加锁防护，不会并发执行，因此不用担心下边的
 	 *找到的folio是file_area*/
-	if(mapping->rh_reserved1 > 1){
+	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)){
 		smp_rmb();
-		if(mapping->rh_reserved1 > 1)
+		if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping))
 			return __folio_start_writeback_for_file_area(folio,keep_write);
 	}
 #endif	

@@ -23,9 +23,6 @@
 #include <trace/events/writeback.h>
 #include "internal.h"
 
-#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
-#include "../mm/async_memory_reclaim_for_cold_file_area.h"
-#endif
 /*
  * Inode locking rules:
  *
@@ -288,7 +285,7 @@ static void destroy_inode(struct inode *inode)
 
 	BUG_ON(!list_empty(&inode->i_lru));
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL	
-	if(inode->i_mapping && inode->i_mapping->rh_reserved1 > 1){
+	if(inode->i_mapping && IS_SUPPORT_FILE_AREA_READ_WRITE(inode->i_mapping)){
 		disable_mapping_file_area(inode);
 	}
 #endif	

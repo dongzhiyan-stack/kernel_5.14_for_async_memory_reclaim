@@ -16,7 +16,7 @@
 #include <linux/hardirq.h> /* for in_interrupt() */
 #include <linux/hugetlb_inline.h>
 
-#define ASYNC_MEMORY_RECLAIM_IN_KERNEL
+#include "../../mm/async_memory_reclaim_for_cold_file_area.h"
 
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL 
 extern void *get_folio_from_file_area(struct address_space *mapping,pgoff_t index);
@@ -1204,7 +1204,7 @@ static inline struct folio *__readahead_folio(struct readahead_control *ractl)
 		return NULL;
 	}
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
-	if(ractl->mapping->rh_reserved1 > 1)
+	if(IS_SUPPORT_FILE_AREA_READ_WRITE(ractl->mapping))
 		folio = get_folio_from_file_area(ractl->mapping,ractl->_index);
 	else		
 		folio = xa_load(&ractl->mapping->i_pages, ractl->_index);

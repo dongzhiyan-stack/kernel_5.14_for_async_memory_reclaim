@@ -31,9 +31,6 @@
 #include <linux/memcontrol.h>
 #include "internal.h"
 
-#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
-#include "../mm/async_memory_reclaim_for_cold_file_area.h"
-#endif
 /*
  * 4MB minimal write chunk size
  */
@@ -523,9 +520,9 @@ static bool inode_do_switch_wbs(struct inode *inode,
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 	/*page的从xarray tree delete和 保存到xarray tree 两个过程因为加锁防护，不会并发执行，因此不用担心下边的
 	 *找到的folio是file_area*/
-	if(mapping->rh_reserved1 > 1){
+	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)){
 		smp_rmb();
-		if(mapping->rh_reserved1 > 1)
+		if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping))
 			return inode_do_switch_wbs_for_file_area(inode,old_wb,new_wb);
 	}
 #endif	
