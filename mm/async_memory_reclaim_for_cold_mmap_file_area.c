@@ -1624,7 +1624,13 @@ static unsigned int check_file_area_cold_page_and_clear(struct hot_cold_file_glo
 				delete_file_area_last = 1;
 			}
 
-			/*二者不相等，说明file_area是冷的，并且它的page的pte本次检测也没被访问，这种情况才回收这个file_area的page*/
+			/*二者不相等，说明file_area是冷的，并且它的page的pte本次检测也没被访问，这种情况才回收这个file_area的page.*/
+
+			/* 但有个bug，此时file_area可能2个page是冷的，两个page是mapcount的，此时file_area处于file_stat->mapcount链表。
+			 * 还有，file_area可能2个page是冷的，两个page是热的，此时file_area处于file_stat->hot链表，总之不在file_stat->temp链表。
+			 * 这个bug我当时写代码没发现，当局者迷。而我把异步内存回收做到内核时，原理忘了，报着小白怀疑态度再查看这段代码，
+			 * 很容易就发现了这个bug。真的无语了，只能这样才能发现隐藏bug吗？这都是check_one_file_area_cold_page_and_clear()
+			 * 函数没设计好造成的，下个版本解决*/
 			if(cold_page_count_last != cold_page_count)
 			{
 				//处于file_stat->tmep链表上的file_area，移动到其他链表时，要先对file_area的access_count清0，否则会影响到
@@ -1655,16 +1661,21 @@ static unsigned int check_file_area_cold_page_and_clear(struct hot_cold_file_glo
 				 *该临时链表上的不太冷file_area同统一移动到file_stat->file_area_temp链表尾。这样做的目的是，避免该while循环里重复遍历到
 				 *这些file_area*/
 				//list_move_tail(&p_file_area->file_area_list,&p_file_stat->file_area_temp);
-				spin_lock(&p_file_stat->file_stat_lock);/*凡是对file_stat->file_area_temp链表成员的list_add、list_del、list_move操作都要加锁*/
-				list_move(&p_file_area->file_area_list,&file_area_temp_head);
-				spin_unlock(&p_file_stat->file_stat_lock);
+				/*这又是一个bug，如果file_area没有被访问，但是file_area被判定为mapcount file_area而移动到了file_stat->mapcount链表，
+				 * 则此时就不能再把file_area再移动回file_area_temp_head，然后该函数最后再把这些file_area移动回file_stat->temp链表。
+				 * 状态错了，mapcount的file_area存在于file_stat->temp链表*/
+				if(file_area_in_temp_list(p_file_area)){
+				    spin_lock(&p_file_stat->file_stat_lock);/*凡是对file_stat->file_area_temp链表成员的list_add、list_del、list_move操作都要加锁*/
+				    list_move(&p_file_area->file_area_list,&file_area_temp_head);
+				    spin_unlock(&p_file_stat->file_stat_lock);
+			    }
 			}
 		}else if(ret > 0){
 			/*如果file_area的page被访问了，则把file_area移动到链表头-------这个操作就多余了，去掉，只要把不太冷的file_area移动到
 			  file_stat->file_area_temp链表尾就行了，这样就达到目的：链表尾是冷file_area，链表头是热file_area*/
 			//list_move(&p_file_area->file_area_list,&p_file_stat->file_area_temp);
 
-			/*如果file_area被判定是热file_area等原因而移动到了其他链表，并且file_area_in_temp_list(p_file_area)成立，
+			/*如果file_area被判定是热file_area等原因而移动到了其他链表，则!file_area_in_temp_list(p_file_area)成立，
 			 *并且，p_file_area是p_file_stat->file_area_last，要强制更新p_file_stat->file_area_last为p_file_area_temp。
 			 *因为此时这个p_file_stat->file_area_last已经不再处于temp链表了，可能会导致死循环。原因上边友分析*/
 			if(!file_area_in_temp_list(p_file_area) && (p_file_area == p_file_stat->file_area_last)){
@@ -2234,7 +2245,11 @@ static int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_global *p
 		ret = traverse_mmap_file_stat_get_cold_page(p_hot_cold_file_global,p_file_stat,scan_file_area_max,&scan_file_area_count);
 		//返回值是1是说明当前这个file_stat的temp链表上的file_area已经全扫描完了，则扫描该file_stat在global->mmap_file_stat_temp_large_file_head或global->mmap_file_stat_temp_head链表上的上一个file_stat的file_area
 		if(ret < 0){
-			return -1;
+			//return -1;
+			/*不能直接return -1。因此此时file_stat_list链表保存了已经遍历过file_stat，这里直接return的话，会导致
+			 * 无法执行下边的list_splice(&file_stat_list,file_stat_temp_head)把这些file_stat再移动回global temp或temp_large_file链表,
+			 * 故导致这些file_stat一直残留在file_stat_list这个临时链表，状态就错了，将来iput() list_del这些file_stat就会__list_del_entry_valid()报错*/
+			goto err;
 		}
 
 		/*到这里，只有几种情况
@@ -2273,7 +2288,7 @@ static int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_global *p
 			panic("%s file_stat:0x%llx status:0x%lx exception scan_file_area_count:%d scan_file_stat_count:%d ret:%d\n",__func__,(u64)p_file_stat,p_file_stat->file_stat_status,scan_file_area_count,scan_file_stat_count,ret);
 		}
 	}
-
+err:
 	//如果file_stat_list临时链表还有file_stat，则把这些file_stat移动到global temp链表头，下轮循环就能从链表尾巴扫描还没有扫描的file_stat了
 	if(!list_empty(&file_stat_list)){
 		list_splice(&file_stat_list,file_stat_temp_head);
