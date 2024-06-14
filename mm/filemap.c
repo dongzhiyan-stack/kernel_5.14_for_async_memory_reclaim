@@ -240,6 +240,15 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
 
 	//清理这个page在file_area->file_area_statue的对应的bit位，表示这个page被释放了
 	clear_file_area_page_bit(p_file_area,page_offset_in_file_area);
+	/* 如果page在xarray tree有dirty、writeback、towrite mark标记，必须清理掉，否则将来这个槽位的再有新的page，
+	 * 这些mark标记会影响已经设置了dirty、writeback、towrite mark标记的错觉，从而导致判断错误*/
+	if(is_file_area_page_mark_bit_set(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY))
+		clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY);
+	if(is_file_area_page_mark_bit_set(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_WRITEBACK))
+		clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_WRITEBACK);
+	if(is_file_area_page_mark_bit_set(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_TOWRITE))
+		clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_TOWRITE);
+
 	//如果这个file_area还有page，直接返回。否则才会xas_store(&xas, NULL)清空这个file_area
 	if(file_area_have_page(p_file_area))
 		return;
@@ -275,8 +284,10 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
 
 	/*清理xarray tree的dirty、writeback、towrite标记，重点!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!*/
 	xas_init_marks(&xas);
-	/*清理file_area所有的towrite、dirty、writeback的mark标记。这个函数是在把file_area从xarray tree剔除时执行的，之后file_area是无效的，有必要吗????????????*/
-	clear_file_area_towrite_dirty_writeback_mark(p_file_area);
+	/*清理file_area所有的towrite、dirty、writeback的mark标记。这个函数是在把file_area从xarray tree剔除时执行的。
+	 *之后file_area是无效的，有必要吗????????????。有必要，但是要把清理page的dirty、writeback、towrite mark标记代码放到
+	 上边。做到每delete一个page，就要清理这个page的dirty、writeback、towrite mark标记，而不能要等到delete 4个page后再同一清理4个page的mark标记*/
+	//clear_file_area_towrite_dirty_writeback_mark(p_file_area);
 
 	//folio->mapping = NULL;必须放到前边，这个隐藏的问题很深呀
 

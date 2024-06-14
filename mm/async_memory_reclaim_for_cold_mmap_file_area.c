@@ -1638,10 +1638,11 @@ static unsigned int check_file_area_cold_page_and_clear(struct hot_cold_file_glo
 			 * 函数没设计好造成的，下个版本解决*/
 			if(cold_page_count_last != cold_page_count)
 			{
-			/*二者不相等，说明file_area是冷的，并且它的page的pte本次检测也没被访问，这种情况才回收这个file_area的page。
-			 *如果file_area被判定是热的或者mapcount的，则if(cold_page_count_last != cold_page_count)不成立*/
-		        if(!file_area_in_temp_list(p_file_area) || file_area_in_temp_list_error(p_file_area))
-			        panic("%s file_area:0x%llx status:%d not in file_area_temp\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+				/*二者不相等，说明file_area是冷的，并且它的page的pte本次检测也没被访问，这种情况才回收这个file_area的page。
+				 *如果file_area被判定是热的或者mapcount的，则if(cold_page_count_last != cold_page_count)不成立*/
+				if(!file_area_in_temp_list(p_file_area) || file_area_in_temp_list_error(p_file_area))
+					panic("%s file_area:0x%llx status:%d not in file_area_temp\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+
 				//处于file_stat->tmep链表上的file_area，移动到其他链表时，要先对file_area的access_count清0，否则会影响到
 				//file_area->file_area_access_age变量，因为file_area->access_count和file_area_access_age是共享枚举变量
 				file_area_access_count_clear(p_file_area);
