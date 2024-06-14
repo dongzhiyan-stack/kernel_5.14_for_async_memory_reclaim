@@ -639,9 +639,13 @@ static  unsigned int check_one_file_area_cold_page_and_clear(struct hot_cold_fil
 	 *1: file_area的page都是冷的，ret是0
 	 *2: file_area的page有些被访问了，ret大于0
 	 *3：file_area的page都是冷的，但是有些page前边trylock_page失败了，ret大于0。这种情况目前已经不可能了
+	 *
+	 *如果file_area被判定被mapcount file_area，即mapcount_file_area是1，则上边该file_area被判定是冷page而
+	 *保存到page_buf[]数组的page也要清空，使无效，方法就是恢复cold_page_count最初的值即可，它指向最后一个
+	 *保存到page_buf[]数组最后一个page的下标
 	 */
 	//历的是file_stat->file_area_temp链表上的file_area是if才成立
-	if(ret > 0 && cold_page_count != NULL && file_area_cold){
+	if((ret > 0 || mapcount_file_area) && cold_page_count != NULL && file_area_cold){
 		/*走到这里，说明file_area的page可能是热的，或者page_lock失败，那就不参与内存回收了。那就要对已加锁的page解锁*/
 		//不回收该file_area的page，恢复cold_page_count
 		*cold_page_count = cold_page_count_temp;
@@ -1596,7 +1600,7 @@ static unsigned int check_file_area_cold_page_and_clear(struct hot_cold_file_glo
 			/*加下边这个if判断，是因为之前设计的以p_file_stat->file_area_last为基准的循环遍历链表有个重大bug：while循环第一次
 			 *遍历p_file_area时，p_file_area和p_file_stat->file_area_last是同一个。而如果p_file_area是冷的，并且本次它的page的
 			 *pte页表也没访问，那就要把file_area移动到file_stat->file_area_free_temp链表。这样后续这个while就要陷入死循环了，
-			 *因为p_file_stat->file_area_last指向的file_area移动到file_stat->file_area_free_temp链表了。而p_file_stat一个个
+			 *因为p_file_stat->file_area_last指向的file_area移动到file_stat->file_area_free_temp链表了。而p_file_area一个个
 			 *指向file_stat->file_area_temp链表的file_area。下边的while(p_file_area != p_file_stat->file_area_last)永远不成立
 			 *并且上边check_one_file_area_cold_page_and_clear()里传入的file_area是重复的，会导致里边重复判断page和lock_page，
 			 然后就会出现进程hung在lock_page里，因为重复lock_page。解决办法是
@@ -1624,7 +1628,8 @@ static unsigned int check_file_area_cold_page_and_clear(struct hot_cold_file_glo
 				delete_file_area_last = 1;
 			}
 
-			/*二者不相等，说明file_area是冷的，并且它的page的pte本次检测也没被访问，这种情况才回收这个file_area的page.*/
+			/*二者不相等，说明file_area是冷的，并且它的page的pte本次检测也没被访问，这种情况才回收这个file_area的page。
+			 *并且，如果当前p_file_area被被判定是热的或者mapcount file_area，*/
 
 			/* 但有个bug，此时file_area可能2个page是冷的，两个page是mapcount的，此时file_area处于file_stat->mapcount链表。
 			 * 还有，file_area可能2个page是冷的，两个page是热的，此时file_area处于file_stat->hot链表，总之不在file_stat->temp链表。
@@ -1633,6 +1638,10 @@ static unsigned int check_file_area_cold_page_and_clear(struct hot_cold_file_glo
 			 * 函数没设计好造成的，下个版本解决*/
 			if(cold_page_count_last != cold_page_count)
 			{
+			/*二者不相等，说明file_area是冷的，并且它的page的pte本次检测也没被访问，这种情况才回收这个file_area的page。
+			 *如果file_area被判定是热的或者mapcount的，则if(cold_page_count_last != cold_page_count)不成立*/
+		        if(!file_area_in_temp_list(p_file_area) || file_area_in_temp_list_error(p_file_area))
+			        panic("%s file_area:0x%llx status:%d not in file_area_temp\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 				//处于file_stat->tmep链表上的file_area，移动到其他链表时，要先对file_area的access_count清0，否则会影响到
 				//file_area->file_area_access_age变量，因为file_area->access_count和file_area_access_age是共享枚举变量
 				file_area_access_count_clear(p_file_area);
@@ -1678,6 +1687,8 @@ static unsigned int check_file_area_cold_page_and_clear(struct hot_cold_file_glo
 			/*如果file_area被判定是热file_area等原因而移动到了其他链表，则!file_area_in_temp_list(p_file_area)成立，
 			 *并且，p_file_area是p_file_stat->file_area_last，要强制更新p_file_stat->file_area_last为p_file_area_temp。
 			 *因为此时这个p_file_stat->file_area_last已经不再处于temp链表了，可能会导致死循环。原因上边友分析*/
+
+			/*到这个分支，file_area可能是热的或者mapcount的，此时就不能再把file_area移动到file_area_temp_head临时链表了*/
 			if(!file_area_in_temp_list(p_file_area) && (p_file_area == p_file_stat->file_area_last)){
 				p_file_stat->file_area_last = p_file_area_temp;
 				delete_file_area_last = 1;
