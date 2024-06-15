@@ -31,6 +31,9 @@
 #include <linux/memcontrol.h>
 #include "internal.h"
 
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+#include "../mm/async_memory_reclaim_for_cold_file_area.h"
+#endif
 /*
  * 4MB minimal write chunk size
  */
@@ -377,12 +380,29 @@ static bool inode_do_switch_wbs_for_file_area(struct inode *inode,
 	bool switched = false;
 
 	struct file_area *p_file_area;
+	struct file_stat *p_file_stat;
 	//unsigned int page_offset_in_file_area = 0;
 	int i;
 	int mark_page_count = 0;
 
 	spin_lock(&inode->i_lock);
+	/*该函数没有rcu_read_lock，但是有xa_lock_irq，也能防止并发delete file_stat和file_area*/
 	xa_lock_irq(&mapping->i_pages);
+
+	p_file_stat = (struct file_stat *)mapping->rh_reserved1;
+	/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
+	 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
+	 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
+	 * smp_rmb()是要立即感知到mapping->rh_reserved1的最新值——即1。还有，p_file_stat = (struct file_stat *)mapping->rh_reserved1
+	 * 赋值必须放到smp_rmb()内存屏障前边，因为可能这里赋值时mapping->rh_reserved1还是正常，smp_rmb()执行后，
+	 * IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)执行时mapping->rh_reserved1已经被cold_file_stat_delete()赋值1了。
+	 * 如果不用smp_rmb()内存屏障隔开，可能会出现if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping))先执行，此时
+	 * mapping->rh_reserved1还是正常的，但是再等执行p_file_stat = (struct file_stat *)mapping->rh_reserved1就是1了，
+	 * 此时就错过判断mapping->rh_reserved1非法了，然后执行mapping->rh_reserved1这个file_stat而crash!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	 * */
+	smp_rmb();
+	if(unlikely(!IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)))
+        printk("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,mapping->rh_reserved1);
 
 	/*
 	 * Once I_FREEING or I_WILL_FREE are visible under i_lock, the eviction
@@ -521,8 +541,8 @@ static bool inode_do_switch_wbs(struct inode *inode,
 	/*page的从xarray tree delete和 保存到xarray tree 两个过程因为加锁防护，不会并发执行，因此不用担心下边的
 	 *找到的folio是file_area*/
 	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)){
-		smp_rmb();
-		if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping))
+		//smp_rmb();
+		//if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping))
 			return inode_do_switch_wbs_for_file_area(inode,old_wb,new_wb);
 	}
 #endif	

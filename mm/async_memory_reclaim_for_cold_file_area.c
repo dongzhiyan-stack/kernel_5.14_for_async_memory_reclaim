@@ -225,6 +225,8 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 		xa_unlock_irq(xarray_i_pages);
 		return 1;
 	}
+	
+	/*正常这里释放文件file_stat结构时，file_area指针的xarray tree的所有成员都已经释放，是个空树，否则就触发panic*/
 	if(p_file_stat_del->mapping->i_pages.xa_head != NULL)
 		panic("file_stat_del:0x%llx 0x%llx !!!!!!!!\n",(u64)p_file_stat_del,(u64)p_file_stat_del->mapping->i_pages.xa_head);
 	/*如果file_stat在__destroy_inode_handler_post中被释放了，file_stat一定有delete标记。否则是空闲file_stat被delete，这里得标记file_stat delete。
@@ -251,6 +253,7 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 		spin_lock_irq(&p_hot_cold_file_global->global_lock);
 		/*在这个加个内存屏障，保证前后代码隔离开。即file_stat有delete标记后，inode->i_mapping->rh_reserved1一定是0，p_file_stat->mapping一定是NULL*/
 		smp_wmb();
+		/*下边的call_rcu()有smp_mb()，保证set_file_stat_in_delete()后有内存屏障*/
 		set_file_stat_in_delete(p_file_stat_del);
 		//从global的链表中剔除该file_stat，这个过程需要加锁，因为同时其他进程会执行hot_file_update_file_status()向global的链表添加新的文件file_stat
 		list_del_rcu(&p_file_stat_del->hot_cold_file_list);
@@ -269,7 +272,7 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 		spin_unlock_irq(&p_hot_cold_file_global->mmap_file_global_lock);
 	}
 
-	/*rcu延迟释放file_stat结构*/
+	/*rcu延迟释放file_stat结构。call_rcu()里有smp_mb()内存屏障*/
 	call_rcu(&p_file_stat_del->i_rcu, i_file_stat_callback);
 
 	FILE_AREA_PRINT("%s file_stat:0x%llx delete !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_stat_del);

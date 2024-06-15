@@ -16,10 +16,18 @@
 #include <linux/hardirq.h> /* for in_interrupt() */
 #include <linux/hugetlb_inline.h>
 
-#include "../../mm/async_memory_reclaim_for_cold_file_area.h"
+//#include "../../mm/async_memory_reclaim_for_cold_file_area.h"
+#define ASYNC_MEMORY_RECLAIM_IN_KERNEL
 
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL 
-extern void *get_folio_from_file_area(struct address_space *mapping,pgoff_t index);
+#define SUPPORT_FILE_AREA_INIT_OR_DELETE 1
+#define IS_SUPPORT_FILE_AREA_READ_WRITE(mapping) \
+    (mapping->rh_reserved1 > SUPPORT_FILE_AREA_INIT_OR_DELETE)
+/*测试文件支持file_area形式读写文件和内存回收，此时情况2(mapping->rh_reserved1是1)和情况3(mapping->rh_reserved1>1)都要返回true*/
+#define IS_SUPPORT_FILE_AREA(mapping) \
+	(mapping->rh_reserved1 >=  SUPPORT_FILE_AREA_INIT_OR_DELETE)
+
+extern void *get_folio_from_file_area_for_file_area(struct address_space *mapping,pgoff_t index);
 extern void disable_mapping_file_area(struct inode *inode);
 #endif
 
@@ -1205,7 +1213,7 @@ static inline struct folio *__readahead_folio(struct readahead_control *ractl)
 	}
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 	if(IS_SUPPORT_FILE_AREA_READ_WRITE(ractl->mapping))
-		folio = get_folio_from_file_area(ractl->mapping,ractl->_index);
+		folio = get_folio_from_file_area_for_file_area(ractl->mapping,ractl->_index);
 	else		
 		folio = xa_load(&ractl->mapping->i_pages, ractl->_index);
 #else

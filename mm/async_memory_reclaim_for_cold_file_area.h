@@ -51,7 +51,6 @@
 #define SUPPORT_FS_UUID 1
 #define SUPPORT_FS_SINGLE     2
 
-#define SUPPORT_FILE_AREA_INIT_OR_DELETE 1
 /**针对mmap文件新加的******************************/
 #define MMAP_FILE_NAME_LEN 16
 struct mmap_file_shrink_counter
@@ -794,11 +793,11 @@ static inline void is_cold_file_area_reclaim_support_fs(struct address_space *ma
      file_stat被释放了。总之此时文件file_stat未分配，一个文件页page都没有
   情况3:mapping->rh_reserved1大于1：此时文件分配file_stat，走filemap.c里for_file_area正常读写文件流程
  */
-#define IS_SUPPORT_FILE_AREA_READ_WRITE(mapping) \
-    (mapping->rh_reserved1 > SUPPORT_FILE_AREA_INIT_OR_DELETE)
+/*#define IS_SUPPORT_FILE_AREA_READ_WRITE(mapping) \
+    (mapping->rh_reserved1 > SUPPORT_FILE_AREA_INIT_OR_DELETE) 移动到 include/linux/pagemap.h 文件了*/
 /*测试文件支持file_area形式读写文件和内存回收，此时情况2(mapping->rh_reserved1是1)和情况3(mapping->rh_reserved1>1)都要返回true*/
-#define IS_SUPPORT_FILE_AREA(mapping) \
-	(mapping->rh_reserved1 >=  SUPPORT_FILE_AREA_INIT_OR_DELETE)
+/*#define IS_SUPPORT_FILE_AREA(mapping) \
+	(mapping->rh_reserved1 >=  SUPPORT_FILE_AREA_INIT_OR_DELETE)*/
 
 /*****************************************************************************************************************************************************/
 extern int shrink_page_printk_open1;

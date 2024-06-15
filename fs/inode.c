@@ -23,6 +23,9 @@
 #include <trace/events/writeback.h>
 #include "internal.h"
 
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+#include "../mm/async_memory_reclaim_for_cold_file_area.h"
+#endif
 /*
  * Inode locking rules:
  *

@@ -436,6 +436,11 @@ int folio_migrate_mapping_for_file_area(struct address_space *mapping,
 	}
 
 	//xas_store(&xas, newfolio);
+	/*如果此时file_stat或者file_area cold_file_stat_delete()、cold_file_area_delete被释放了，那肯定是不合理的
+	 *这里会触发panic*/
+	if(unlikely(!IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)))
+        panic("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,mapping->rh_reserved1);
+
 	p_file_area = (struct file_area *)xas_load(&xas);
 	if(!p_file_area || !is_file_area_entry(p_file_area))
 		panic("%s mapping:0x%llx p_file_area:0x%llx error\n",__func__,(u64)mapping,(u64)p_file_area);
