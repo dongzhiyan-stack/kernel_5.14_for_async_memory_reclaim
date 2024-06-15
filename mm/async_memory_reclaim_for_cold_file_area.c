@@ -211,8 +211,6 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 	xa_lock_irq(xarray_i_pages);
     
 	/*正常这里释放文件file_stat结构时，file_area指针的xarray tree的所有成员都已经释放，是个空树，否则就触发panic*/
-	if(p_file_stat_del->mapping->i_pages.xa_head != NULL)
-		panic("file_stat_del:0x%llx 0x%llx !!!!!!!!\n",(u64)p_file_stat_del,(u64)p_file_stat_del->mapping->i_pages.xa_head);
 
 	/*如果file_stat的file_area个数大于0，说明此时该文件被方法访问了，在hot_file_update_file_status()中分配新的file_area。
 	 *此时这个file_stat就不能释放了*/
@@ -227,6 +225,8 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 		xa_unlock_irq(xarray_i_pages);
 		return 1;
 	}
+	if(p_file_stat_del->mapping->i_pages.xa_head != NULL)
+		panic("file_stat_del:0x%llx 0x%llx !!!!!!!!\n",(u64)p_file_stat_del,(u64)p_file_stat_del->mapping->i_pages.xa_head);
 	/*如果file_stat在__destroy_inode_handler_post中被释放了，file_stat一定有delete标记。否则是空闲file_stat被delete，这里得标记file_stat delete。
 	 *这段对mapping->rh_reserved1清0的必须放到xa_lock_irq加锁里，因为会跟__filemap_add_folio()里判断mapping->rh_reserved1的代码构成并发。
 	 *并且，如果file_stat在__destroy_inode_handler_post中被释放了，p_file_stat_del->mapping是NULL，这个if的p_file_stat_del->mapping->rh_reserved1=0会crash*/

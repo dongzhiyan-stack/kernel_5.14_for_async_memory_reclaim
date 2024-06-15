@@ -65,7 +65,7 @@
 #define FILE_AREA_PER_NODE TREE_MAP_SIZE
 
 //一个冷file_area，如果经过FILE_AREA_TO_FREE_AGE_DX个周期，仍然没有被访问，则释放掉file_area结构
-#define MMAP_FILE_AREA_TO_FREE_AGE_DX  30
+#define MMAP_FILE_AREA_TO_FREE_AGE_DX  (MMAP_FILE_AREA_TEMP_TO_COLD_AGE_DX + 20)
 //发生refault的file_area经过FILE_AREA_REFAULT_TO_TEMP_AGE_DX个周期后，还没有被访问，则移动到file_area_temp链表
 #define MMAP_FILE_AREA_REFAULT_TO_TEMP_AGE_DX 30
 //普通的file_area在FILE_AREA_TEMP_TO_COLD_AGE_DX个周期内没有被访问则被判定是冷file_area，然后释放这个file_area的page
@@ -597,7 +597,8 @@ static  unsigned int check_one_file_area_cold_page_and_clear(struct hot_cold_fil
 		/*如果上边for循环遍历的file_area的page的mapcount都是1，且file_area的page上边没有遍历完，则这里继续遍历完剩余的page*/
 		while(0 == mapcount_file_area && i < PAGE_COUNT_IN_AREA){
 			page= pages[i];
-			if (page && !xa_is_value(page) && page_mapped(page) && page_mapcount(page) > 1){
+			//if (page && !xa_is_value(page) && page_mapped(page) && page_mapcount(page) > 1){
+			if (page && page_mapped(page) && page_mapcount(page) > 1){
 				mapcount_file_area = 1;
 			}
 			i ++;
@@ -2302,9 +2303,11 @@ static int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_global *p
 	}
 err:
 	//如果file_stat_list临时链表还有file_stat，则把这些file_stat移动到global temp链表头，下轮循环就能从链表尾巴扫描还没有扫描的file_stat了
+	spin_lock(&p_hot_cold_file_global->mmap_file_global_lock);/*这是把file_stat移动到global temp链表头，因此必须要加global lock*/
 	if(!list_empty(&file_stat_list)){
 		list_splice(&file_stat_list,file_stat_temp_head);
 	}
+	spin_unlock(&p_hot_cold_file_global->mmap_file_global_lock);
 	return free_pages;
 }
 
