@@ -43,7 +43,7 @@
  *只更新该文件file_area的age后，然后函数返回，不再做其他操作，节省性能*/
 #define HOT_FILE_COLD_AGE_DX 10
 
-#define SUPPORT_FS_UUID_LEN 50
+#define SUPPORT_FS_UUID_LEN UUID_SIZE
 #define SUPPORT_FS_NAME_LEN 10
 #define SUPPORT_FS_COUNT 2
 
@@ -783,7 +783,8 @@ static inline void is_cold_file_area_reclaim_support_fs(struct address_space *ma
 		}
 	}
 	else if(SUPPORT_FS_UUID == hot_cold_file_global_info.support_fs_type){
-
+		if(0 == memcmp(sb->s_uuid.b , hot_cold_file_global_info.support_fs_uuid , SUPPORT_FS_UUID_LEN))
+			mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;
 	}
 }
 /* 测试文件支持file_area形式读写文件和内存回收，并且已经分配了file_stat

@@ -2823,40 +2823,81 @@ static int __init hot_cold_file_init(void)
     return hot_cold_file_proc_init(&hot_cold_file_global_info);
 }
 subsys_initcall(hot_cold_file_init);
+int uuid_string_convert(char *src_buf,unsigned char *dst_buf)
+{
+	char hex_buf[2];
+	unsigned char hex_buf_count = 0;
+	unsigned char dst_buf_count = 0;
+
+	char *p = src_buf;
+	printk("%s uuid_str:%s\n",__func__,src_buf);
+	while(*p){
+		if(*p == '-'){
+			p ++;
+			continue;
+		}
+		if(*p >= '0' && *p <= '9')
+			hex_buf[hex_buf_count] = *p - '0';
+		else if(*p >= 'a' && *p <= 'f')
+			hex_buf[hex_buf_count] = *p - 'a' + 10;
+		else{
+			printk("%s invalid char:%c\n",__func__,*p);
+			return -1;
+		}
+
+		hex_buf_count ++;
+		if(2 == hex_buf_count){
+			if(hex_buf_count >= SUPPORT_FS_UUID_LEN){
+				printk("%s hex_buf_count:%d invalid\n",__func__,hex_buf_count);
+				return -1;
+			}
+			dst_buf[dst_buf_count] = hex_buf[0] * 16 + hex_buf[1];
+			hex_buf_count = 0;
+			printk("%x\n",dst_buf[dst_buf_count]);
+			dst_buf_count++;
+		}
+		p ++;
+	}
+	if(dst_buf_count != SUPPORT_FS_UUID_LEN){
+		printk("%s end hex_buf_count:%d invalid\n",__func__,dst_buf_count);
+		return -1;
+	}
+	return 0;
+}
 
 static int __init setup_cold_file_area_reclaim_support_fs(char *buf)
 {
 	printk("setup_cold_file_area_reclaim_support_fs:%s\n",buf);
-    if(!buf)
+	if(!buf)
 		return 0;
 
-    if (!strncmp(buf, "all", 3)) {
+	if (!strncmp(buf, "all", 3)) {
 		hot_cold_file_global_info.support_fs_type = SUPPORT_FS_ALL;
 	}
 	//cold_file_area_reclaim_support_fs=fs=ext4,xfs
 	else if (!strncmp(buf, "fs", 2)) {
 		char *buf_head;
-        unsigned char fs_name_len = 0;
+		unsigned char fs_name_len = 0;
 		unsigned char fs_count = 0;
 
-        hot_cold_file_global_info.support_fs_type = SUPPORT_FS_SINGLE;
-        buf += 3;
+		hot_cold_file_global_info.support_fs_type = SUPPORT_FS_SINGLE;
+		buf += 3;
 		buf_head = buf;
-	    printk("1:setup_cold_file_area_reclaim_support_fs:%s\n",buf);
+		printk("1:setup_cold_file_area_reclaim_support_fs:%s\n",buf);
 		while(*buf != '\0' && fs_count < SUPPORT_FS_COUNT){
-            if(*buf == ','){
+			if(*buf == ','){
 				if(fs_name_len < SUPPORT_FS_NAME_LEN){
-				    memset(hot_cold_file_global_info.support_fs_name[fs_count],0,SUPPORT_FS_NAME_LEN);
-                    strncpy(hot_cold_file_global_info.support_fs_name[fs_count],buf_head,fs_name_len);
-	                printk("1_2:setup_cold_file_area_reclaim_support_fs:%s fs_count:%d fs_name_len:%d\n",hot_cold_file_global_info.support_fs_name[fs_count],fs_count,fs_name_len);
-				    
+					memset(hot_cold_file_global_info.support_fs_name[fs_count],0,SUPPORT_FS_NAME_LEN);
+					strncpy(hot_cold_file_global_info.support_fs_name[fs_count],buf_head,fs_name_len);
+					printk("1_2:setup_cold_file_area_reclaim_support_fs:%s fs_count:%d fs_name_len:%d\n",hot_cold_file_global_info.support_fs_name[fs_count],fs_count,fs_name_len);
+
 					fs_count ++;
 					fs_name_len = 0;
 					buf_head = buf + 1;
 				}
 			}
 			else
-			    fs_name_len ++;
+				fs_name_len ++;
 
 			buf ++;
 		}
@@ -2868,14 +2909,15 @@ static int __init setup_cold_file_area_reclaim_support_fs(char *buf)
 	}
 	//cold_file_area_reclaim_support_fs=uuid=bee5938b-bdc6-463e-88a0-7eb08eb71dc3
 	else if (!strncmp(buf, "uuid", 4)) {
-        hot_cold_file_global_info.support_fs_type = SUPPORT_FS_UUID;
 		buf += 5;
-
-	    printk("2:setup_cold_file_area_reclaim_support_fs:%s\n",buf);
+		printk("2:setup_cold_file_area_reclaim_support_fs:%s\n",buf);
 		memset(hot_cold_file_global_info.support_fs_uuid,0,SUPPORT_FS_UUID_LEN);
-        strncpy(hot_cold_file_global_info.support_fs_uuid,buf,SUPPORT_FS_UUID_LEN);
+		if(uuid_string_convert(buf,hot_cold_file_global_info.support_fs_uuid))
+			return -1;
+
+		hot_cold_file_global_info.support_fs_type = SUPPORT_FS_UUID;
 	}
 
-    return 0;
+	return 0;
 }
 early_param("cold_file_area_reclaim_support_fs", setup_cold_file_area_reclaim_support_fs);
