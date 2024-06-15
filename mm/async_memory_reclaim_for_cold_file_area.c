@@ -193,7 +193,12 @@ int cold_file_area_delete_quick(struct hot_cold_file_global *p_hot_cold_file_glo
 /*在判定一个文件file_stat的page全部被释放，然后过了很长时间依然没人访问，执行该函数delete file_stat。必须考虑此时有进程并发访问该文件file_stat*/
 int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat_del)
 {
-	struct xarray *xarray_i_pages = &((struct address_space *)(p_file_stat_del->mapping))->i_pages;
+	//到这里时p_file_stat_del->mapping可能被__destroy_inode_handler_post()释放inode赋值了NULL，要防护这种情况
+	//struct xarray *xarray_i_pages = &(mapping->i_pages);
+	struct xarray *xarray_i_pages;
+	struct address_space *mapping;
+	char file_stat_del = 0;
+	int ret = 0;
 	/*并发问题:进程1执行filemap_get_read_batch()，，从xarray tree找不到file_area，xarray tree是空树，mapping->rh_reserved1
 	 *非NULL。然后执行到__filemap_add_folio()函数，打算分配file_area、分配page并保存到file_area。此时如果进程2执行
 	 cold_file_stat_delete()函数delete stat。靠xas_lock(跟xa_lock一样)解决并发问题：
@@ -204,18 +209,43 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 	 获取到xas_lock后，执行if(0 == mapping->rh_reserved1)，if成立。则只能分配新的file_stat了，不会再使用老的file_stat
 	 2：如果进程1先在__filemap_add_folio()获取xa_lock，则分配file_area、分配page并添加到file_area里。然后进程2执行到cold_file_stat_delete()
 	 获取xa_lock锁，发现file_stat已经有了file_aree，if(p_file_stat_del->file_area_count > 0)，则不会再释放该file_stat了
-	 */
 
+	 3：最近有发现一个并发内核bug。异步内存回收线程cold_file_stat_delete()释放长时间不访问的file_stat。但是此时
+	 对应文件inode被iput()释放了，最后执行到__destroy_inode_handler_post()释放inode和file_stat，此时二者就存在
+	 并发释放file_stat同步不合理而造成bug。
+	 cold_file_stat_delete()中依次执行p_file_stat_del->mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;
+	 p_file_stat_del->mapping=NULL;标记file_stat delete;
+	 __destroy_inode_handler_post()依次执行mapping->rh_reserved1=0;p_file_stat_del->mapping=NULL;
+	 标记file_stat delete;把file_stat移动到global delete链表;该函数执行后立即释放掉inode结构;
+
+	会存在如下并发问题
+	1:__destroy_inode_handler_post()中先执行p_file_stat_del->mapping=NULL后，cold_file_stat_delete()中执行
+	p_file_stat_del->mapping->rh_reserved1=0而crash。
+	2:__destroy_inode_handler_post()中执行后立即释放掉inode和mapping，而cold_file_stat_delete()中对
+	p_file_stat_del->mapping->rh_reserved1 赋值而访问已释放的内存而crash。
+
+	怎么解决这个并发问题，目前看只能cold_file_stat_delete()先执行file_inode_lock对inode加锁，如果inode加锁成功
+	则该文件就不会被执行iput()->__destroy_inode_handler_post()。如果inode加锁失败，说明这个文件inode已经被其他进程
+	iput()释放了，直接return。总之阻止二者并发执行。
+    */
+
+	//rcu_read_lock();
 	//lock_file_stat(p_file_stat_del,0);
 	//spin_lock(&p_file_stat_del->file_stat_lock);
+	if(0 == file_inode_lock(p_file_stat_del))
+		return ret;
+
+	mapping = p_file_stat_del->mapping;
+	xarray_i_pages = &(mapping->i_pages);
 	xa_lock_irq(xarray_i_pages);
-    
+
 	/*正常这里释放文件file_stat结构时，file_area指针的xarray tree的所有成员都已经释放，是个空树，否则就触发panic*/
 
 	/*如果file_stat的file_area个数大于0，说明此时该文件被方法访问了，在hot_file_update_file_status()中分配新的file_area。
 	 *此时这个file_stat就不能释放了*/
 	if(p_file_stat_del->file_area_count > 0){
-		/*一般此时file_stat是不可能有delete标记的，但可能inode释放时__destroy_inode_handler_post中设置了delete。正常不可能，这里有lock_file_stat加锁防护*/
+		/*一般此时file_stat是不可能有delete标记的，但可能inode释放时__destroy_inode_handler_post中设置了delete。
+		 *正常不可能，这里有lock_file_stat加锁防护*/
 		if(file_stat_in_delete(p_file_stat_del)){
 			printk("%s %s %d file_stat:0x%llx status:0x%lx in delete\n",__func__,current->comm,current->pid,(u64)p_file_stat_del,p_file_stat_del->file_stat_status);
 			dump_stack();
@@ -223,17 +253,30 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 		//spin_unlock(&p_file_stat_del->file_stat_lock);
 		//unlock_file_stat(p_file_stat_del);
 		xa_unlock_irq(xarray_i_pages);
-		return 1;
+		ret = 1;
+		goto err;
 	}
-	
+
 	/*正常这里释放文件file_stat结构时，file_area指针的xarray tree的所有成员都已经释放，是个空树，否则就触发panic*/
 	if(p_file_stat_del->mapping->i_pages.xa_head != NULL)
 		panic("file_stat_del:0x%llx 0x%llx !!!!!!!!\n",(u64)p_file_stat_del,(u64)p_file_stat_del->mapping->i_pages.xa_head);
-	/*如果file_stat在__destroy_inode_handler_post中被释放了，file_stat一定有delete标记。否则是空闲file_stat被delete，这里得标记file_stat delete。
-	 *这段对mapping->rh_reserved1清0的必须放到xa_lock_irq加锁里，因为会跟__filemap_add_folio()里判断mapping->rh_reserved1的代码构成并发。
-	 *并且，如果file_stat在__destroy_inode_handler_post中被释放了，p_file_stat_del->mapping是NULL，这个if的p_file_stat_del->mapping->rh_reserved1=0会crash*/
-	if(0 == file_stat_in_delete(p_file_stat_del)/*p_file_stat_del->mapping*/){
-		/*文件inode的mapping->rh_reserved1清0表示file_stat无效，这__destroy_inode_handler_post()删除inode时，发现inode的mapping->rh_reserved1是0就不再使用file_stat了，会crash*/
+
+	/*如果file_stat在__destroy_inode_handler_post中被释放了，file_stat一定有delete标记。否则是空闲file_stat被delete，
+	 *这里得标记file_stat delete。这段对mapping->rh_reserved1清0的必须放到xa_lock_irq加锁里，因为会跟__filemap_add_folio()
+	 *里判断mapping->rh_reserved1的代码构成并发。并且，如果file_stat在__destroy_inode_handler_post中被释放了，
+	 *p_file_stat_del->mapping是NULL，这个if的p_file_stat_del->mapping->rh_reserved1=0会crash。现在赋值
+	 *cold_file_stat_delete()中使用了file_inode_lock，已经没有这个并发问题了。*/
+	if(!file_stat_in_delete(p_file_stat_del)/*p_file_stat_del->mapping*/){
+		/* 文件inode的mapping->rh_reserved1清0表示file_stat无效，这__destroy_inode_handler_post()删除inode时，
+		 * 发现inode的mapping->rh_reserved1是0就不再使用file_stat了，会crash。但现在在释放file_stat时，必须
+		 * 改为赋值SUPPORT_FILE_AREA_INIT_OR_DELETE(1)。这样等将来该文件又被读写，发现mapping->rh_reserved1
+		 * 是1，说明该文件所属文件系统支持file_area文件读写，于是__filemap_add_folio()是把file_area指针
+		 * 保存到xarray tree，而不是page指针。那什么情况下要把mapping->rh_reserved1清0呢？只有iput释放inode时，
+		 * 此时该文件inode肯定不会再被读写了，才能把mapping->rh_reserved1清0。此时也必须把mapping->rh_reserved1清0，
+		 * 否则这个inode释放后再被其他进程被其他tmpfs等文件系统分配到，因为inode->mapping->rh_reserved1是1，会
+		 * 误以为该文件支持file_area文件读写，造成crash，具体在文件inode释放iput()->__destroy_inode_handler_post()
+		 * 函数有详细介绍。!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+		 **/
 		//p_file_stat_del->mapping->rh_reserved1 = 0;
 		p_file_stat_del->mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;/*原来赋值0，现在赋值1，原理一样*/
 		barrier();
@@ -251,33 +294,75 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 	 *是否有必要改为 spin_lock_irqsave，之前就遇到过用spin_lock_irq导致打乱中断状态而造成卡死?????????????????????????????????????????????*/
 	if(file_stat_in_cache_file(p_file_stat_del)){
 		spin_lock_irq(&p_hot_cold_file_global->global_lock);
-		/*在这个加个内存屏障，保证前后代码隔离开。即file_stat有delete标记后，inode->i_mapping->rh_reserved1一定是0，p_file_stat->mapping一定是NULL*/
-		smp_wmb();
-		/*下边的call_rcu()有smp_mb()，保证set_file_stat_in_delete()后有内存屏障*/
-		set_file_stat_in_delete(p_file_stat_del);
-		//从global的链表中剔除该file_stat，这个过程需要加锁，因为同时其他进程会执行hot_file_update_file_status()向global的链表添加新的文件file_stat
-		list_del_rcu(&p_file_stat_del->hot_cold_file_list);
-		//file_stat个数减1
-		hot_cold_file_global_info.file_stat_count --;
+		/*这里有个非常重要的隐藏点，__destroy_inode_handler_post()和cold_file_stat_delete()存在并发释放file_stat的
+		 *情况，如果到这里发现已经file_stat_in_delete了，说明__destroy_inode_handler_post()中已经标记file_stat delete了
+		 *并且把file_stat移动到global delete链表了，这里就不能再list_del_rcu(&p_file_stat_del->hot_cold_file_list)了。
+		 *而应该把mapping->rh_reserved1清0。因为有可能，__destroy_inode_handler_post()中先执行
+		 *mapping->rh_reserved1清0，然后global_lock加锁，标记file_stat delete。然后cold_file_stat_delete()执行
+		 *mapping->rh_reserved1=SUPPORT_FILE_AREA_INIT_OR_DELETE。到这里发现file_stat已经有了delete标记，就得
+		 *再执行一次mapping->rh_reserved1 = 0清0了，否则后续这个inode被tmpfs文件系统分配到，看到mapping->rh_reserved1
+		 *不是0，就会错误以为它支持file_area文件读写。
+
+		 *但是又有一个问题，到这里时，如果文件inode被__destroy_inode_handler_post()释放了，这里再mapping->rh_reserved1 = 0
+		 *清0，就会访问已经释放了的内存。因为mapping结构体属于inode的一部分。这样就有大问题了，必须得保证
+		 *cold_file_stat_delete()函数里inode不能被释放，才能放心使用mapping->rh_reserved1，只能用file_inode_lock了。
+		 * */
+		if(!file_stat_in_delete(p_file_stat_del)){
+			/* 在这个加个内存屏障，保证前后代码隔离开。即file_stat有delete标记后，inode->i_mapping->rh_reserved1一定是0，
+			 * p_file_stat->mapping一定是NULL*/
+			smp_wmb();
+			/*下边的call_rcu()有smp_mb()，保证set_file_stat_in_delete()后有内存屏障*/
+			set_file_stat_in_delete(p_file_stat_del);
+			/* 从global的链表中剔除该file_stat，这个过程需要加锁，因为同时其他进程会执行hot_file_update_file_status()
+			 * 向global的链表添加新的文件file_stat*/
+			list_del_rcu(&p_file_stat_del->hot_cold_file_list);
+			file_stat_del = 1;
+			/*file_stat个数减1*/
+			hot_cold_file_global_info.file_stat_count --;
+		}
+		else{
+			mapping->rh_reserved1 = 0;
+			/*避免spin lock时有printk打印*/
+			spin_unlock_irq(&hot_cold_file_global_info.mmap_file_global_lock);
+			printk("%s p_file_stat:0x%llx status:0x%lx already delete\n",__func__,(u64)p_file_stat_del,p_file_stat_del->file_stat_status);
+			goto err;
+		}
 		spin_unlock_irq(&p_hot_cold_file_global->global_lock);
 	}else{
 		spin_lock_irq(&p_hot_cold_file_global->mmap_file_global_lock);
-		/*在这个加个内存屏障，保证前后代码隔离开。即file_stat有delete标记后，inode->i_mapping->rh_reserved1一定是0，p_file_stat->mapping一定是NULL*/
-		smp_wmb();
-		set_file_stat_in_delete(p_file_stat_del);
-		//从global的链表中剔除该file_stat，这个过程需要加锁，因为同时其他进程会执行hot_file_update_file_status()向global的链表添加新的文件file_stat
-		list_del_rcu(&p_file_stat_del->hot_cold_file_list);
-		//file_stat个数减1
-		hot_cold_file_global_info.mmap_file_stat_count --;
+		if(!file_stat_in_delete(p_file_stat_del)){
+			/*在这个加个内存屏障，保证前后代码隔离开。即file_stat有delete标记后，inode->i_mapping->rh_reserved1一定是0，p_file_stat->mapping一定是NULL*/
+			smp_wmb();
+			set_file_stat_in_delete(p_file_stat_del);
+			//从global的链表中剔除该file_stat，这个过程需要加锁，因为同时其他进程会执行hot_file_update_file_status()向global的链表添加新的文件file_stat
+			list_del_rcu(&p_file_stat_del->hot_cold_file_list);
+			file_stat_del = 1;
+			//file_stat个数减1
+			hot_cold_file_global_info.mmap_file_stat_count --;
+		}
+		else{
+			mapping->rh_reserved1 = 0;
+			/*避免spin lock时有printk打印*/
+			spin_unlock_irq(&hot_cold_file_global_info.mmap_file_global_lock);
+			printk("%s p_file_stat:0x%llx status:0x%lx already delete\n",__func__,(u64)p_file_stat_del,p_file_stat_del->file_stat_status);
+			goto err;
+		}
 		spin_unlock_irq(&p_hot_cold_file_global->mmap_file_global_lock);
 	}
 
-	/*rcu延迟释放file_stat结构。call_rcu()里有smp_mb()内存屏障*/
-	call_rcu(&p_file_stat_del->i_rcu, i_file_stat_callback);
+err:
+	/* rcu延迟释放file_stat结构。call_rcu()里有smp_mb()内存屏障。但如果mapping->rh_reserved1是0了，说明上边
+	 * 没有执行list_del_rcu(&p_file_stat_del->hot_cold_file_list)，那这里不能执行call_rcu()*/
+	if(file_stat_del)
+		call_rcu(&p_file_stat_del->i_rcu, i_file_stat_callback);
+
+	//rcu_read_unlock();
+	file_inode_unlock_mapping(mapping);
+
 
 	FILE_AREA_PRINT("%s file_stat:0x%llx delete !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_stat_del);
 
-	return 0;
+	return ret;
 }
 EXPORT_SYMBOL(cold_file_stat_delete);
 
@@ -383,33 +468,78 @@ static int cold_file_stat_delete_quick(struct hot_cold_file_global *p_hot_cold_f
 
 static void __destroy_inode_handler_post(struct inode *inode)
 {
-	if(inode && inode->i_mapping && IS_SUPPORT_FILE_AREA_READ_WRITE(inode->i_mapping)){
+	/* 又一个重大隐藏bug。!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	 * 当iput()释放一个文件inode执行到这里，inode->i_mapping->rh_reserved1一定
+	 * IS_SUPPORT_FILE_AREA_READ_WRITE()成立吗(即大于1)。不是的，如果这个file_stat长时间没访问被
+	 * cold_file_stat_delete()释放了，那inode->i_mapping->rh_reserved1就被赋值1。这种情况下，该文件
+	 * 执行iput()被释放，执行到__destroy_inode_handler_post()函数时，发现inode->i_mapping->rh_reserved1
+	 * 是1，也要执行if里边的代码inode->i_mapping->rh_reserved1 = 0清0 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	 * 
+	 * 新的问题来了，如果__destroy_inode_handler_post()和cold_file_stat_delete()并发释放file_stat，
+	 * 就会存在并发问题，详细在cold_file_stat_delete()有分析，解决方法是使用file_inode_lock()阻止并发
+	 * */
+	//if(inode && inode->i_mapping && IS_SUPPORT_FILE_AREA_READ_WRITE(inode->i_mapping)){
+	if(inode && inode->i_mapping && IS_SUPPORT_FILE_AREA(inode->i_mapping)){
 		struct file_stat *p_file_stat = (struct file_stat *)inode->i_mapping->rh_reserved1;
-        /*到这里，文件inode的mapping的xarray tree必然是空树，不是就crash*/  
+		/*到这里，文件inode的mapping的xarray tree必然是空树，不是就crash*/  
 		if(inode->i_mapping->i_pages.xa_head != NULL)
 			panic("%s xarray tree not clear:0x%llx\n",__func__,(u64)(inode->i_mapping->i_pages.xa_head));
 
 		//inode->i_mapping->rh_reserved1 = 0;
-		inode->i_mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;/*之前赋值0，现在赋值1，一样效果*/
+		/* 重大隐藏bug!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+		 * inode释放后必须把inode->mapping->rh_reserved1清0，不能赋值SUPPORT_FILE_AREA_INIT_OR_DELETE(1)。
+		 * 否则，这个inode被tmpfs等不支持file_area的文件系统分配，发现inode->mapping->rh_reserved1是1，
+		 * 然后分配新的folio执行__filemap_add_folio()把folio添加到xarray tree时发现，
+		 * inode->mapping->rh_reserved1是1，那就误以为该文件的文件系统是ext4、xfs、f2fs等支持file_area
+		 * 文件读写的文件系统。这样就会crash了，因为tmpfs文件系统不支持file_area，会从xarray tree
+		 * 得到的file_area指针当成page，必然会crash*/
+		//inode->i_mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;原来赋值0，现在赋值1，原理一样
+		inode->i_mapping->rh_reserved1 = 0;
 		p_file_stat->mapping = NULL;
 
 		/*在这个加个内存屏障，保证前后代码隔离开。即file_stat有delete标记后，inode->i_mapping->rh_reserved1一定无效，p_file_stat->mapping一定是NULL*/
 		smp_wmb();
-        if(file_stat_in_cache_file(p_file_stat)){
+		if(file_stat_in_cache_file(p_file_stat)){
+			/* 又遇到一个重大的隐藏bug。如果当前文件文件页page全释放后还是长时间没访问，此时异步内存回收线程正好执行
+			 * cold_file_stat_delete()释放file_stat，并global_lock加锁，标记file_stat delete，然后list_del(p_file_stat)。
+			 * 然后，这里global_lock加锁，再执行list_move(&p_file_stat->hot_cold_file_list,...)那就出问题了，因为此时
+			 * 此时p_file_stat已经在cold_file_stat_delete()中list_del(p_file_stat)从链表中剔除了。这个bug明显违反了
+			 * 一个我之前定下的一个原则，必须要在spin_lock加锁后再判断一次file_area和file_stat状态，是否有变化，
+			 * 因为可能在spin_lock加锁前一瞬间状态已经被修改了!!!!!!!!!!!!!!!!!!!!!!!*/
 			spin_lock_irq(&hot_cold_file_global_info.global_lock);
-			/*file_stat不一定只会在global temp链表，也会在global hot等链表，这些标记不清理了*/
-			//clear_file_stat_in_file_stat_temp_head_list(p_file_stat);
-			set_file_stat_in_delete(p_file_stat);
-			list_move(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.file_stat_delete_head);
+			if(!file_stat_in_delete(p_file_stat)){
+				/*file_stat不一定只会在global temp链表，也会在global hot等链表，这些标记不清理了*/
+				//clear_file_stat_in_file_stat_temp_head_list(p_file_stat);
+				set_file_stat_in_delete(p_file_stat);
+				list_move(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.file_stat_delete_head);
+			}else{
+				/*如果到这份分支，说明file_stat先被异步内存回收线程执行cold_file_stat_delete()标记delete了，
+				 *为了安全要再对inode->i_mapping->rh_reserved1清0一次，详情cold_file_stat_delete()也有解释。
+				 现在用了file_inode_lock后，这种情况已经不可能了，但代码还是保留一下吧*/
+				inode->i_mapping->rh_reserved1 = 0;
+				/*避免spin lock时有printk打印*/
+				spin_unlock_irq(&hot_cold_file_global_info.mmap_file_global_lock);
+				printk("%s p_file_stat:0x%llx status:0x%lx already delete\n",__func__,(u64)p_file_stat,p_file_stat->file_stat_status);
+				goto err;
+			}
 			spin_unlock_irq(&hot_cold_file_global_info.global_lock);
 		}else{
 			spin_lock_irq(&hot_cold_file_global_info.mmap_file_global_lock);
-			/*file_stat不一定只会在global temp链表，也会在global hot等链表，这些标记不清理了*/
-			//clear_file_stat_in_file_stat_temp_head_list(p_file_stat);
-			set_file_stat_in_delete(p_file_stat);
-			list_move(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_delete_head);
+			if(!file_stat_in_delete(p_file_stat)){
+				/*file_stat不一定只会在global temp链表，也会在global hot等链表，这些标记不清理了*/
+				//clear_file_stat_in_file_stat_temp_head_list(p_file_stat);
+				set_file_stat_in_delete(p_file_stat);
+				list_move(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_delete_head);
+			}
+			else{
+				inode->i_mapping->rh_reserved1 = 0;
+				spin_unlock_irq(&hot_cold_file_global_info.mmap_file_global_lock);
+				printk("%s p_file_stat:0x%llx status:0x%lx already delete\n",__func__,(u64)p_file_stat,p_file_stat->file_stat_status);
+				goto err;
+			}
 			spin_unlock_irq(&hot_cold_file_global_info.mmap_file_global_lock);
 		}
+err:
 		FILE_AREA_PRINT("%s file_stat:0x%llx iput delete !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_stat);
 	}
 }

@@ -982,13 +982,21 @@ static void inline file_inode_unlock(struct file_stat * p_file_stat)
     //令inode引用计数减1，如果inode引用计数是0则释放inode结构
 	iput(inode);
 }
+static void inline file_inode_unlock_mapping(struct address_space *mapping)
+{
+    struct inode *inode = mapping->host;
+    //令inode引用计数减1，如果inode引用计数是0则释放inode结构
+	iput(inode);
+}
 
 /*对文件inode加锁，如果inode已经处于释放状态则返回0，此时不能再遍历该文件的inode的address_space的radix tree获取page，释放page，
  *此时inode已经要释放了，inode、address_space、radix tree都是无效内存。否则，令inode引用计数加1，然后其他进程就无法再释放这个
  *文件的inode，此时返回1*/
 static int inline file_inode_lock(struct file_stat * p_file_stat)
 {
-	struct inode *inode = p_file_stat->mapping->host;
+    /*不能在这里赋值，因为可能文件inode被iput后p_file_stat->mapping赋值NULL，这样会crash*/
+	//struct inode *inode = p_file_stat->mapping->host;
+	struct inode *inode;
 
 	/*这里有个隐藏很深的bug!!!!!!!!!!!!!!!!如果此时其他进程并发执行iput()最后执行到__destroy_inode_handler_post()触发删除inode，
 	 *然后就会立即把inode结构释放掉。此时当前进程可能执行到file_inode_lock()函数的spin_lock(&inode->i_lock)时，但inode已经被释放了，
@@ -1004,11 +1012,13 @@ static int inline file_inode_lock(struct file_stat * p_file_stat)
 
 	//lock_file_stat(p_file_stat,0);
 	rcu_read_lock();
+	smp_rmb();
 	if(file_stat_in_delete(p_file_stat) || (NULL == p_file_stat->mapping)){
 		//不要忘了异常return要先释放锁
 		rcu_read_unlock();
 		return 0;
 	}
+	inode = p_file_stat->mapping->host;
 
 	spin_lock(&inode->i_lock);
 	/*执行到这里，inode肯定没有被释放，并且inode->i_lock加锁成功，其他进程就无法再释放这个inode了。错了，又一个隐藏很深的bug。
