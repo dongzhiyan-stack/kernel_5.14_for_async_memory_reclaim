@@ -1727,7 +1727,7 @@ static unsigned int check_file_area_cold_page_and_clear(struct hot_cold_file_glo
 			break;
 
 		/*文件file_stat已经扫描的file_area个数超过file_stat->file_area_temp 链表的总file_area个数，停止扫描该文件的file_area。
-		 *然后才会扫描global->mmap_file_stat_temp_head或mmap_file_stat_temp_large_file_head链表上的下一个文件file_stat的file_area
+		 *然后才会扫描global->mmap_file_stat_temp_head或mmap_file_stat_large_file_head链表上的下一个文件file_stat的file_area
 		 *文件file_stat进入冷却期if也成。其实这两个功能重复了，本质都表示遍历完file_stat->temp链表上的file_area*/
 		if(/*p_file_stat->scan_file_area_count_temp_list >= p_file_stat->file_area_count_in_temp_list ||*/ p_file_stat->cooling_off_start){
 			//文件扫描的file_area个数清0，下次轮到扫描该文件的file_area时，才能继续扫描
@@ -1949,7 +1949,7 @@ static int traverse_mmap_file_stat_get_cold_page(struct hot_cold_file_global *p_
 	//令inode引用计数减1
 	file_inode_unlock(p_file_stat);
 
-	//返回值是1是说明当前这个file_stat的file_area已经全扫描完了，则扫描该file_stat在global->mmap_file_stat_temp_large_file_head或global->mmap_file_stat_temp_head链表上的上一个file_stat的file_area
+	//返回值是1是说明当前这个file_stat的file_area已经全扫描完了，则扫描该file_stat在global->mmap_file_stat_large_file_head或global->mmap_file_stat_temp_head链表上的上一个file_stat的file_area
 	return ret;
 }
 
@@ -1961,7 +1961,7 @@ static int traverse_mmap_file_stat_get_cold_page(struct hot_cold_file_global *p_
  * */
 
 #if 0 //下边的代码很有意义，不要删除，犯过很多错误
-static int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_global *p_hot_cold_file_global,unsigned int scan_file_area_max,unsigned int scan_file_stat_max,struct list_head *file_stat_temp_head)//file_stat_temp_head链表来自 global->mmap_file_stat_temp_head 和 global->mmap_file_stat_temp_large_file_head 链表
+static int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_global *p_hot_cold_file_global,unsigned int scan_file_area_max,unsigned int scan_file_stat_max,struct list_head *file_stat_temp_head)//file_stat_temp_head链表来自 global->mmap_file_stat_temp_head 和 global->mmap_file_stat_large_file_head 链表
 {
 	struct file_stat * p_file_stat = NULL,*p_file_stat_temp = NULL;
 	unsigned int scan_file_area_count  = 0;
@@ -2063,7 +2063,7 @@ static int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_global *p
 		}
 
 		ret = traverse_mmap_file_stat_get_cold_page(p_hot_cold_file_global,p_file_stat,scan_file_area_max,&scan_file_area_count);
-		//返回值是1是说明当前这个file_stat的temp链表上的file_area已经全扫描完了，则扫描该file_stat在global->mmap_file_stat_temp_large_file_head或global->mmap_file_stat_temp_head链表上的上一个file_stat的file_area
+		//返回值是1是说明当前这个file_stat的temp链表上的file_area已经全扫描完了，则扫描该file_stat在global->mmap_file_stat_large_file_head或global->mmap_file_stat_temp_head链表上的上一个file_stat的file_area
 		if(ret > 0){
 			scan_next_file_stat = 1; 
 		}else if(ret < 0){
@@ -2131,7 +2131,7 @@ next:
 	}while(!list_empty(file_stat_temp_head));
 
 	/*scan_next_file_stat如果是1，说明当前文件file_stat的temp链表上已经扫描的file_area个数超过该文件temp链表的总file_area个数，
-	 *然后才能更新p_hot_cold_file_global->file_stat_last，这样下次才能扫描该file_stat在global->mmap_file_stat_temp_large_file_head
+	 *然后才能更新p_hot_cold_file_global->file_stat_last，这样下次才能扫描该file_stat在global->mmap_file_stat_large_file_head
 	 *或global->mmap_file_stat_temp_head链表上的上一个file_stat*/
 	if(1 == scan_next_file_stat){
 		if(!list_empty(file_stat_temp_head)){
@@ -2150,7 +2150,7 @@ next:
 }
 #endif
 
-static int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_global *p_hot_cold_file_global,unsigned int scan_file_area_max,unsigned int scan_file_stat_max,struct list_head *file_stat_temp_head)//file_stat_temp_head链表来自 global->mmap_file_stat_temp_head 和 global->mmap_file_stat_temp_large_file_head 链表
+static int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_global *p_hot_cold_file_global,unsigned int scan_file_area_max,unsigned int scan_file_stat_max,struct list_head *file_stat_temp_head)//file_stat_temp_head链表来自 global->mmap_file_stat_temp_head 和 global->mmap_file_stat_large_file_head 链表
 {
 	struct file_stat * p_file_stat = NULL,*p_file_stat_temp = NULL;
 	unsigned int scan_file_area_count  = 0;
@@ -2256,7 +2256,7 @@ static int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_global *p
 		}
 
 		ret = traverse_mmap_file_stat_get_cold_page(p_hot_cold_file_global,p_file_stat,scan_file_area_max,&scan_file_area_count);
-		//返回值是1是说明当前这个file_stat的temp链表上的file_area已经全扫描完了，则扫描该file_stat在global->mmap_file_stat_temp_large_file_head或global->mmap_file_stat_temp_head链表上的上一个file_stat的file_area
+		//返回值是1是说明当前这个file_stat的temp链表上的file_area已经全扫描完了，则扫描该file_stat在global->mmap_file_stat_large_file_head或global->mmap_file_stat_temp_head链表上的上一个file_stat的file_area
 		if(ret < 0){
 			//return -1;
 			/*不能直接return -1。因此此时file_stat_list链表保存了已经遍历过file_stat，这里直接return的话，会导致
@@ -2284,7 +2284,7 @@ static int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_global *p
 				 *移动到global temp链表头，然后才能下一个file_stat*/
 				if(is_mmap_file_stat_large_file(p_hot_cold_file_global,p_file_stat) && !file_stat_in_large_file(p_file_stat)){
 					set_file_stat_in_large_file(p_file_stat);
-					list_move(&p_file_stat->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_temp_large_file_head);
+					list_move(&p_file_stat->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_large_file_head);
 				}else{
 					list_move(&p_file_stat->hot_cold_file_list,&file_stat_list);
 				}
@@ -2366,7 +2366,7 @@ static int scan_uninit_file_stat(struct hot_cold_file_global *p_hot_cold_file_gl
 
 		/*这个while循环扫一个文件file_stat的page，存在的话则创建file_area。有下边这几种情况
 		 *1:文件page太多，扫描的file_area超过mac，文件的page还没扫描完，直接break，下次执行函数还扫描这个文件，直到扫描完
-		 *2:文件page很少，扫描的file_area未超过max就break，于是把file_stat移动到global->mmap_file_stat_temp_large_file_head或
+		 *2:文件page很少，扫描的file_area未超过max就break，于是把file_stat移动到global->mmap_file_stat_large_file_head或
 		 *  global->mmap_file_stat_temp_head链表。这个file_stat就从global->mmap_file_stat_uninit_head链表尾剔除了，然后扫描第2个文件file_stat*/
 		while(scan_file_area_count++ < scan_file_area_max){
 
@@ -2478,7 +2478,7 @@ complete:
 				//p_file_stat->file_area_count_in_temp_list = p_file_stat->file_area_count;//上边已经加1了
 
 				/*文件的page扫描完了，把file_stat从global mmap_file_stat_uninit_head链表移动到global mmap_file_stat_temp_head或
-				 *mmap_file_stat_temp_large_file_head。这个过程必须加锁，因为与add_mmap_file_stat_to_list()存在并发修改global mmap_file_stat_uninit_head
+				 *mmap_file_stat_large_file_head。这个过程必须加锁，因为与add_mmap_file_stat_to_list()存在并发修改global mmap_file_stat_uninit_head
 				 *链表的情况。后续file_stat再移动到大文件、zero_file_area等链表，就不用再加锁了，完全是异步内存回收线程的单线程操作*/
 				spin_lock(&hot_cold_file_global_info.mmap_file_global_lock);
 
@@ -2492,7 +2492,7 @@ complete:
 
 				if(is_mmap_file_stat_large_file(p_hot_cold_file_global,p_file_stat)){
 					set_file_stat_in_large_file(p_file_stat);
-					list_move(&p_file_stat->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_temp_large_file_head);
+					list_move(&p_file_stat->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_large_file_head);
 				}
 				else
 					list_move(&p_file_stat->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_temp_head);
@@ -2555,7 +2555,7 @@ static int scan_mmap_mapcount_file_stat(struct hot_cold_file_global *p_hot_cold_
 					clear_file_stat_in_mapcount_file_area_list(p_file_stat);
 					set_file_stat_in_file_stat_temp_head_list(p_file_stat);
 					if(is_mmap_file_stat_large_file(p_hot_cold_file_global,p_file_stat)){//大文件
-						list_move(&p_file_stat->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_temp_large_file_head);
+						list_move(&p_file_stat->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_large_file_head);
 					}
 					else{//普通文件
 						list_move(&p_file_stat->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_temp_head);
@@ -2613,7 +2613,7 @@ static int scan_mmap_hot_file_stat(struct hot_cold_file_global *p_hot_cold_file_
 					clear_file_stat_in_file_stat_hot_head_list(p_file_stat);
 					set_file_stat_in_file_stat_temp_head_list(p_file_stat);
 					if(is_mmap_file_stat_large_file(p_hot_cold_file_global,p_file_stat)){//大文件
-						list_move(&p_file_stat->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_temp_large_file_head);
+						list_move(&p_file_stat->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_large_file_head);
 					}
 					else{//普通文件
 						list_move(&p_file_stat->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_temp_head);
@@ -2664,7 +2664,7 @@ int walk_throuth_all_mmap_file_area(struct hot_cold_file_global *p_hot_cold_file
 	//扫描大文件file_area
 	scan_file_stat_max = 16;
 	scan_file_area_max = 256;
-	ret = get_file_area_from_mmap_file_stat_list(p_hot_cold_file_global,scan_file_area_max,scan_file_stat_max,&p_hot_cold_file_global->mmap_file_stat_temp_large_file_head);
+	ret = get_file_area_from_mmap_file_stat_list(p_hot_cold_file_global,scan_file_area_max,scan_file_stat_max,&p_hot_cold_file_global->mmap_file_stat_large_file_head);
 	if(ret < 0)
 		return ret;
 

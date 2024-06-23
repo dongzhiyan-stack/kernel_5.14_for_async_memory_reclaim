@@ -27,14 +27,19 @@
 #define TREE_ENTRY_MASK 3
 #define TREE_INTERNAL_NODE 1
 
-/*热file_area经过FILE_AREA_HOT_to_TEMP_AGE_DX个周期后，还没有被访问，则移动到file_area_temp链表*/
+/*热file_area经过FILE_AREA_HOT_to_TEMP_AGE_DX个周期后，还没有被访问，则移动到file_area_warm链表*/
 #define FILE_AREA_HOT_to_TEMP_AGE_DX  5
-/*发生refault的file_area经过FILE_AREA_REFAULT_TO_TEMP_AGE_DX个周期后，还没有被访问，则移动到file_area_temp链表*/
+/*发生refault的file_area经过FILE_AREA_REFAULT_TO_TEMP_AGE_DX个周期后，还没有被访问，则移动到file_area_warm链表*/
 #define FILE_AREA_REFAULT_TO_TEMP_AGE_DX 20
 /*普通的file_area在FILE_AREA_TEMP_TO_COLD_AGE_DX个周期内没有被访问则被判定是冷file_area，然后释放这个file_area的page*/
-#define FILE_AREA_TEMP_TO_COLD_AGE_DX  5
+#define FILE_AREA_TEMP_TO_COLD_AGE_DX  10
+/*在file_stat->warm上的file_area经过file_area_warm_to_temp_age_dx个周期没有被访问，则移动到file_stat->temp链表*/
+#define FILE_AREA_WARM_TO_TEMP_AGE_DX  (FILE_AREA_TEMP_TO_COLD_AGE_DX + 10) 
 /*一个冷file_area，如果经过FILE_AREA_FREE_AGE_DX个周期，仍然没有被访问，则释放掉file_area结构*/
 #define FILE_AREA_FREE_AGE_DX  10
+/*当一个file_area因多次访问被设置了ahead标记，经过FILE_AREA_AHEAD_CANCEL_AGE_DX个周期后file_area没有被访问，才会允许清理file_area的ahead标记*/
+#define FILE_AREA_AHEAD_CANCEL_AGE_DX (FILE_AREA_TEMP_TO_COLD_AGE_DX + 10)
+
 /*当一个file_area在一个周期内访问超过FILE_AREA_HOT_LEVEL次数，则判定是热的file_area*/
 #define FILE_AREA_HOT_LEVEL (PAGE_COUNT_IN_AREA << 2)
 /*如果一个file_area在FILE_AREA_MOVE_HEAD_DX个周期内被访问了两次，然后才能移动到链表头*/
@@ -104,15 +109,18 @@ struct hot_cold_file_shrink_counter
 	//隔离的page个数
 	unsigned int isolate_lru_pages;
 	//file_stat的refault链表转移到temp链表的file_area个数
-	unsigned int file_area_refault_to_temp_list_count;
+	//unsigned int file_area_refault_to_temp_list_count;
+	unsigned int file_area_refault_to_warm_list_count;
 	//释放的file_area结构个数
 	unsigned int file_area_free_count;
 	//file_stat的hot链表转移到temp链表的file_area个数
-	unsigned int file_area_hot_to_temp_list_count;
+	//unsigned int file_area_hot_to_temp_list_count;
+	unsigned int file_area_hot_to_warm_list_count;
 
 	/**free_page_from_file_area()函数******/
 	//file_stat的hot链表转移到temp链表的file_area个数
-	unsigned int file_area_hot_to_temp_list_count2;
+	//unsigned int file_area_hot_to_temp_list_count2;
+	unsigned int file_area_hot_to_warm_list_count2;
 	//释放的file_stat个数
 	unsigned int del_file_stat_count;
 	//释放的file_area个数
@@ -230,7 +238,7 @@ struct file_stat
 	//热file_area个数
 	unsigned int file_area_hot_count;
 	//文件的file_area结构按照索引保存到这个radix tree
-	struct hot_cold_file_area_tree_root hot_cold_file_area_tree_root_node;
+	//struct hot_cold_file_area_tree_root hot_cold_file_area_tree_root_node;
 	//file_stat锁
 	spinlock_t file_stat_lock;
 	//file_stat里age最大的file_area的age，调试用
@@ -241,7 +249,7 @@ struct file_stat
 	pgoff_t  xa_node_cache_base_index;
 	/*在file_stat被判定为热文件后，记录当时的global_age。在未来HOT_FILE_COLD_AGE_DX时间内该文件进去冷却期：hot_file_update_file_status()函数中
 	 *只更新该文件file_area的age后，然后函数返回，不再做其他操作，节省性能*/
-	unsigned int file_stat_hot_base_age;
+	//unsigned int file_stat_hot_base_age;
 
 
 	union{
@@ -252,14 +260,21 @@ struct file_stat
 	};
 	//频繁被访问的文件page对应的file_area存入这个头结点
 	struct list_head file_area_hot;
-	//不冷不热处于中间状态的file_area结构添加到这个链表，新分配的file_area就添加到这里
+	//处于中间状态的file_area结构添加到这个链表，新分配的file_area就添加到这里
 	struct list_head file_area_temp;
-	//每轮扫描被释放内存page的file_area结构临时先添加到这个链表。file_area_free_temp有存在的必要
+	/*快接近冷file_area的移动到这个链表*/
+	struct list_head file_area_warm;
+	/*每轮扫描被释放内存page的file_area结构临时先添加到这个链表，这个变量可以省掉。把这些file_area移动到临时链表，
+	 *参与内存回收再移动到file_stat->free链表*/
 	struct list_head file_area_free_temp;
 	//所有被释放内存page的file_area结构最后添加到这个链表，如果长时间还没被访问，就释放file_area结构。
 	struct list_head file_area_free;
 	//file_area的page被释放后，但很快又被访问，发生了refault，于是要把这种page添加到file_area_refault链表，短时间内不再考虑扫描和释放
 	struct list_head file_area_refault;
+
+	/*统计一个周期内file_stat->temp链表上file_area移动到file_stat->temp链表头的次数，每一个一次减1，减少到0则禁止
+	 *file_stat->temp链表上file_area再移动到file_stat->temp链表头*/
+	unsigned char file_area_move_to_head_count;
 #if 0
 	//把最近访问的file_stat保存到hot_file_area_cache缓存数组，
 	struct file_area * hot_file_area_cache[FILE_AREA_CACHE_COUNT];
@@ -268,10 +283,10 @@ struct file_stat
 #endif
 	/*file_area_tree_node保存最近一次访问file_area的父节点，cache_file_area_tree_node_base_index是它保存的最小file_area索引。
 	 *之后通过cache_file_area_tree_node->slots[]直接获取在同一个node的file_area，不用每次都遍历radix tree获取file_area*/
-	unsigned int cache_file_area_tree_node_base_index;
-	struct hot_cold_file_area_tree_node *cache_file_area_tree_node;
+	//unsigned int cache_file_area_tree_node_base_index;
+	//struct hot_cold_file_area_tree_node *cache_file_area_tree_node;
 
-	//最新一次访问的file_area
+	//最新一次访问的file_area，mmap文件用
 	struct file_area *file_area_last;
 
 	/**针对mmap文件新增的****************************/
@@ -321,9 +336,11 @@ struct hot_cold_file_global
 	struct list_head file_stat_hot_head;
 	//新分配的文件file_stat默认添加到file_stat_temp_head链表
 	struct list_head file_stat_temp_head;
+	/*中等大小文件移动到这个链表*/
+	struct list_head file_stat_middle_file_head;
 	/*如果文件file_stat上的page cache数太多，被判定为大文件，则把file_stat移动到这个链表。将来内存回收时，优先遍历这种file_stat，
 	 *因为file_area足够多，能遍历到更多的冷file_area，回收到内存page*/
-	struct list_head file_stat_temp_large_file_head;
+	struct list_head file_stat_large_file_head;
 	struct list_head cold_file_head;
 	//inode被删除的文件的file_stat移动到这个链表
 	struct list_head file_stat_delete_head;
@@ -338,6 +355,7 @@ struct hot_cold_file_global
 	unsigned int file_stat_hot_count;
 	//大文件file_stat个数
 	unsigned int file_stat_large_count;
+	unsigned int file_stat_middle_count;
 	//文件file_stat个数
 	unsigned int file_stat_count;
 	//0个file_area的file_stat个数
@@ -346,6 +364,7 @@ struct hot_cold_file_global
 	/*当file_stat的file_area个数达到file_area_level_for_large_file时，表示该文件的page cache数太多，被判定为大文件。但一个file_area
 	 *包含了多个page，一个file_area并不能填满page，因此实际file_stat的file_area个数达到file_area_level_for_large_file时，实际该文件的的page cache数会少点*/
 	unsigned int file_area_level_for_large_file;
+	unsigned int file_area_level_for_middle_file;
 	//当一个文件的文件页page数大于nr_pages_level时，该文件的文件页page才会被本异步内存回收模块统计访问频率并回收，默认15，即64k，可通过proc接口调节大小
 	unsigned int nr_pages_level;
 
@@ -378,6 +397,10 @@ struct hot_cold_file_global
 	unsigned int file_area_refault_to_temp_age_dx;
 	//普通的file_area在file_area_temp_to_cold_age_dx个周期内没有被访问则被判定是冷file_area，然后释放这个file_area的page
 	unsigned int file_area_temp_to_cold_age_dx;
+	//普通的file_area在file_area_temp_to_warm_age_dx个周期内没有被访问则被判定是温file_area，然后把这个file_area移动到file_stat->file_area_warm链表
+	unsigned int file_area_temp_to_warm_age_dx;
+	/*在file_stat->warm上的file_area经过file_area_warm_to_temp_age_dx个周期没有被访问，则移动到file_stat->temp链表*/
+	unsigned int file_area_warm_to_temp_age_dx;
 	//一个冷file_area，如果经过file_area_free_age_dx_fops个周期，仍然没有被访问，则释放掉file_area结构
 	unsigned int file_area_free_age_dx;
 	//当一个文件file_stat长时间不被访问，释放掉了所有的file_area，再过file_stat_delete_age_dx个周期，则释放掉file_stat结构
@@ -397,8 +420,9 @@ struct hot_cold_file_global
 	struct list_head mmap_file_stat_uninit_head;
 	//当一个文件的page都遍历完后，file_stat移动到这个链表
 	struct list_head mmap_file_stat_temp_head;
+	struct list_head mmap_file_stat_middle_file_head;
 	//文件file_stat个数超过阀值移动到这个链表
-	struct list_head mmap_file_stat_temp_large_file_head;
+	struct list_head mmap_file_stat_large_file_head;
 	//热文件移动到这个链表
 	struct list_head mmap_file_stat_hot_head;
 	//一个文件有太多的page的mmapcount都大于1，则把该文件file_stat移动该链表
@@ -425,18 +449,26 @@ struct hot_cold_file_global
 	struct mmap_file_shrink_counter mmap_file_shrink_counter;
 	/*当file_stat的file_area个数达到file_area_level_for_large_mmap_file时，表示该文件的page cache数太多，被判定为大文件*/
 	unsigned int mmap_file_area_level_for_large_file;
+	unsigned int mmap_file_area_level_for_middle_file;
 };
 
 
 /*******file_area状态**********************************************************/
-enum file_area_status{//file_area_state是char类型，只有8个bit位可设置
+
+/*file_area_state是char类型，只有8个bit位可设置 !!!!!!!!!!!!!!!!!!!!!!!!!!!*/
+enum file_area_status{
 	F_file_area_in_temp_list,
 	F_file_area_in_hot_list,
-	//F_file_area_in_free_temp_list,
+	F_file_area_in_warm_list,
 	F_file_area_in_free_list,
+
 	F_file_area_in_refault_list,
-	F_file_area_in_mapcount_list,//file_area对应的page的pagecount大于0的，则把file_area移动到该链表
-	F_file_area_in_cache,//file_area保存在ile_stat->hot_file_area_cache[]数组里
+	/*file_area对应的page的pagecount大于0的，则把file_area移动到该链表*/
+	F_file_area_in_mapcount_list,
+	/*file_area连续几个周期被访问，本要移动到链表头，处于性能考虑，只是设置file_area的ahead标记。
+	 *内存回收遇到有ahead且长时间没访问的file_area，先豁免一次，等下次遍历到这个file_area再回收这个file_area的page*/
+	F_file_area_in_ahead,
+	//F_file_area_in_cache,//file_area保存在ile_stat->hot_file_area_cache[]数组里
 };
 //不能使用 clear_bit_unlock、test_and_set_bit_lock、test_bit，因为要求p_file_area->file_area_state是64位数据，但实际只是u8型数据
 
@@ -465,22 +497,22 @@ enum file_area_status{//file_area_state是char类型，只有8个bit位可设置
 	TEST_FILE_AREA_LIST_STATUS(list_name) \
 	TEST_FILE_AREA_LIST_STATUS_ERROR(list_name)
 
-	FILE_AREA_LIST_STATUS(temp_list)
+FILE_AREA_LIST_STATUS(temp_list)
 FILE_AREA_LIST_STATUS(hot_list)
-	//FILE_AREA_LIST_STATUS(free_temp_list)
-	FILE_AREA_LIST_STATUS(free_list)
-	FILE_AREA_LIST_STATUS(refault_list)
+FILE_AREA_LIST_STATUS(warm_list)
+FILE_AREA_LIST_STATUS(free_list)
+FILE_AREA_LIST_STATUS(refault_list)
 FILE_AREA_LIST_STATUS(mapcount_list)
 
-	//清理file_area的状态，在哪个链表
+//清理file_area的状态，在哪个链表
 #define CLEAR_FILE_AREA_STATUS(status) \
 		static inline void clear_file_area_in_##status(struct file_area *p_file_area)\
 { p_file_area->file_area_state &= ~(1 << F_file_area_in_##status);}
-	//设置file_area在哪个链表的状态
+//设置file_area在哪个链表的状态
 #define SET_FILE_AREA_STATUS(status) \
 		static inline void set_file_area_in_##status(struct file_area *p_file_area)\
 { p_file_area->file_area_state |= (1 << F_file_area_in_##status);}
-	//测试file_area在哪个链表
+//测试file_area在哪个链表
 #define TEST_FILE_AREA_STATUS(status) \
 		static inline int file_area_in_##status(struct file_area *p_file_area)\
 {return p_file_area->file_area_state & (1 << F_file_area_in_##status);}
@@ -490,28 +522,31 @@ FILE_AREA_LIST_STATUS(mapcount_list)
 	SET_FILE_AREA_STATUS(status)  \
 	TEST_FILE_AREA_STATUS(status) 
 
-FILE_AREA_STATUS(cache)
+//FILE_AREA_STATUS(cache)
+FILE_AREA_STATUS(ahead)
 
 
 /*******file_stat状态**********************************************************/
 enum file_stat_status{//file_area_state是long类型，只有64个bit位可设置
 	F_file_stat_in_file_stat_hot_head_list,
 	F_file_stat_in_file_stat_temp_head_list,
+	F_file_stat_in_file_stat_middle_file_head_list,
+	F_file_stat_in_file_stat_large_file_head_list,
 	F_file_stat_in_zero_file_area_list,
 	F_file_stat_in_mapcount_file_area_list,//文件file_stat是mapcount文件
-	F_file_stat_in_drop_cache,
-	F_file_stat_in_free_page,//正在遍历file_stat的file_area的page，尝试释放page
-	F_file_stat_in_free_page_done,//正在遍历file_stat的file_area的page，完成了page的内存回收,
+	//F_file_stat_in_drop_cache,
+	//F_file_stat_in_free_page,//正在遍历file_stat的file_area的page，尝试释放page
+	//F_file_stat_in_free_page_done,//正在遍历file_stat的file_area的page，完成了page的内存回收,
 	F_file_stat_in_delete,
 	F_file_stat_in_cache_file,//cache文件，sysctl读写产生pagecache。有些cache文件可能还会被mmap映射，要与mmap文件互斥
 	F_file_stat_in_mmap_file,//mmap文件，有些mmap文件可能也会被sysctl读写产生pagecache，要与cache文件互斥
 	F_file_stat_in_large_file,
-	F_file_stat_lock,
-	F_file_stat_lock_not_block,//这个bit位置1，说明inode在删除的，但是获取file_stat锁失败
+	//F_file_stat_lock,
+	//F_file_stat_lock_not_block,//这个bit位置1，说明inode在删除的，但是获取file_stat锁失败
 };
 //不能使用 clear_bit_unlock、test_and_set_bit_lock、test_bit，因为要求p_file_stat->file_stat_status是64位数据，但这里只是u8型数据
 
-#define MAX_FILE_STAT_LIST_BIT F_file_stat_in_free_page_done
+#define MAX_FILE_STAT_LIST_BIT F_file_stat_in_mapcount_file_area_list
 #define FILE_STAT_LIST_MASK ((1 << (MAX_FILE_STAT_LIST_BIT + 1)) - 1)
 
 //清理file_stat的状态，在哪个链表
@@ -536,9 +571,11 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	TEST_FILE_STAT_STATUS(name) \
 	TEST_FILE_STAT_STATUS_ERROR(name)
 
-	FILE_STAT_STATUS(file_stat_hot_head)
-	FILE_STAT_STATUS(file_stat_temp_head)
-	FILE_STAT_STATUS(zero_file_area)
+FILE_STAT_STATUS(file_stat_hot_head)
+FILE_STAT_STATUS(file_stat_temp_head)
+FILE_STAT_STATUS(file_stat_middle_file_head)
+FILE_STAT_STATUS(file_stat_large_file_head)
+FILE_STAT_STATUS(zero_file_area)
 FILE_STAT_STATUS(mapcount_file_area)
 
 	//清理文件的状态，大小文件等
@@ -565,7 +602,7 @@ FILE_STAT_STATUS(mapcount_file_area)
 
 FILE_STATUS(large_file)
 FILE_STATUS(delete)
-FILE_STATUS(drop_cache)
+//FILE_STATUS(drop_cache)
 
 	//清理文件的状态，大小文件等
 #define CLEAR_FILE_STATUS_ATOMIC(name)\
@@ -598,8 +635,8 @@ FILE_STATUS(drop_cache)
  * 并且此时要避免此时有进程在执行hot_file_update_file_status()函数。这些在hot_file_update_file_status()和get_file_area_from_file_stat_list()函数
  * 有说明其实file_stat设置in_free_page、free_page_done 状态都有spin lock加锁，不使用test_and_set_bit_lock、clear_bit_unlock也行，
  * 目前暂定先用test_and_set_bit_lock、clear_bit_unlock吧，后续再考虑其他优化*/
-FILE_STATUS_ATOMIC(free_page)
-FILE_STATUS_ATOMIC(free_page_done)
+//FILE_STATUS_ATOMIC(free_page)
+//FILE_STATUS_ATOMIC(free_page_done)
 /*标记file_stat delete可能在cold_file_stat_delete()和__destroy_inode_handler_post()并发执行，存在重复设置可能，用FILE_STATUS_ATOMIC会因重复设置而crash*/
 //FILE_STATUS_ATOMIC(delete)
 FILE_STATUS_ATOMIC(cache_file)
@@ -832,7 +869,8 @@ static inline struct file_stat *file_stat_alloc_and_init(struct address_space *m
 	//初始化file_area_hot头结点
 	INIT_LIST_HEAD(&p_file_stat->file_area_hot);
 	INIT_LIST_HEAD(&p_file_stat->file_area_temp);
-	INIT_LIST_HEAD(&p_file_stat->file_area_free_temp);
+	INIT_LIST_HEAD(&p_file_stat->file_area_warm);
+	//INIT_LIST_HEAD(&p_file_stat->file_area_free_temp);
 	INIT_LIST_HEAD(&p_file_stat->file_area_free);
 	INIT_LIST_HEAD(&p_file_stat->file_area_refault);
 	INIT_LIST_HEAD(&p_file_stat->file_area_mapcount);
@@ -903,7 +941,8 @@ static inline struct file_stat *add_mmap_file_stat_to_list(struct address_space 
 	set_file_stat_in_mmap_file(p_file_stat);
 	INIT_LIST_HEAD(&p_file_stat->file_area_hot);
 	INIT_LIST_HEAD(&p_file_stat->file_area_temp);
-	INIT_LIST_HEAD(&p_file_stat->file_area_free_temp);
+	INIT_LIST_HEAD(&p_file_stat->file_area_warm);
+	//INIT_LIST_HEAD(&p_file_stat->file_area_free_temp);
 	INIT_LIST_HEAD(&p_file_stat->file_area_free);
 	INIT_LIST_HEAD(&p_file_stat->file_area_refault);
 	//file_area对应的page的pagecount大于0的，则把file_area移动到该链表
