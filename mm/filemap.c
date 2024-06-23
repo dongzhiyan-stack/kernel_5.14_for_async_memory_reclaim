@@ -2933,7 +2933,7 @@ find_folio:
 		goto repeat;
 	}
 	//统计page引用计数
-	hot_file_update_file_status(mapping,p_file_stat,p_file_area,1);
+	hot_file_update_file_status(mapping,p_file_stat,p_file_area,1,FILE_AREA_PAGE_IS_WRITE);
 
 	/*如果本次查找的page所在xarray tree的父节点变化了，则把最新的保存到mapping->rh_reserved2。
 	 *同时必须判断父节点的合法性，分析见filemap_get_read_batch_for_file_area()。其实这里不用判断，走到这里肯定父节点合法.*/
@@ -4459,10 +4459,10 @@ find_page_from_file_area:
 			 *page_offset_in_file_area - page_offset_in_file_area_origin。之后，file_area的page的访问计数是page_offset_in_file_area，
 			 *此时page_offset_in_file_area与PAGE_COUNT_IN_AREA相等*/
 			if(page_offset_in_file_area_origin == -1)
-				hot_file_update_file_status(mapping,p_file_stat,p_file_area,page_offset_in_file_area);//page_offset_in_file_area
+				hot_file_update_file_status(mapping,p_file_stat,p_file_area,page_offset_in_file_area,FILE_AREA_PAGE_IS_READ);//page_offset_in_file_area
 			else{
 				/*访问的第一个file_area，page访问计数是page_offset_in_file_area - page_offset_in_file_area_origin*/
-				hot_file_update_file_status(mapping,p_file_stat,p_file_area,page_offset_in_file_area - page_offset_in_file_area_origin);
+				hot_file_update_file_status(mapping,p_file_stat,p_file_area,page_offset_in_file_area - page_offset_in_file_area_origin,FILE_AREA_PAGE_IS_READ);
 				page_offset_in_file_area_origin = -1;
 			}
             
@@ -4487,11 +4487,11 @@ retry:
     /*如果前边for循环异常break了，就无法统计最后file_area的访问计数了，那就在这里统计*/
 	if(page_offset_in_file_area_origin == -1){
 		if(page_offset_in_file_area)/*可能这个file_area一个page都没有获取到，要过滤掉*/
-			hot_file_update_file_status(mapping,p_file_stat,p_file_area,page_offset_in_file_area);
+			hot_file_update_file_status(mapping,p_file_stat,p_file_area,page_offset_in_file_area,FILE_AREA_PAGE_IS_READ);
 	}
 	else{//访问的第一个file_area就跳出for循环了，page访问计数是page_offset_in_file_area - page_offset_in_file_area_origin
 		if(page_offset_in_file_area > page_offset_in_file_area_origin)/*这样才说明至少有一个page被获取了*/
-		    hot_file_update_file_status(mapping,p_file_stat,p_file_area,page_offset_in_file_area - page_offset_in_file_area_origin);
+		    hot_file_update_file_status(mapping,p_file_stat,p_file_area,page_offset_in_file_area - page_offset_in_file_area_origin,FILE_AREA_PAGE_IS_READ);
 	}
 
 	/*如果本次查找的page所在xarray tree的父节点变化了，则把最新的保存到mapping->rh_reserved2。实际测试表明，

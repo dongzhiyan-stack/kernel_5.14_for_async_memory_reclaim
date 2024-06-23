@@ -55,7 +55,11 @@
 #define SUPPORT_FS_ALL  0
 #define SUPPORT_FS_UUID 1
 #define SUPPORT_FS_SINGLE     2
+#define FILE_AREA_IS_READ 1
 
+#define FILE_AREA_PAGE_IS_READ 0
+#define FILE_AREA_PAGE_IS_WRITE 1
+#define FILE_AREA_PAGE_IS_READ_WRITE 2
 /**针对mmap文件新加的******************************/
 #define MMAP_FILE_NAME_LEN 16
 struct mmap_file_shrink_counter
@@ -172,6 +176,9 @@ struct hot_cold_file_shrink_counter
 	unsigned int mmap_free_pages_count;
 	unsigned int mmap_writeback_count;
 	unsigned int mmap_dirty_count;
+
+	unsigned int scan_cold_file_area_count_from_warm;
+	unsigned int scan_read_file_area_count;
 };
 //一个file_area表示了一片page范围(默认6个page)的冷热情况，比如page索引是0~5、6~11、12~17各用一个file_area来表示
 struct file_area
@@ -401,6 +408,8 @@ struct hot_cold_file_global
 	unsigned int file_area_temp_to_warm_age_dx;
 	/*在file_stat->warm上的file_area经过file_area_warm_to_temp_age_dx个周期没有被访问，则移动到file_stat->temp链表*/
 	unsigned int file_area_warm_to_temp_age_dx;
+	/*正常情况不会回收read属性的file_area的page，但是如果该file_area确实很长很长很长时间没访问，也参与回收*/
+	unsigned int file_area_reclaim_read_age_dx;
 	//一个冷file_area，如果经过file_area_free_age_dx_fops个周期，仍然没有被访问，则释放掉file_area结构
 	unsigned int file_area_free_age_dx;
 	//当一个文件file_stat长时间不被访问，释放掉了所有的file_area，再过file_stat_delete_age_dx个周期，则释放掉file_stat结构
@@ -409,7 +418,9 @@ struct hot_cold_file_global
 	//发生refault的次数,累加值
 	unsigned long all_refault_count;
 	//在内存回收期间产生的refault file_area个数
-	unsigned int refault_file_area_count_in_free_page;
+	//unsigned int refault_file_area_count_in_free_page;
+	unsigned int check_refault_file_area_count;
+	
 
 	char support_fs_type;
 	char support_fs_uuid[SUPPORT_FS_UUID_LEN];
@@ -468,6 +479,7 @@ enum file_area_status{
 	/*file_area连续几个周期被访问，本要移动到链表头，处于性能考虑，只是设置file_area的ahead标记。
 	 *内存回收遇到有ahead且长时间没访问的file_area，先豁免一次，等下次遍历到这个file_area再回收这个file_area的page*/
 	F_file_area_in_ahead,
+	F_file_area_in_read,
 	//F_file_area_in_cache,//file_area保存在ile_stat->hot_file_area_cache[]数组里
 };
 //不能使用 clear_bit_unlock、test_and_set_bit_lock、test_bit，因为要求p_file_area->file_area_state是64位数据，但实际只是u8型数据
@@ -524,6 +536,7 @@ FILE_AREA_LIST_STATUS(mapcount_list)
 
 //FILE_AREA_STATUS(cache)
 FILE_AREA_STATUS(ahead)
+FILE_AREA_STATUS(read)
 
 
 /*******file_stat状态**********************************************************/
@@ -714,6 +727,22 @@ static inline int file_area_have_page(struct file_area *p_file_area)
 {
 	return  (p_file_area->file_area_state & ~((1 << PAGE_BIT_OFFSET_IN_FILE_AREA_BASE) - 1));//0XF000 0000
 }
+
+
+/*探测file_area里的page是读还是写*/
+static inline void set_file_area_page_read(struct file_area *p_file_area/*,unsigned char page_offset_in_file_area*/)
+{
+    set_file_area_in_read(p_file_area);
+}
+static inline void clear_file_area_page_read(struct file_area *p_file_area/*,unsigned char page_offset_in_file_area*/)
+{
+    clear_file_area_in_read(p_file_area);
+}
+static inline int file_area_page_is_read(struct file_area *p_file_area/*,unsigned char page_offset_in_file_area*/)
+{
+	return  file_area_in_read(p_file_area);
+}
+
 /*清理file_area所有的towrite、dirty、writeback的mark标记。这个函数是在把file_area从xarray tree剔除时执行的，之后file_area是无效的，有必要吗????????????*/
 static inline void clear_file_area_towrite_dirty_writeback_mark(struct file_area *p_file_area)
 {
@@ -1098,7 +1127,7 @@ static int inline file_area_access_count_get(struct file_area *p_file_area)
 }
 
 
-extern int hot_file_update_file_status(struct address_space *mapping,struct file_stat *p_file_stat,struct file_area *p_file_area,int access_count);
+extern int hot_file_update_file_status(struct address_space *mapping,struct file_stat *p_file_stat,struct file_area *p_file_area,int access_count,int read_or_write);
 extern void printk_shrink_param(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print);
 extern int hot_cold_file_print_all_file_stat(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print);//is_proc_print:1 通过proc触发的打印
 extern void get_file_name(char *file_name_path,struct file_stat * p_file_stat);
