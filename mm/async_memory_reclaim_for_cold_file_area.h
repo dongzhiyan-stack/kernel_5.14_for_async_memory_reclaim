@@ -281,7 +281,7 @@ struct file_stat
 
 	/*统计一个周期内file_stat->temp链表上file_area移动到file_stat->temp链表头的次数，每一个一次减1，减少到0则禁止
 	 *file_stat->temp链表上file_area再移动到file_stat->temp链表头*/
-	unsigned char file_area_move_to_head_count;
+	short file_area_move_to_head_count;
 #if 0
 	//把最近访问的file_stat保存到hot_file_area_cache缓存数组，
 	struct file_area * hot_file_area_cache[FILE_AREA_CACHE_COUNT];
@@ -414,6 +414,8 @@ struct hot_cold_file_global
 	unsigned int file_area_free_age_dx;
 	//当一个文件file_stat长时间不被访问，释放掉了所有的file_area，再过file_stat_delete_age_dx个周期，则释放掉file_stat结构
 	unsigned int file_stat_delete_age_dx;
+	/*一个周期内，运行一个文件file_stat->temp链表头向前链表头移动的file_area个数*/
+	unsigned int file_area_move_to_head_count_max;
 
 	//发生refault的次数,累加值
 	unsigned long all_refault_count;
