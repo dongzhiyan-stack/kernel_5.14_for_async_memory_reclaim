@@ -3685,7 +3685,7 @@ static unsigned int get_file_area_from_file_stat_list(struct hot_cold_file_globa
 {
 	//file_stat_temp_head来自 hot_cold_file_global->file_stat_temp_head、file_stat_temp_large_file_head、file_stat_temp_middle_file_head 链表
 
-	struct file_stat *p_file_stat,*p_file_stat_temp;
+	struct file_stat *p_file_stat,*p_file_stat_temp,*p_file_stat_next;
 	//struct file_area *p_file_area,*p_file_area_temp;
 	LIST_HEAD(file_area_free_temp);
 
@@ -3808,6 +3808,53 @@ static unsigned int get_file_area_from_file_stat_list(struct hot_cold_file_globa
 		file_stat_status_change_solve(p_hot_cold_file_global,p_file_stat,file_stat_list_type);
 	}
 
+	/* 这里有个重大隐藏bug，下边list_move_enhance()将p_file_stat~链表尾的遍历过的file_stat移动到file_stat_temp_head
+	 * 链表头。如果这些file_stat被并发iput()释放，在__destroy_inode_handler_post()中标记file_stat delete，然后把
+	 * file_stat移动到了global delete链表。接着这里，global_lock加锁后，再把这些file_stat移动到file_stat_temp_head
+	 * 链表头，那就有问题了，相当于把delete的file_stat再移动到global temp、middel、large 链表，会有大问题。怎么解决？
+	 * 还不想用锁。
+	 *
+	 * 想到的办法是：定义一个全局变量enable_move_file_stat_to_delete_list，正常是1。然后这里先把
+	 * enable_move_file_stat_to_delete_list清0，然后synchronize_rcu()等待rcu宽限期退出。而__destroy_inode_handler_post()
+	 * 中先rcu_read_lock，然后if(enable_move_file_stat_to_delete_list)才允许把file_stat
+	 * list_move移动到global delete链表，但是允许标记file_stat的delete标记。
+	 * 这样就是 运用rcu+变量控制的方法禁止链表list_move的方法：这里等从synchronize_rcu()
+	 * 退出，__destroy_inode_handler_post()中就无法再把file_stat移动到global delete链表，但是会把file_stat标记delete。
+	 * 后续异步内存线程遍历到有delete标记的file_stat，再把该file_stat移动到global delete链表即可。
+	 *
+	 * 这个方法完全可行，通过rcu+变量控制的方法禁止链表list_move。但是有点麻烦。其实仔细想想还有一个更简单的方法。
+	 * 什么都不用动，只用下边spin_lock(&p_hot_cold_file_global->global_lock)后，判断一下p_file_stat是否有delete标记
+	 * 即可。如果有delete标记，说明该file_stat被iput并发释放标记delete，并移动到global delete链表了。这里
+	 * 只能取得该file_stat在file_stat_temp_head链表的下一个file_stat，然后判断这个新的file_stat是否有delete标记，
+	 * 一直判断到链表头的file_stat，最极端的情况是这些原p_file_stat到链表尾的file_stat全都有delete标记，那
+	 * list_move_enhance()就不用再移动链表了，直接返回。错了，分析错误了。
+	 *
+	 * spin_lock(&p_hot_cold_file_global->global_lock)加锁后，p_file_stat这file_stat确实可能被iput标记delete，并且
+	 * 被移动到global delete链表，但是p_file_stat到链表尾之间的file_stat绝对不可能有delete标记。因为这些file_stat
+	 * 一旦被iput()标记delete并移动到global delete链表，是全程spin_lock(&p_hot_cold_file_global->global_lock)加锁的，
+	 * 然后这里spin_lock(&p_hot_cold_file_global->global_lock)加锁后，这些file_stat绝对保证已经移动到了global delete
+	 * 链表，不会再存在于p_file_stat到链表尾之间。
+	 
+	 * 如果不是原p_file_stat被标记delete，而是它到链表尾中间的某个file_stat被标记delete了，那会怎么办？没事，
+	 * 因为spin_lock(&p_hot_cold_file_global->global_lock)加锁后，这个被标记delete的file_stat已经从file_stat_temp_head
+	 * 链表移动到global delete链表了，已经不在原p_file_stat到链表尾之间了，那还担心什么。
+	 *
+	 * 但是又有一个问题，如果spin_lock(&p_hot_cold_file_global->global_lock)加锁后，p_file_stat有delete标记并移动到
+	 * global delete链表。于是得到p_file_stat在链表的下一个next file_stat，然后把next file_stat到链表尾的file_stat
+	 * 移动到file_stat_temp_head链表头。这样还是有问题，因为此时p_file_stat处于global delete链表，得到next file_stat
+	 * 也是delete链表，next file_stat到链表尾的file_stat都是delete file_stat，把这些file_stat移动到
+	 * file_stat_temp_head链表头(global temp middle large)，那file_stat就有状态问题了。所以这个问题，因此，
+	 * 最终解决方案是，如果p_file_stat有delete标记，不再执行list_move_enhance()移动p_file_stat到链表尾的file_stat到
+	 * file_stat_temp_head链表头了。毕竟这个概率很低的，无非就不移动而已，但是保证了稳定性。
+	 *
+	 * 最终决定，globa lock加锁前，先取得它在链表的下一个 next file_stat。然后加锁后，如果file_stat有delete标记，
+	 * 那就判断它在链表的下一个 next file_stat有没有delete标记，没有的话就把next file_stat到链表尾的file_stat移动到
+	 * file_stat_temp_head链表头。如果也有delete标记，那就不移动了。但是next file_stat也有可能是global delete链表头，
+	 * 也有可能是file_stat_temp_head链表头，太麻烦了，风险太大，还是判定file_stat有delete标记，就不再执行
+	 * list_move_enhance()得了
+	 *
+	 * */
+
 	/* file_stat_temp_head链表非空且p_file_area不是指向链表头且p_file_area不是该链表的第一个成员，
 	 * 则执行list_move_enhance()把本次遍历过的file_area~链表尾的file_area移动到链表
 	 * file_stat_temp_head头，这样下次从链表尾遍历的是新的未遍历过的file_area。
@@ -3817,8 +3864,22 @@ static unsigned int get_file_area_from_file_stat_list(struct hot_cold_file_globa
 	//if(!list_empty(file_stat_temp_head) && &p_file_stat->hot_cold_file_list != &file_stat_temp_head && &p_file_stat->hot_cold_file_list != file_stat_temp_head.next)
 	{
 		spin_lock(&p_hot_cold_file_global->global_lock);
-		/*将链表尾已经遍历过的file_stat移动到链表头，下次从链表尾遍历的才是新的未遍历过的file_stat。这个过程不用加锁*/
-		list_move_enhance(file_stat_temp_head,&p_file_stat->hot_cold_file_list);
+#if 0	
+		p_file_stat_next = list_next_entry(p_file_stat, hot_cold_file_list);
+		if(file_stat_in_delete(p_file_stat)){
+			if(!file_stat_in_delete(p_file_stat_next) && p_file_stat_next != &p_hot_cold_file_global->file_stat_delete_head){
+				/*将链表尾已经遍历过的file_stat移动到链表头，下次从链表尾遍历的才是新的未遍历过的file_stat。这个过程必须加锁*/
+				list_move_enhance(file_stat_temp_head,&p_file_stat_next->hot_cold_file_list);
+			}
+		}else
+			list_move_enhance(file_stat_temp_head,&p_file_stat->hot_cold_file_list);
+#endif
+		/*p_file_stat不能是链表头，并且不能是被iput()并发标记delete并移动到global delete链表*/
+		if(&p_file_stat->hot_cold_file_list != file_stat_temp_head  && !file_stat_in_delete(p_file_stat)){
+			/*将链表尾已经遍历过的file_stat移动到链表头，下次从链表尾遍历的才是新的未遍历过的file_stat。这个过程必须加锁*/
+			list_move_enhance(file_stat_temp_head,&p_file_stat->hot_cold_file_list);
+		}
+
 		spin_unlock(&p_hot_cold_file_global->global_lock);
 	}
 
