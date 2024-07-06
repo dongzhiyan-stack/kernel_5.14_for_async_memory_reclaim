@@ -88,6 +88,11 @@
 #define FILE_STAT_IN_MIDDLE_FILE_LIST 1 /*file_stat在普通文件链表*/
 #define FILE_STAT_IN_LARGE_FILE_LIST 2 /*file_stat在普通大文件链表*/
 
+/*cache文件file_stat的file_area包含mmap的文件页*/
+#define FILE_STAT_FROM_CACHE_FILE  3
+/*file_area来自file_stat->free、refault、hot链表，遍历时不能移动该file_area到其他file_stat链表，并且file_area不参与内存回收*/
+#define FILE_STAT_OTHER_FILE_AREA (-1)
+
 #define TEMP_FILE 0 /*file_stat的file_area个数是普通文件*/
 #define MIDDLE_FILE 1 /*file_stat的file_area个数是中型文件*/
 #define LARGE_FILE 2 /*file_stat的file_area个数是大文件*/
@@ -1235,7 +1240,7 @@ extern int hot_file_update_file_status(struct address_space *mapping,struct file
 extern void printk_shrink_param(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print);
 extern int hot_cold_file_print_all_file_stat(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print);//is_proc_print:1 通过proc触发的打印
 extern void get_file_name(char *file_name_path,struct file_stat * p_file_stat);
-extern unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct list_head *file_area_free);
+extern unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct list_head *file_area_free,struct list_head *file_area_have_mmap_page_head);
 extern unsigned int cold_mmap_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct file_area *p_file_area,struct page *page_buf[],int cold_page_count);
 extern unsigned long shrink_inactive_list_async(unsigned long nr_to_scan, struct lruvec *lruvec,struct hot_cold_file_global *p_hot_cold_file_global,int is_mmap_file, enum lru_list lru);
 extern int walk_throuth_all_mmap_file_area(struct hot_cold_file_global *p_hot_cold_file_global);
@@ -1244,4 +1249,6 @@ extern unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_glo
 extern int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat_del);
 extern int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct file_area *p_file_area);
 extern void file_stat_temp_middle_large_file_change(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,unsigned char file_stat_list_type, unsigned int file_type,char is_cache_file);
+extern int mmap_file_area_cache_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,struct list_head *file_area_have_cache_page_head,struct list_head *file_area_free_temp,int memory_pressure);
+extern int cache_file_area_mmap_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,struct list_head *file_area_have_mmap_page_head);
 #endif
