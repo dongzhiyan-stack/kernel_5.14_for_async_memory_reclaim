@@ -238,6 +238,11 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
 	folio->mapping = NULL;
 	mapping->nrpages -= nr;
 
+	/*是调试的文件，打印调试信息*/
+	if(mapping->rh_reserved3){
+		printk("%s delete mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
+	}
+
 	//清理这个page在file_area->file_area_statue的对应的bit位，表示这个page被释放了
 	clear_file_area_page_bit(p_file_area,page_offset_in_file_area);
 	/* 如果page在xarray tree有dirty、writeback、towrite mark标记，必须清理掉，否则将来这个槽位的再有新的page，
@@ -550,6 +555,15 @@ find_page_from_file_area:
 
 		/*清理这个page在file_area->file_area_statue的对应的bit位，表示这个page被释放了*/
 		clear_file_area_page_bit(p_file_area,page_offset_in_file_area);
+		/* 如果page在xarray tree有dirty、writeback、towrite mark标记，必须清理掉，否则将来这个槽位的再有新的page，
+		 * 这些mark标记会影响已经设置了dirty、writeback、towrite mark标记的错觉，从而导致判断错误*/
+		if(is_file_area_page_mark_bit_set(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY))
+			clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY);
+		if(is_file_area_page_mark_bit_set(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_WRITEBACK))
+			clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_WRITEBACK);
+		if(is_file_area_page_mark_bit_set(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_TOWRITE))
+			clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_TOWRITE);
+
 		/*只有这个file_area没有page了，才会xas_store(&xas, NULL)清空这个file_area。这种情况完全是可能存在的，比如
 		 *一个file_area有page0、page1、page2、page3，现在从page1开始 delete，并没有从page0，那当delete 到page3时，
 		 *是不能xas_store(&xas, NULL)把file_area清空的
@@ -560,6 +574,11 @@ find_page_from_file_area:
         */
 		if(!file_area_have_page(p_file_area) && mapping_exiting(mapping))
 			xas_store(&xas, NULL);
+
+		/*是调试的文件，打印调试信息*/
+		if(mapping->rh_reserved3){
+			printk("%s delete_batch mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
+		}
 
 next_page:
 		page_offset_in_file_area ++;
@@ -4769,6 +4788,20 @@ static int filemap_get_pages(struct kiocb *iocb, struct iov_iter *iter,
 retry:
 	if (fatal_signal_pending(current))
 		return -EINTR;
+
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+	if(filp->f_path.dentry && !mapping->rh_reserved3){
+		struct dentry *dentry,*parent;
+		dentry = filp->f_path.dentry;
+		parent = dentry->d_parent;
+		if(parent){
+			/* 是 /root/.vim/cache/LeaderF/frecency 的话if成立，设置mapping->rh_reserved3，后续写该
+			 * 文件产生的脏页都添加调试信息，以跟踪该文件tag_pages_for_writeback() crash问题*/
+			if((0 == strcmp(dentry->d_iname,"frecency")) && (0 == strcmp(parent->d_iname,"LeaderF")))
+				mapping->rh_reserved3 = 1;
+		}
+	}
+#endif
 
 	filemap_get_read_batch(mapping, index, last_index, fbatch);
 	if (!folio_batch_count(fbatch)) {

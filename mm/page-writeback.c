@@ -2160,6 +2160,11 @@ find_page_from_file_area:
 			break;
 		}
 
+		/*是调试的文件，打印调试信息*/
+		if(mapping->rh_reserved3){
+			printk("%s mark_towrite mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx\n",__func__,(u64)mapping,(u64)p_file_stat,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)page);
+		}
+
 		/*file_area里的4个page都是dirty页吗，那可不一定，必须检测是否有脏页mark的page，才能在file_area里设置towrite mark*/
 		if(is_file_area_page_mark_bit_set(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY)){
 			page = p_file_area->pages[page_offset_in_file_area];
@@ -2620,6 +2625,11 @@ void __folio_mark_dirty_for_file_area(struct folio *folio, struct address_space 
 		xas_set_mark(&xas, PAGECACHE_TAG_DIRTY);
 		/*存在page被多次标记writeback的情况，这里不做page多次标记writeback就panic的判断*/
 		set_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY);
+
+		/*是调试的文件，打印调试信息*/
+		if(mapping->rh_reserved3){
+			printk("%s mark_dirty mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
+		}
 	}
 	xa_unlock_irqrestore(&mapping->i_pages, flags);
 }
@@ -2992,6 +3002,10 @@ bool __folio_end_writeback_for_file_area(struct folio *folio)
 			if(0 == file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_WRITEBACK))
 				xas_clear_mark(&xas, PAGECACHE_TAG_WRITEBACK);
 
+			if(mapping->rh_reserved3){
+				printk("%s clear_writeback mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
+			}
+
 			if (bdi->capabilities & BDI_CAP_WRITEBACK_ACCT) {
 				struct bdi_writeback *wb = inode_to_wb(inode);
 
@@ -3148,6 +3162,12 @@ bool __folio_start_writeback_for_file_area(struct folio *folio, bool keep_write)
 			if (mapping->host && !on_wblist)
 				sb_mark_inode_writeback(mapping->host);
 		}
+		
+		/*是调试的文件，打印调试信息*/
+		if(mapping->rh_reserved3){
+			printk("%s clear_dirty mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
+		}
+
 		if (!folio_test_dirty(folio)){
 			//xas_clear_mark(&xas, PAGECACHE_TAG_DIRTY);
 
@@ -3156,7 +3176,17 @@ bool __folio_start_writeback_for_file_area(struct folio *folio, bool keep_write)
 			clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY);
 			if(0 == file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_DIRTY))
 				xas_clear_mark(&xas, PAGECACHE_TAG_DIRTY);
+
+			if(mapping->rh_reserved3){
+				printk("%s real_clear_dirty mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
+			}
 		}
+
+		/*是调试的文件，打印调试信息*/
+		if(mapping->rh_reserved3){
+			printk("%s clear_towrite mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx keep_write:%d\n",__func__,(u64)mapping,(u64)p_file_stat,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags,keep_write);
+		}
+
 		if (!keep_write){
 			//xas_clear_mark(&xas, PAGECACHE_TAG_TOWRITE);
 			/*上边此时只是标记file_area的towrite mark，这里标记file_area里的page的towrite mark
