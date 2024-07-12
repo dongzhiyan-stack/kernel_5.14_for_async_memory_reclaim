@@ -1532,10 +1532,11 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 		xas_lock_irq(&xas);
 		/*file_stat可能会被方法删除，则分配一个新的file_stat，具体看cold_file_stat_delete()函数*/
 		if(SUPPORT_FILE_AREA_INIT_OR_DELETE == mapping->rh_reserved1){
-			if(RB_EMPTY_ROOT(&mapping->i_mmap.rb_root))
-			    p_file_stat  = file_stat_alloc_and_init(mapping);
+			//if(RB_EMPTY_ROOT(&mapping->i_mmap.rb_root))
+			if(!mapping_mapped(mapping))
+				p_file_stat  = file_stat_alloc_and_init(mapping);
 			else
-                p_file_stat = add_mmap_file_stat_to_list(mapping);
+				p_file_stat = add_mmap_file_stat_to_list(mapping);
 
 			if(!p_file_stat){
 				xas_set_err(&xas, -ENOMEM);

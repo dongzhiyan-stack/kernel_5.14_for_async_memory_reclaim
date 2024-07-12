@@ -606,7 +606,8 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	F_file_stat_in_cache_file,//cache文件，sysctl读写产生pagecache。有些cache文件可能还会被mmap映射，要与mmap文件互斥
 	
 	F_file_stat_in_mmap_file,//mmap文件，有些mmap文件可能也会被sysctl读写产生pagecache，要与cache文件互斥
-	F_file_stat_in_large_file,
+	//F_file_stat_in_large_file,
+	F_file_stat_in_from_cache_file,//mmap文件是从cache文件的global temp链表移动过来的
 	//F_file_stat_lock,
 	//F_file_stat_lock_not_block,//这个bit位置1，说明inode在删除的，但是获取file_stat锁失败
 };
@@ -666,7 +667,7 @@ FILE_STAT_STATUS(mapcount_file_area)
 	TEST_FILE_STATUS(name)\
 	TEST_FILE_STATUS_ERROR(name)
 
-FILE_STATUS(large_file)
+//FILE_STATUS(large_file)
 FILE_STATUS(delete)
 //FILE_STATUS(drop_cache)
 
@@ -707,6 +708,7 @@ FILE_STATUS(delete)
 //FILE_STATUS_ATOMIC(delete)
 FILE_STATUS_ATOMIC(cache_file)
 FILE_STATUS_ATOMIC(mmap_file)
+FILE_STATUS_ATOMIC(from_cache_file)
 
 extern struct hot_cold_file_global hot_cold_file_global_info;
 extern unsigned long async_memory_reclaim_status;
@@ -1025,7 +1027,7 @@ static inline struct file_stat *add_mmap_file_stat_to_list(struct address_space 
 	INIT_LIST_HEAD(&p_file_stat->file_area_temp);
 	INIT_LIST_HEAD(&p_file_stat->file_area_warm);
 	/*mmap文件需要p_file_stat->file_area_free_temp暂存参与内存回收的file_area，不能注释掉*/
-	INIT_LIST_HEAD(&p_file_stat->file_area_free_temp);
+	//INIT_LIST_HEAD(&p_file_stat->file_area_free_temp);
 	INIT_LIST_HEAD(&p_file_stat->file_area_free);
 	INIT_LIST_HEAD(&p_file_stat->file_area_refault);
 	//file_area对应的page的pagecount大于0的，则把file_area移动到该链表
