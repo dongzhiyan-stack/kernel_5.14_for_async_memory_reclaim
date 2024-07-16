@@ -1191,31 +1191,17 @@ static int reverse_other_file_area_list(struct hot_cold_file_global *p_hot_cold_
 		if(FILE_AREA_MAPCOUNT == type){
 			if(!file_area_in_mapcount_list(p_file_area) || file_area_in_mapcount_list_error(p_file_area))
 				panic("%s file_area:0x%llx status:%d not in file_area_mapcount\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
-#if 0
-			/*存在一种情况，file_area的page都是非mmap的，普通文件页，这样该函数也会返回0!!!!!!!!!!!!!!!!*/
-			memset(pages,0,PAGE_COUNT_IN_AREA*sizeof(struct page *));
-			//获取p_file_area对应的文件页page指针并保存到pages数组
-			ret = get_page_from_file_area(p_file_stat,p_file_area->start_index,pages);
-			if(shrink_page_printk_open1)
-				printk("1:%s file_stat:0x%llx file_area:0x%llx get %d page--------->\n",__func__,(u64)p_file_stat,(u64)p_file_area,ret);
-#endif			
 
 			//file_area被遍历到时记录当时的global_age，不管此时file_area的page是否被访问pte置位了
 			p_file_area->file_area_access_age = p_hot_cold_file_global->global_age;
-#if 0			
-			//这个file_area没有page，直接遍历下一个file_area
-			if(ret <= 0)
-				continue;
-#endif				
-
 	        if(0 == file_area_have_page(p_file_area))
 	            continue; 
 
 			/*存在一种情况，file_area的page都是非mmap的，普通文件页!!!!!!!!!!!!!!!!!!!*/
-			for(i = 0;i < ret;i ++){
+			for(i = 0;i < PAGE_COUNT_IN_AREA;i ++){
 				folio = p_file_area->pages[i];
 				if(!folio){
-					printk("%s file_area:0x%llx status:%d folio NULL\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+					printk("%s file_area:0x%llx status:0x%x folio NULL\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 					continue;
 				}
 
@@ -1224,7 +1210,7 @@ static int reverse_other_file_area_list(struct hot_cold_file_global *p_hot_cold_
 					break;
 			}
 			//if成立说明file_area的page的mapcount都是1，file_area不再是mapcount file_area，则降级到temp_list链表头
-			if(i == ret){
+			if(i == PAGE_COUNT_IN_AREA){
 				//file_stat->refault、free、hot、mapcount链表上的file_area移动到file_stat->temp链表时要先对file_area->file_area_access_age清0，原因看定义
 				p_file_area->file_area_access_age = 0;
 				
@@ -2192,7 +2178,6 @@ static unsigned int check_file_area_cold_page_and_clear(struct hot_cold_file_glo
 	char delete_file_area_last = 0;
 	unsigned int reclaimed_pages = 0;
 	unsigned int isolate_pages = 0;
-	int memory_pressure = 0;
 	LIST_HEAD(file_area_temp_head);
 	/*file_area里的page至少一个page发现是cache page的，则该file_area移动到file_area_have_cache_page_head，后续回收cache的文件页*/
 	LIST_HEAD(file_area_have_cache_page_head);
@@ -2475,7 +2460,7 @@ static unsigned int check_file_area_cold_page_and_clear(struct hot_cold_file_glo
 	if(!list_empty(&file_area_have_cache_page_head)){
 		/* 遍历file_area_have_cache_page_head链表上的file_area，符合内存回收条件的file_area移动到file_area_free
 		 * 链表，然后内存回收。不符合内存回收条件的还停留在file_area_have_cache_page_head链表*/
-		mmap_file_area_cache_page_solve(p_hot_cold_file_global,p_file_stat,&file_area_have_cache_page_head,&file_area_free,memory_pressure); 
+		mmap_file_area_cache_page_solve(p_hot_cold_file_global,p_file_stat,&file_area_have_cache_page_head,&file_area_free); 
 		/*内存回收后的file_area全都移动到ile_stat->file_area_free链表，将来通过file_stat->file_area_free
 		 *链表遍历到这些file_area还残留page，说明内存回收失败，则会判定file_area为refault file_area。当然也可以
 		 *这里就可以通过file_area_have_cache_page_head遍历这些file_area，检测是否还残留page，有这个必要吗*/

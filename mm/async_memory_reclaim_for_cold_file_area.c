@@ -74,6 +74,8 @@ unsigned int file_area_move_to_head_count;
 int shrink_page_printk_open1;
 int shrink_page_printk_open;
 
+static void change_memory_reclaim_age_dx(struct hot_cold_file_global *p_hot_cold_file_global);
+
 /*****file_area、file_stat、inode 的delete*********************************************************************************/
 static void i_file_area_callback(struct rcu_head *head)
 {
@@ -754,7 +756,7 @@ int hot_file_update_file_status(struct address_space *mapping,struct file_stat *
 	int is_mmap_file = file_stat_in_mmap_file(p_file_stat);
 	int is_cache_file = file_stat_in_cache_file(p_file_stat);
 
-	file_area_in_update_count ++;
+	//file_area_in_update_count ++;
 	/*hot_cold_file_global_info.global_age更新了，把最新的global age更新到本次访问的file_area->file_area_age。并对
 	 * file_area->access_count清0，本周期被访问1次则加1.这段代码不管理会并发，只是一个赋值*/
 	if(p_file_area->file_area_age < hot_cold_file_global_info.global_age){
@@ -825,8 +827,8 @@ int hot_file_update_file_status(struct address_space *mapping,struct file_stat *
 					}
 					spin_unlock(&p_file_stat->file_stat_lock);
 					p_file_stat->file_area_move_to_head_count --;
-					file_area_in_update_lock_count ++;
-					file_area_move_to_head_count ++;
+					//file_area_in_update_lock_count ++;
+					//file_area_move_to_head_count ++;
 				}
 				/*如果一个周期文件的file_area移动到file_stat->temp链表头次数超过限制，后续又有file_area因多次访问
 				 *而需要移动到file_stat->temp链表头，只是标记file_area的ahead标记，不再加锁移动到file_area到链表头*/
@@ -3137,7 +3139,9 @@ static unsigned int file_stat_other_list_file_area_solve(struct hot_cold_file_gl
 					/*有ahead标记的file_area，即便长时间没访问也不处理，而是仅仅清理file_area的ahead标记且跳过，等到下次遍历到该file_area再处理*/
 					if(file_area_in_ahead(p_file_area)){
 						clear_file_area_in_ahead(p_file_area);
-						break;
+						/*内存不紧缺时，禁止回收有ahead标记的file_area的page*/
+						if(IS_MEMORY_ENOUGH(p_hot_cold_file_global))
+							break;
 					}
 					file_area_hot_to_warm_list_count ++;
 					//spin_lock(&p_file_stat->file_stat_lock);	    
@@ -3162,7 +3166,9 @@ static unsigned int file_stat_other_list_file_area_solve(struct hot_cold_file_gl
 					/*有ahead标记的file_area，即便长时间没访问也不处理，而是仅仅清理file_area的ahead标记且跳过，等到下次遍历到该file_area再处理*/
 					if(file_area_in_ahead(p_file_area)){
 						clear_file_area_in_ahead(p_file_area);
-						break;
+						/*内存不紧缺时，禁止回收有ahead标记的file_area的page*/
+						if(IS_MEMORY_ENOUGH(p_hot_cold_file_global))
+							break;
 					}
 					file_area_refault_to_warm_list_count ++;
 					//spin_lock(&p_file_stat->file_stat_lock);	    
@@ -3213,7 +3219,9 @@ static unsigned int file_stat_other_list_file_area_solve(struct hot_cold_file_gl
 					/*有ahead标记的file_area，即便长时间没访问也不处理，而是仅仅清理file_area的ahead标记且跳过，等到下次遍历到该file_area再处理*/
 					if(file_area_in_ahead(p_file_area)){
 						clear_file_area_in_ahead(p_file_area);
-						break;
+						/*内存不紧缺时，禁止回收有ahead标记的file_area的page*/
+						if(IS_MEMORY_ENOUGH(p_hot_cold_file_global))
+							break;
 					}
 					file_area_free_count ++;
 					/*hot_file_update_file_status()函数中会并发把file_area从file_stat->file_area_free链表移动到file_stat->file_area_free_temp
@@ -3257,7 +3265,7 @@ static unsigned int file_stat_other_list_file_area_solve(struct hot_cold_file_gl
 	return scan_file_area_count;
 }
 /*遍历file_stat->temp链表上的file_area*/
-static int file_stat_temp_list_file_area_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,unsigned int scan_file_area_max,struct list_head *file_area_free_temp,unsigned char memory_pressure)
+static int file_stat_temp_list_file_area_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,unsigned int scan_file_area_max,struct list_head *file_area_free_temp)
 {
 	struct file_area *p_file_area,*p_file_area_temp;
 	unsigned int scan_file_area_count = 0;
@@ -3315,14 +3323,16 @@ static int file_stat_temp_list_file_area_solve(struct hot_cold_file_global *p_ho
 				/*有ahead标记的file_area，即便长时间没访问也不处理，而是仅仅清理file_area的ahead标记且跳过，等到下次遍历到该file_area再处理*/
 				if(file_area_in_ahead(p_file_area)){
 					clear_file_area_in_ahead(p_file_area);
-					continue;
+					/*内存不紧缺时，禁止回收有ahead标记的file_area的page*/
+					if(IS_MEMORY_ENOUGH(p_hot_cold_file_global))
+						continue;
 				}
 				/* 当前内存不紧张且内存回收不困难，则遇到read文件页的file_area先跳过，不回收。目的是尽可能回收write文件页，
 				 * read文件页一旦回收再被访问就会发生refault，不仅导致read耗时长，读磁盘功耗还高。但是如果这个read属性的
 				 * file_area很长很长很长时间没访问，也参与内存回收*/
 				if(file_area_page_is_read(p_file_area)){
 					scan_read_file_area_count ++;
-					if(!(memory_pressure || file_area_age_dx > p_hot_cold_file_global->file_area_reclaim_read_age_dx))
+					if(!(IS_IN_MEMORY_EMERGENCY_RECLAIM(p_hot_cold_file_global) || file_area_age_dx > p_hot_cold_file_global->file_area_reclaim_read_age_dx))
 						continue;
 					clear_file_area_page_read(p_file_area);
 				}
@@ -3399,7 +3409,7 @@ static int file_stat_temp_list_file_area_solve(struct hot_cold_file_global *p_ho
  * */
 
 /* 遍历file_stat->warm链表上的file_area，长时间没访问的移动到file_stat->temp链表*/
-static unsigned int file_stat_warm_list_file_area_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,unsigned int scan_file_area_max,struct list_head *file_area_free_temp,unsigned char memory_pressure)
+static unsigned int file_stat_warm_list_file_area_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,unsigned int scan_file_area_max,struct list_head *file_area_free_temp)
 {
 	struct file_area *p_file_area,*p_file_area_temp;
 	unsigned int scan_file_area_count = 0;
@@ -3438,7 +3448,9 @@ static unsigned int file_stat_warm_list_file_area_solve(struct hot_cold_file_glo
 			/*有ahead标记的file_area，即便长时间没访问也不处理，而是仅仅清理file_area的ahead标记且跳过，等到下次遍历到该file_area再处理*/
 			if(file_area_in_ahead(p_file_area)){
 				clear_file_area_in_ahead(p_file_area);
-				continue;
+				/*内存不紧缺时，禁止回收有ahead标记的file_area的page*/
+				if(IS_MEMORY_ENOUGH(p_hot_cold_file_global))
+				    continue;
 			}
 
 			/* 当前内存不紧张且内存回收不困难，则遇到read文件页的file_area先跳过，不回收。目的是尽可能回收write文件页，
@@ -3446,7 +3458,7 @@ static unsigned int file_stat_warm_list_file_area_solve(struct hot_cold_file_glo
 			 * file_area很长很长很长时间没访问，也参与内存回收*/
 			if(file_area_page_is_read(p_file_area)){
 				scan_read_file_area_count ++;
-				if(!(memory_pressure || file_area_age_dx > p_hot_cold_file_global->file_area_reclaim_read_age_dx))
+				if(!(IS_IN_MEMORY_PRESSURE_RECLAIM(p_hot_cold_file_global) || file_area_age_dx > p_hot_cold_file_global->file_area_reclaim_read_age_dx))
 					continue;
 				clear_file_area_page_read(p_file_area);
 			}
@@ -3579,7 +3591,7 @@ static unsigned int file_stat_warm_list_file_area_solve(struct hot_cold_file_glo
 }
 /* mmap文件内存回收遇到时，发现file_area里的page至少一个page发现是cache page的，则该file_area移动到
  * file_area_have_cache_page_head链表，现在遍历该链表回收这些cache文件页*/
-int mmap_file_area_cache_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,struct list_head *file_area_have_cache_page_head,struct list_head *file_area_free_temp,int memory_pressure)
+int mmap_file_area_cache_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,struct list_head *file_area_have_cache_page_head,struct list_head *file_area_free_temp)
 {
 	struct file_area *p_file_area,*p_file_area_temp;
 	int scan_cold_file_area_count = 0,scan_read_file_area_count = 0,file_area_age_dx;
@@ -3596,7 +3608,9 @@ int mmap_file_area_cache_page_solve(struct hot_cold_file_global *p_hot_cold_file
 			/*有ahead标记的file_area，即便长时间没访问也不处理，而是仅仅清理file_area的ahead标记且跳过，等到下次遍历到该file_area再处理*/
 			if(file_area_in_ahead(p_file_area)){
 				clear_file_area_in_ahead(p_file_area);
-				continue;
+				/*内存不紧缺时，禁止回收有ahead标记的file_area的page*/
+				if(IS_MEMORY_ENOUGH(p_hot_cold_file_global))
+					continue;
 			}
 
 			/* 当前内存不紧张且内存回收不困难，则遇到read文件页的file_area先跳过，不回收。目的是尽可能回收write文件页，
@@ -3604,7 +3618,7 @@ int mmap_file_area_cache_page_solve(struct hot_cold_file_global *p_hot_cold_file
 			 * file_area很长很长很长时间没访问，也参与内存回收*/
 			if(file_area_page_is_read(p_file_area)){
 				scan_read_file_area_count ++;
-				if(!(memory_pressure || file_area_age_dx > p_hot_cold_file_global->file_area_reclaim_read_age_dx))
+				if(!(IS_IN_MEMORY_EMERGENCY_RECLAIM(p_hot_cold_file_global) || file_area_age_dx > p_hot_cold_file_global->file_area_reclaim_read_age_dx))
 					continue;
 				clear_file_area_page_read(p_file_area);
 			}
@@ -3665,7 +3679,9 @@ static int hot_file_stat_solve(struct hot_cold_file_global *p_hot_cold_file_glob
 				/*有ahead标记的file_area，即便长时间没访问也不处理，而是仅仅清理file_area的ahead标记且跳过，等到下次遍历到该file_area再处理*/
 				if(file_area_in_ahead(p_file_area)){
 					clear_file_area_in_ahead(p_file_area);
-					continue;
+					/*内存不紧缺时，禁止回收有ahead标记的file_area的page*/
+					if(IS_MEMORY_ENOUGH(p_hot_cold_file_global))
+						continue;
 				}
 				file_area_hot_to_warm_list_count ++;
 				/*现在把file_area移动到file_stat->warm链表，不再移动到file_stat->temp链表，因此不用再加锁*/
@@ -3882,8 +3898,6 @@ static unsigned int get_file_area_from_file_stat_list(struct hot_cold_file_globa
 
 	//unsigned int cold_file_area_for_file_stat = 0;
 	unsigned int file_stat_count_in_cold_list = 0;
-	/*正常是0，只回收write文件页。当内存回收困难，置1，表示读写文件页都回收*/
-	unsigned char memory_pressure;
 
 	/* 从global temp和large_file_temp链表尾遍历N个file_stat，回收冷file_area的。对热file_area、refault file_area、
 	 * in_free file_area的各种处理。这个不global lock加锁。但是遇到file_stat移动到其他global 链表才会global lock加锁*/
@@ -3987,16 +4001,14 @@ static unsigned int get_file_area_from_file_stat_list(struct hot_cold_file_globa
 
 		/*file_area_free_temp现在不是file_stat->file_area_free_temp全局，而是一个临时链表，故每次向该链表添加file_area前必须要初始化*/
 		INIT_LIST_HEAD(&file_area_free_temp);
-		/*正常是0，只回收write文件页。当内存回收困难，置1，表示读写文件页都回收*/
-		memory_pressure = 0;
 
 		scan_file_area_max = 64;
 		/*file_stat->temp链表上的file_area的处理，冷file_area且要内存回收的移动到file_area_free_temp临时链表，下边回收该链表上的file_area的page*/
-		scan_file_area_count += file_stat_temp_list_file_area_solve(p_hot_cold_file_global,p_file_stat,scan_file_area_max,&file_area_free_temp,memory_pressure);
+		scan_file_area_count += file_stat_temp_list_file_area_solve(p_hot_cold_file_global,p_file_stat,scan_file_area_max,&file_area_free_temp);
 
 		scan_file_area_max = 32;
 		/*file_stat->warm链表上的file_area的处理，冷file_area且要内存回收的移动到file_area_free_temp临时链表，下边回收该链表上的file_area的page*/
-		scan_file_area_count += file_stat_warm_list_file_area_solve(p_hot_cold_file_global,p_file_stat,scan_file_area_max,&file_area_free_temp,memory_pressure);
+		scan_file_area_count += file_stat_warm_list_file_area_solve(p_hot_cold_file_global,p_file_stat,scan_file_area_max,&file_area_free_temp);
 
 		/*回收file_area_free_temp临时链表上的冷file_area的page，回收后的file_area移动到file_stat->free链表头*/
 		free_page_from_file_area(p_hot_cold_file_global,p_file_stat,&file_area_free_temp);
@@ -4113,40 +4125,78 @@ static int walk_throuth_all_file_area(struct hot_cold_file_global *p_hot_cold_fi
 {
 	struct file_stat * p_file_stat,*p_file_stat_temp;
 	//struct file_area *p_file_area,*p_file_area_temp;
-	unsigned int scan_file_area_max,scan_file_stat_max;
+	unsigned int scan_file_area_max;
+	unsigned int scan_temp_file_area_max,scan_temp_file_stat_max;
+	unsigned int scan_middle_file_area_max,scan_middle_file_stat_max;
+	unsigned int scan_large_file_area_max,scan_large_file_stat_max;
 	unsigned int scan_cold_file_area_count = 0;
 	//unsigned int file_area_hot_to_warm_list_count = 0;
 	unsigned int del_file_stat_count = 0,del_file_area_count = 0;
 
-	memset(&p_hot_cold_file_global->hot_cold_file_shrink_counter,0,sizeof(struct hot_cold_file_shrink_counter));
+	/*根据当前的内存状态调整各个内存回收age差参数*/
+	change_memory_reclaim_age_dx(p_hot_cold_file_global);
 
-	scan_file_stat_max = 16;
-	scan_file_area_max = 256;
+	switch(p_hot_cold_file_global->memory_pressure_level){
+		/*内存非常紧缺*/
+		case MEMORY_EMERGENCY_RECLAIM:
+			scan_temp_file_stat_max = 32;
+			scan_temp_file_area_max = 512;
+			scan_middle_file_stat_max = 64;
+			scan_middle_file_area_max = 512;
+			scan_large_file_stat_max = 128;
+			scan_large_file_area_max = 512;
+			break;
+			/*内存紧缺*/
+		case MEMORY_PRESSURE_RECLAIM:
+			scan_temp_file_stat_max = 16;
+			scan_temp_file_area_max = 256;
+			scan_middle_file_stat_max = 32;
+			scan_middle_file_area_max = 256;
+			scan_large_file_stat_max = 128;
+			scan_large_file_area_max = 256;
+			break;
+			/*内存碎片有点多，或者前后两个周期分配的内存数太多*/		
+		case MEMORY_LITTLE_RECLAIM:
+			scan_temp_file_stat_max = 8;
+			scan_temp_file_area_max = 128;
+			scan_middle_file_stat_max = 16;
+			scan_middle_file_area_max = 128;
+			scan_large_file_stat_max = 128;
+			scan_large_file_area_max = 128;
+			break;
+
+			/*一般情况*/
+		default:
+			scan_temp_file_stat_max = 8;
+			scan_temp_file_area_max = 64;
+			scan_middle_file_stat_max = 16;
+			scan_middle_file_area_max = 64;
+			/*设置大点是为了尽量多扫描so、可执行文件这种原本是mmap的文件但最初被判定为cache文件*/
+			scan_large_file_stat_max = 256;
+			scan_large_file_area_max = 64;
+			break;
+	}
+	printk("memory_pressure_level:%d scan_temp_file_stat_max:%d scan_temp_file_area_max:%d scan_middle_file_stat_max:%d scan_middle_file_area_max:%d scan_large_file_stat_max:%d scan_large_file_area_max:%d file_area_temp_to_cold_age_dx:%d file_area_hot_to_temp_age_dx:%d file_area_refault_to_temp_age_dx:%d\n",p_hot_cold_file_global->memory_pressure_level,scan_temp_file_stat_max,scan_temp_file_area_max,scan_middle_file_stat_max,scan_middle_file_area_max,scan_large_file_stat_max,scan_large_file_area_max,p_hot_cold_file_global->file_area_temp_to_cold_age_dx,p_hot_cold_file_global->file_area_hot_to_temp_age_dx,p_hot_cold_file_global->file_area_refault_to_temp_age_dx);
+	
 	/* 遍历hot_cold_file_global->file_stat_temp_large_file_head链表尾巴上边的文件file_stat，再遍历每一个文件file_stat->temp、warm
 	 * 链表尾上的file_area，判定是冷file_area的话则参与内存回收，内存回收后的file_area移动到file_stat->free链表。然后对
 	 * file_stat->refault、hot、free链表上file_area进行对应处理*/
-	scan_cold_file_area_count += get_file_area_from_file_stat_list(p_hot_cold_file_global,scan_file_area_max,scan_file_stat_max, 
+	scan_cold_file_area_count += get_file_area_from_file_stat_list(p_hot_cold_file_global,scan_temp_file_area_max,scan_temp_file_stat_max, 
 			&p_hot_cold_file_global->file_stat_large_file_head,FILE_STAT_IN_LARGE_FILE_LIST);
 
-	scan_file_stat_max = 32;
-	scan_file_area_max = 256;
 	/* 遍历hot_cold_file_global->file_stat_temp_middle_file_head链表尾巴上边的文件file_stat，再遍历每一个文件file_stat->temp、warm
 	 * 链表尾上的file_area，判定是冷file_area的话则参与内存回收，内存回收后的file_area移动到file_stat->free链表。然后对
 	 * file_stat->refault、hot、free链表上file_area进行对应处理*/
-	scan_cold_file_area_count += get_file_area_from_file_stat_list(p_hot_cold_file_global,scan_file_area_max,scan_file_stat_max, 
+	scan_cold_file_area_count += get_file_area_from_file_stat_list(p_hot_cold_file_global,scan_middle_file_area_max,scan_middle_file_stat_max, 
 			&p_hot_cold_file_global->file_stat_middle_file_head,FILE_STAT_IN_MIDDLE_FILE_LIST);
 
 
-	//需要调度的话休眠一下
-	cond_resched();
-
-	scan_file_stat_max = 128;
-	scan_file_area_max = 256;
 	/* 遍历hot_cold_file_global->file_stat_temp_file_head链表尾巴上边的文件file_stat，再遍历每一个文件file_stat->temp、warm
 	 * 链表尾上的file_area，判定是冷file_area的话则参与内存回收，内存回收后的file_area移动到file_stat->free链表。然后对
 	 * file_stat->refault、hot、free链表上file_area进行对应处理*/
-	scan_cold_file_area_count += get_file_area_from_file_stat_list(p_hot_cold_file_global,scan_file_area_max,scan_file_stat_max, 
+	scan_cold_file_area_count += get_file_area_from_file_stat_list(p_hot_cold_file_global,scan_large_file_area_max,scan_large_file_stat_max, 
 			&p_hot_cold_file_global->file_stat_temp_head,FILE_STAT_IN_TEMP_FILE_LIST);
+
 
 	scan_file_area_max = 128;
 	/* 遍历global hot链表上的file_stat，再遍历这些file_stat->hot链表上的file_area，如果不再是热的，则把file_area
@@ -4186,33 +4236,214 @@ static int walk_throuth_all_file_area(struct hot_cold_file_global *p_hot_cold_fi
 	if(shrink_page_printk_open1)
 		printk_shrink_param(p_hot_cold_file_global,NULL,0);
 
-	/*每个周期打印hot_cold_file_shrink_counter参数后清0*/
-	//memset(&p_hot_cold_file_global->hot_cold_file_shrink_counter,0,sizeof(struct hot_cold_file_shrink_counter));
 	return 0;
 }
+static int inline memory_zone_solve(struct zone *zone,unsigned long zone_free_page,int *zone_memory_tiny_or_enough_count)
+{
+	int index;
+	int memory_pressure_level = MEMORY_IDLE_SCAN;
+
+	/*如果zone free内存低于zone水位阀值，进入紧急内存回收模式*/
+	if(zone_free_page < high_wmark_pages(zone)){
+		if(zone_free_page < low_wmark_pages(zone))
+			memory_pressure_level = MEMORY_EMERGENCY_RECLAIM;
+		else
+			memory_pressure_level = MEMORY_PRESSURE_RECLAIM;
+
+        *zone_memory_tiny_or_enough_count = *zone_memory_tiny_or_enough_count + 1;
+		printk("%s %s zone_free_page:%ld memory_pressure_level:%d\n",__func__,zone->name,zone_free_page,memory_pressure_level);
+	}else{/*如果内存碎片有点严重*/
+		index = fragmentation_index(zone,PAGE_ALLOC_COSTLY_ORDER);
+		if(index > sysctl_extfrag_threshold){
+			memory_pressure_level = MEMORY_LITTLE_RECLAIM;
+			printk("%s memory fragment %s index:%d\n",__func__,zone->name,index);
+		}
+        *zone_memory_tiny_or_enough_count = *zone_memory_tiny_or_enough_count - 1;
+	}
+
+	return memory_pressure_level;
+}
+/*根据 内存碎片程度、每个内存zone可用内存、上次内存回收page数，决定本次是否进入紧急内存回收模式以及本次预期扫描的file_area个数*/
+static int check_memory_reclaim_necessary(struct hot_cold_file_global *p_hot_cold_file_global)
+{
+	/*内存紧张的程度*/
+	int memory_pressure_level = MEMORY_IDLE_SCAN;
+	long free_page_dx = 0;
+	pg_data_t *pgdat;
+	struct zone *zone;
+	unsigned long zone_free_page;
+	int check_zone_free_many_pages;
+	/*遇到内存紧张的zone加1，遇到内存充足的减1，最后如果大于0，则说明内存紧张的zone更多，进入紧急内存回收模式*/
+	int zone_memory_tiny_or_enough_count = 0;
+
+	for (pgdat = first_online_pgdat();pgdat;pgdat = next_online_pgdat(pgdat)){
+		/*发现有zone内存紧缺*/
+		if(memory_pressure_level > MEMORY_LITTLE_RECLAIM)
+			break;
+
+		for (zone = pgdat->node_zones; zone - pgdat->node_zones < MAX_NR_ZONES; ++zone) {
+			/*空zone跳过*/
+			if (!populated_zone(zone))
+				continue;
+
+			if(0 == pgdat->node_id){
+				if(0 == strncmp("Normal",zone->name,6)){
+					zone_free_page = zone_page_state(zone, NR_FREE_PAGES);
+					/*当前zone上个周期到现在free内存差值*/
+					if(p_hot_cold_file_global->normal_zone_free_pages_last)
+						free_page_dx = zone_free_page - p_hot_cold_file_global->normal_zone_free_pages_last;
+
+					/*保存上一次的high阀值*/
+					p_hot_cold_file_global->normal_zone_free_pages_last = zone_free_page;
+					memory_pressure_level = memory_zone_solve(zone,zone_free_page,&zone_memory_tiny_or_enough_count);
+					if(memory_pressure_level > MEMORY_LITTLE_RECLAIM)
+						break;
+				}
+				else if(0 == strncmp("HighMem",zone->name,7)){
+					zone_free_page = zone_page_state(zone, NR_FREE_PAGES);
+					/*当前zone上个周期到现在free内存差值*/
+					if(p_hot_cold_file_global->highmem_zone_free_pages_last)
+						free_page_dx = zone_free_page - p_hot_cold_file_global->highmem_zone_free_pages_last;
+
+					p_hot_cold_file_global->highmem_zone_free_pages_last = zone_free_page;
+					memory_pressure_level = memory_zone_solve(zone,zone_free_page,&zone_memory_tiny_or_enough_count);
+					if(memory_pressure_level > MEMORY_LITTLE_RECLAIM)
+						break;
+				}
+				else if(0 == strncmp("DMA32",zone->name,5)){
+					zone_free_page = zone_page_state(zone, NR_FREE_PAGES);
+					/*当前zone上个周期到现在free内存差值*/
+					if(p_hot_cold_file_global->dma32_zone_free_pages_last)
+						free_page_dx = zone_free_page - p_hot_cold_file_global->dma32_zone_free_pages_last;
+
+					p_hot_cold_file_global->dma32_zone_free_pages_last = zone_free_page;
+					memory_pressure_level = memory_zone_solve(zone,zone_free_page,&zone_memory_tiny_or_enough_count);
+					if(memory_pressure_level > MEMORY_LITTLE_RECLAIM)
+						break;
+				}
+			}else if(1 == pgdat->node_id){
+				if(0 == strncmp("Normal",zone->name,6)){
+					zone_free_page = zone_page_state(zone, NR_FREE_PAGES);
+					/*当前zone上个周期到现在free内存差值*/
+					if(p_hot_cold_file_global->normal1_zone_free_pages_last)
+						free_page_dx = zone_free_page - p_hot_cold_file_global->normal1_zone_free_pages_last;
+
+					p_hot_cold_file_global->normal1_zone_free_pages_last = zone_free_page;
+					memory_pressure_level = memory_zone_solve(zone,zone_free_page,&zone_memory_tiny_or_enough_count);
+					if(memory_pressure_level > MEMORY_LITTLE_RECLAIM)
+						break;
+				}
+			}
+
+			if((free_page_dx > 512) && (0 == check_zone_free_many_pages)){
+		        printk("%s free_page_dx:%ld free too much page\n",__func__,free_page_dx);
+				check_zone_free_many_pages = 1;
+			}
+		}
+	}
+
+	/* 没有发现内存碎片严重，也没有发现内存zone内存紧缺。但是如果前后两个周期某个zone发现有大量内存分配。
+	 * 也令memory_pressure_level置1，进行少量内存回收*/
+	if(check_zone_free_many_pages && (MEMORY_IDLE_SCAN == memory_pressure_level)){
+		memory_pressure_level = MEMORY_LITTLE_RECLAIM;
+	}
+
+	/*遇到内存紧张的zone加1，遇到内存充足的减1，最后如果小于等于0，则说明至少有一个内存zone内存还充足，此时不会紧急内存回收模式*/
+	if((zone_memory_tiny_or_enough_count <= 0)&& (memory_pressure_level >= MEMORY_PRESSURE_RECLAIM)){
+		memory_pressure_level = MEMORY_LITTLE_RECLAIM;
+		printk("%s zone_memory_tiny_or_enough_count:%d memory not tiny\n",__func__,zone_memory_tiny_or_enough_count);
+	}
+
+	return memory_pressure_level;
+}
+#define IDLE_MAX 3
 static int hot_cold_file_thread(void *p){
 	struct hot_cold_file_global *p_hot_cold_file_global = (struct hot_cold_file_global *)p;
-	int sleep_count = 0;
 
-	while(1){
+	int sleep_count;
+	int memory_pressure_level;
+	/*设置为IDLE_MAX是为了第一次就能扫描文件file_stat，主要是为了扫描so、可执行文件 这种现在是mmap文件但最初被判定为cache文件*/
+	int idle_age_count = IDLE_MAX;
+
+	while(!kthread_should_stop()){
 		sleep_count = 0;
-		while(sleep_count ++ < p_hot_cold_file_global->global_age_period){
-			if (kthread_should_stop())
-				return 0;
+		while(++sleep_count < p_hot_cold_file_global->global_age_period){
 			msleep(1000);
 		}
+		//每个周期global_age加1
+		hot_cold_file_global_info.global_age ++;
+
+		memory_pressure_level = check_memory_reclaim_necessary(p_hot_cold_file_global);
+		/*不用内存回收*/
+		if(MEMORY_IDLE_SCAN == memory_pressure_level){
+			if(++idle_age_count < IDLE_MAX)
+				continue;
+		}
+		idle_age_count = 0;
+
 		if(test_bit(ASYNC_MEMORY_RECLAIM_ENABLE, &async_memory_reclaim_status))
 		{
-			//每个周期global_age加1
-			hot_cold_file_global_info.global_age ++;
-			file_area_in_update_lock_count = 0;
-			file_area_in_update_count = 0;
-			file_area_move_to_head_count = 0;
-			walk_throuth_all_file_area(p_hot_cold_file_global);
-			walk_throuth_all_mmap_file_area(p_hot_cold_file_global);
+			/*内存回收前记录memory_pressure_level*/	
+			p_hot_cold_file_global->memory_pressure_level = memory_pressure_level;
+			/*清空上一轮内存回收统计参数*/
+			memset(&p_hot_cold_file_global->hot_cold_file_shrink_counter,0,sizeof(struct hot_cold_file_shrink_counter));
+			/*唤醒异步内存回收线程*/
+			wake_up_process(p_hot_cold_file_global->async_memory_reclaim);
 		}
 	}
 	return 0;
+}
+static int async_memory_reclaim_main_thread(void *p){
+	struct hot_cold_file_global *p_hot_cold_file_global = (struct hot_cold_file_global *)p;
+
+	while(!kthread_should_stop()){
+
+		/*回收cache文件页*/
+		walk_throuth_all_file_area(p_hot_cold_file_global);
+		/*回收mmap文件页*/
+		walk_throuth_all_mmap_file_area(p_hot_cold_file_global);
+
+		set_current_state(TASK_INTERRUPTIBLE);
+		schedule();
+	}
+	return 0;
+}
+/*根据当前的内存状态调整各个内存回收参数*/
+static void change_memory_reclaim_age_dx(struct hot_cold_file_global *p_hot_cold_file_global)
+{
+	switch(p_hot_cold_file_global->memory_pressure_level){
+		/*内存非常紧缺*/
+		case MEMORY_EMERGENCY_RECLAIM:
+			p_hot_cold_file_global->file_area_temp_to_cold_age_dx = FILE_AREA_TEMP_TO_COLD_AGE_DX >> 1;
+			p_hot_cold_file_global->file_area_hot_to_temp_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
+			p_hot_cold_file_global->file_area_refault_to_temp_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
+			//p_hot_cold_file_global->file_area_temp_to_warm_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
+			//p_hot_cold_file_global->file_area_warm_to_temp_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
+			//p_hot_cold_file_global->file_area_reclaim_read_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
+
+			break;
+			/*内存紧缺*/
+		case MEMORY_PRESSURE_RECLAIM:
+			p_hot_cold_file_global->file_area_temp_to_cold_age_dx = FILE_AREA_TEMP_TO_COLD_AGE_DX - (FILE_AREA_TEMP_TO_COLD_AGE_DX >> 2);
+			p_hot_cold_file_global->file_area_hot_to_temp_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
+			p_hot_cold_file_global->file_area_refault_to_temp_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
+			//p_hot_cold_file_global->file_area_temp_to_warm_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
+			//p_hot_cold_file_global->file_area_warm_to_temp_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
+			//p_hot_cold_file_global->file_area_reclaim_read_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
+
+			break;
+			/*内存碎片有点多，或者前后两个周期分配的内存数太多*/		
+		case MEMORY_LITTLE_RECLAIM:
+			/*一般情况*/
+		default:
+			p_hot_cold_file_global->file_area_temp_to_cold_age_dx = FILE_AREA_TEMP_TO_COLD_AGE_DX;
+			p_hot_cold_file_global->file_area_hot_to_temp_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx << 3;
+			p_hot_cold_file_global->file_area_refault_to_temp_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx << 4;
+			//p_hot_cold_file_global->file_area_temp_to_warm_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
+			//p_hot_cold_file_global->file_area_warm_to_temp_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
+			//p_hot_cold_file_global->file_area_reclaim_read_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
+			break;
+	}
 }
 
 static int __init hot_cold_file_init(void)
@@ -4251,9 +4482,9 @@ static int __init hot_cold_file_init(void)
 	//atomic_set(&hot_cold_file_global_info.ref_count,0);
 	//atomic_set(&hot_cold_file_global_info.inode_del_count,0);
 
-	hot_cold_file_global_info.file_area_hot_to_temp_age_dx = FILE_AREA_HOT_to_TEMP_AGE_DX;
-	hot_cold_file_global_info.file_area_refault_to_temp_age_dx = FILE_AREA_REFAULT_TO_TEMP_AGE_DX;
 	hot_cold_file_global_info.file_area_temp_to_cold_age_dx = FILE_AREA_TEMP_TO_COLD_AGE_DX;
+	hot_cold_file_global_info.file_area_hot_to_temp_age_dx = FILE_AREA_TEMP_TO_COLD_AGE_DX << 3;
+	hot_cold_file_global_info.file_area_refault_to_temp_age_dx = FILE_AREA_TEMP_TO_COLD_AGE_DX << 4;
 	/*file_area_temp_to_warm_age_dx取自file_area_temp_to_cold_age_dx的3/4*/
 	hot_cold_file_global_info.file_area_temp_to_warm_age_dx = hot_cold_file_global_info.file_area_temp_to_cold_age_dx - (hot_cold_file_global_info.file_area_temp_to_cold_age_dx >> 2);
 	hot_cold_file_global_info.file_area_warm_to_temp_age_dx = hot_cold_file_global_info.file_area_temp_to_cold_age_dx - (hot_cold_file_global_info.file_area_temp_to_cold_age_dx >> 1);
@@ -4271,9 +4502,9 @@ static int __init hot_cold_file_init(void)
 	hot_cold_file_global_info.mmap_file_area_level_for_large_file = (50*1024*1024)/(4096 *PAGE_COUNT_IN_AREA);
 	hot_cold_file_global_info.mmap_file_area_level_for_middle_file = hot_cold_file_global_info.mmap_file_area_level_for_large_file/2;
 
+	hot_cold_file_global_info.mmap_file_area_temp_to_cold_age_dx = MMAP_FILE_AREA_TEMP_TO_COLD_AGE_DX;
 	hot_cold_file_global_info.mmap_file_area_hot_to_temp_age_dx = MMAP_FILE_AREA_HOT_TO_TEMP_AGE_DX;
 	hot_cold_file_global_info.mmap_file_area_refault_to_temp_age_dx = MMAP_FILE_AREA_REFAULT_TO_TEMP_AGE_DX;
-	hot_cold_file_global_info.mmap_file_area_temp_to_cold_age_dx = MMAP_FILE_AREA_TEMP_TO_COLD_AGE_DX;
 	hot_cold_file_global_info.mmap_file_area_free_age_dx = MMAP_FILE_AREA_TO_FREE_AGE_DX;
 	hot_cold_file_global_info.mmap_file_area_hot_age_dx = MMAP_FILE_AREA_HOT_AGE_DX;
 	hot_cold_file_global_info.mmap_file_area_temp_to_warm_age_dx = hot_cold_file_global_info.mmap_file_area_temp_to_cold_age_dx - (hot_cold_file_global_info.mmap_file_area_temp_to_cold_age_dx >> 2);
@@ -4284,12 +4515,17 @@ static int __init hot_cold_file_init(void)
 	//hot_cold_file_global_info.support_fs_type = -1;
 
 
+	hot_cold_file_global_info.async_memory_reclaim = kthread_run(async_memory_reclaim_main_thread,&hot_cold_file_global_info, "async_memory_reclaim");
+	if (IS_ERR(hot_cold_file_global_info.async_memory_reclaim)) {
+		printk("Failed to start  async_memory_reclaim\n");
+		return -1;
+	}
 	hot_cold_file_global_info.hot_cold_file_thead = kthread_run(hot_cold_file_thread,&hot_cold_file_global_info, "hot_cold_file_thread");
 	if (IS_ERR(hot_cold_file_global_info.hot_cold_file_thead)) {
 		printk("Failed to start  hot_cold_file_thead\n");
 		return -1;
-
 	}
+
 	return hot_cold_file_proc_init(&hot_cold_file_global_info);
 }
 subsys_initcall(hot_cold_file_init);

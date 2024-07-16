@@ -70,7 +70,6 @@
 //refault链表上的file_area在MMAP_FILE_AREA_HOT_AGE_DX个周期内不再遍历访问，降低性能损耗
 #define MMAP_FILE_AREA_REFAULT_AGE_DX 5
 
-
 #define SUPPORT_FS_UUID_LEN UUID_SIZE
 #define SUPPORT_FS_NAME_LEN 10
 #define SUPPORT_FS_COUNT 2
@@ -96,6 +95,17 @@
 #define TEMP_FILE 0 /*file_stat的file_area个数是普通文件*/
 #define MIDDLE_FILE 1 /*file_stat的file_area个数是中型文件*/
 #define LARGE_FILE 2 /*file_stat的file_area个数是大文件*/
+
+#define MEMORY_IDLE_SCAN  0 /*内存正常，常规的巡检*/
+#define MEMORY_LITTLE_RECLAIM  1/*发现内存碎片，或者前后两个周期有大量内存分配*/
+#define MEMORY_PRESSURE_RECLAIM  2/*zone free内存小于high阀值，有内存紧缺迹象*/
+#define MEMORY_EMERGENCY_RECLAIM  3/*内存非常紧缺*/
+
+#define IS_IN_MEMORY_IDLE_SCAN(p_hot_cold_file_global) (MEMORY_IDLE_SCAN == p_hot_cold_file_global->memory_pressure_level)
+#define IS_IN_MEMORY_LITTLE_RECLAIM(p_hot_cold_file_global) (MEMORY_LITTLE_RECLAIM == p_hot_cold_file_global->memory_pressure_level)
+#define IS_IN_MEMORY_PRESSURE_RECLAIM(p_hot_cold_file_global) (MEMORY_PRESSURE_RECLAIM == p_hot_cold_file_global->memory_pressure_level)
+#define IS_IN_MEMORY_EMERGENCY_RECLAIM(p_hot_cold_file_global) (MEMORY_EMERGENCY_RECLAIM == p_hot_cold_file_global->memory_pressure_level)
+#define IS_MEMORY_ENOUGH(p_hot_cold_file_global) (p_hot_cold_file_global->memory_pressure_level < MEMORY_PRESSURE_RECLAIM)
 
 /**针对mmap文件新加的******************************/
 #define MMAP_FILE_NAME_LEN 16
@@ -421,8 +431,10 @@ struct hot_cold_file_global
 	//保存文件file_stat所有file_area的radix tree
 	struct kmem_cache *hot_cold_file_area_tree_node_cachep;
 	struct hot_cold_file_node_pgdat *p_hot_cold_file_node_pgdat;
-	//异步内存回收线程
+	//异步内存回收线程，每个周期运行一次
 	struct task_struct *hot_cold_file_thead;
+	//负责内存回收，由hot_cold_file_thead线程唤醒，才会进行内存回收
+	struct task_struct *async_memory_reclaim;
 	int node_count;
 
 	//有多少个进程在执行hot_file_update_file_status函数使用文件file_stat、file_area
@@ -489,7 +501,6 @@ struct hot_cold_file_global
 	unsigned int lru_lock_count;
 	unsigned int mmap_file_lru_lock_count;
 
-
 	//mmap文件用的全局锁
 	spinlock_t mmap_file_global_lock;
 
@@ -512,6 +523,13 @@ struct hot_cold_file_global
 	unsigned int mmap_file_area_temp_to_warm_age_dx;
 	unsigned int mmap_file_area_warm_to_temp_age_dx;
 	unsigned int mmap_file_area_hot_age_dx;
+
+	unsigned int normal_zone_free_pages_last;
+	unsigned int dma32_zone_free_pages_last;
+	unsigned int highmem_zone_free_pages_last;
+	unsigned int normal1_zone_free_pages_last;
+	/*内存紧张等级，越大表示内存越紧张，并且还会回收有read标记和ahead标记的file_area的page*/
+	unsigned int memory_pressure_level;
 };
 
 
@@ -1251,6 +1269,6 @@ extern unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_glo
 extern int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat_del);
 extern int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct file_area *p_file_area);
 extern void file_stat_temp_middle_large_file_change(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,unsigned char file_stat_list_type, unsigned int file_type,char is_cache_file);
-extern int mmap_file_area_cache_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,struct list_head *file_area_have_cache_page_head,struct list_head *file_area_free_temp,int memory_pressure);
+extern int mmap_file_area_cache_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,struct list_head *file_area_have_cache_page_head,struct list_head *file_area_free_temp);
 extern int cache_file_area_mmap_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,struct list_head *file_area_have_mmap_page_head);
 #endif
