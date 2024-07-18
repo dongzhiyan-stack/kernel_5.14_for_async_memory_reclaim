@@ -753,6 +753,14 @@ extern unsigned int open_file_area_printk;
 			printk(fmt,##__VA_ARGS__); \
 	}while(0);
 
+#define CHECK_FOLIO_FROM_FILE_AREA_VALID(xas,folio,p_file_area,page_offset_in_file_area,folio_index_from_xa_index) \
+    if((folio)->index != ((p_file_area)->start_index + page_offset_in_file_area) || (folio)->index != folio_index_from_xa_index)\
+        panic("%s xas:0x%llx file_area:0x%llx folio:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)xas,(u64)p_file_area,(u64)folio,page_offset_in_file_area);
+
+#define CHECK_FOLIO_FROM_FILE_AREA_VALID_MARK(xas,folio,folio_from_file_area,p_file_area,page_offset_in_file_area,folio_index_from_xa_index) \
+    if(folio->index != ((p_file_area)->start_index + page_offset_in_file_area) || folio->index != folio_index_from_xa_index || folio != folio_from_file_area)\
+        panic("%s xas:0x%llx file_area:0x%llx folio:0x%llx folio_from_file_area:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)xas,(u64)p_file_area,(u64)folio,(u64)folio_from_file_area,page_offset_in_file_area);
+
 static inline struct file_area *entry_to_file_area(void * file_area_entry)
 {
 	return (struct file_area *)((unsigned long)file_area_entry | 0x8000000000000000);

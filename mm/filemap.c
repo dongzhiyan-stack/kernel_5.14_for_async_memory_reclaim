@@ -504,6 +504,8 @@ find_page_from_file_area:
 			goto next_page;
 			//break
 		}
+		/*检测查找到的page是否正确，不是则crash*/
+		CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,folio,p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
 
 		if (i >= folio_batch_count(fbatch))
 			break;
@@ -1079,6 +1081,7 @@ bool filemap_range_has_writeback_for_file_area(struct address_space *mapping,
 	pgoff_t max_page = (end_byte >> PAGE_SHIFT);
 	//要查找的第一个page在file_area->pages[]数组里的偏移，令page索引与上0x3得到它在file_area的pages[]数组的下标
 	unsigned int page_offset_in_file_area = (start_byte >> PAGE_SHIFT) & PAGE_COUNT_IN_AREA_MASK;
+	unsigned long folio_index_from_xa_index;
 
 	if (end_byte < start_byte)
 		return false;
@@ -1128,8 +1131,12 @@ find_page_from_file_area:
 			goto next_page;
 			//break; 
 		}
+		folio_index_from_xa_index = (xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area;
+		/*检测查找到的page是否正确，不是则crash*/
+		CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,page,p_file_area,page_offset_in_file_area,folio_index_from_xa_index);
+
 		//超过了最大索引的page，则本次没有找到有效page
-		if(page->index > max_page){
+		if(folio_index_from_xa_index > max_page){
 			page = NULL;
 			break;
 		}
@@ -2602,6 +2609,7 @@ pgoff_t page_cache_next_miss_for_file_area(struct address_space *mapping,
 	unsigned int page_offset_in_file_area = index & PAGE_COUNT_IN_AREA_MASK;
 	struct file_area *p_file_area;
 	struct file_stat *p_file_stat;
+	unsigned long folio_index_from_xa_index = 0;
     
 	/*该函数没有rcu_read_lock，但是调用者里已经执行了rcu_read_lock，这点需要注意!!!!!!!!!!!!!!*/
 
@@ -2638,12 +2646,17 @@ find_page_from_file_area:
 		if(0 == max_scan)
 			break;
 
+		folio_index_from_xa_index = (xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area;
 		//if (xas.xa_index == 0)这个判断怎么可能成立??????????????????????
-		if ((xas.xa_index + page_offset_in_file_area)  == 0)
+		//if ((xas.xa_index + page_offset_in_file_area)  == 0)
+		if (folio_index_from_xa_index  == 0)
 			break;
 		//page是NULL则直接break，这个跟page_cache_next_miss函数原有的if (!entry)break 同理，即遇到第一个NULL page则break结束查找
 		if(p_file_area->pages[page_offset_in_file_area] == NULL)
 			break;
+
+		/*检测查找到的page是否正确，不是则crash*/
+		CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,p_file_area->pages[page_offset_in_file_area],p_file_area,page_offset_in_file_area,folio_index_from_xa_index);
 
 		page_offset_in_file_area ++;
 
@@ -2734,6 +2747,7 @@ pgoff_t page_cache_prev_miss_for_file_area(struct address_space *mapping,
 	unsigned int page_offset_in_file_area = index & PAGE_COUNT_IN_AREA_MASK;
 	struct file_area *p_file_area;
 	struct file_stat *p_file_stat;
+	unsigned long folio_index_from_xa_index = 0 ;
 
 	p_file_stat = (struct file_stat *)mapping->rh_reserved1;
 	/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
@@ -2767,12 +2781,17 @@ find_page_from_file_area:
 		if(0 == max_scan)
 			break;
 
+		folio_index_from_xa_index = (xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area;
 		//if (xas.xa_index == ULONG_MAX) 这个判断怎么可能成立??????????????????????
-		if ((xas.xa_index + page_offset_in_file_area)  == ULONG_MAX)
+		//if ((xas.xa_index + page_offset_in_file_area)  == ULONG_MAX)
+		if (folio_index_from_xa_index == ULONG_MAX)
 			break;
 		//page是NULL则直接break，这个跟page_cache_prev_miss函数原有的if (!entry)break 同理，即遇到第一个NULL page则break结束查找
 		if(p_file_area->pages[page_offset_in_file_area] == NULL)
 			break;
+		
+		/*检测查找到的page是否正确，不是则crash*/
+		CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,p_file_area->pages[page_offset_in_file_area],p_file_area,page_offset_in_file_area,folio_index_from_xa_index);
 
 		/*如果page_offset_in_file_area是0,则说明file_area的page都被遍历过了，那就到for循环开头xas_prev(&xas)去查找上一个file_area。
 		 *否则，只是令page_offset_in_file_area减1，goto find_page_from_file_area去查找file_area里的上一个page*/
@@ -2944,6 +2963,10 @@ repeat:
 		goto out;
 
 find_folio:
+
+	/*检测查找到的page是否正确，不是则crash*/
+	CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,folio,p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
+
 	if (!folio_try_get_rcu(folio))
 		goto repeat;
 
@@ -3306,6 +3329,9 @@ find_page_from_file_area:
 		return NULL;
 	}
 #endif
+	/*检测查找到的page是否正确，不是则crash*/
+	CHECK_FOLIO_FROM_FILE_AREA_VALID(xas,folio,*p_file_area,*page_offset_in_file_area,((xas->xa_index << PAGE_COUNT_IN_AREA_SHIFT) + *page_offset_in_file_area));
+
 	if (!folio_try_get_rcu(folio))
 		goto reset;
 
@@ -3877,6 +3903,9 @@ find_page_from_file_area:
 		if(!folio)
 			break;
 
+		/*检测查找到的page是否正确，不是则crash*/
+		CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,folio,p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
+
 		/*如果获取的page引用计数是0，说明已经被其他进程释放了。则直接goto retry从xarray tree按照老的xas.xa_index重新查找
 		 *file_area，然后查找page。其实没有必要重新查找file_area，直接goto find_page_from_file_area重新获取page就行了!!!!!!!!!!*/
 		if (!folio_try_get_rcu(folio))
@@ -4342,7 +4371,8 @@ static void filemap_get_read_batch_for_file_area(struct address_space *mapping,
 	unsigned int page_offset_in_file_area = index & PAGE_COUNT_IN_AREA_MASK;
 	struct file_stat *p_file_stat;
 	struct file_area *p_file_area = NULL;
-	int page_offset_in_file_area_origin = page_offset_in_file_area;
+	unsigned int page_offset_in_file_area_origin = page_offset_in_file_area;
+	unsigned long folio_index_from_xa_index;
 	
 	rcu_read_lock();
 	p_file_stat = (struct file_stat *)mapping->rh_reserved1;
@@ -4414,8 +4444,14 @@ find_page_from_file_area:
 		/*这个跟filemap_get_read_batch()里for (folio = xas_load(&xas); folio; folio = xas_next(&xas))判断出folio是NULL则结束循环是一个效果*/
 		if(!folio)
 			break;
+
+		folio_index_from_xa_index = (xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area;
+		/*检测查找到的page是否正确，不是则crash*/
+		CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,folio,p_file_area,page_offset_in_file_area,folio_index_from_xa_index);
+
 		/*查找的page超过最大索引*/
-		if(folio->index > max /*xas.xa_index + page_offset_in_file_area > max*/)
+		//if(folio->index > max /*xas.xa_index + page_offset_in_file_area > max*/)
+		if(folio_index_from_xa_index > max )
 			break;
 
         /*如果获取的page引用计数是0，说明已经被其他进程释放了。则直接goto retry从xarray tree按照老的xas.xa_index重新查找
@@ -4497,13 +4533,6 @@ retry:
 		xas_reset(&xas);
 	}
 	
-	//做个测试，测试从xarray tree找到的page是否合法
-    if(fbatch->nr){
-		folio = fbatch->folios[0];
-		if(folio->index != index)
-            panic("%s mapping:0x%llx folio->index:%ld index:%ld error!!!!!!!!!!!!!!!!!!!\n",__func__,(u64)mapping,folio->index,index);
-	}
-
     /*如果前边for循环异常break了，就无法统计最后file_area的访问计数了，那就在这里统计*/
 	if(page_offset_in_file_area_origin == -1){
 		if(page_offset_in_file_area)/*可能这个file_area一个page都没有获取到，要过滤掉*/
@@ -5568,6 +5597,7 @@ static struct folio *next_uptodate_page_for_file_area(struct file_area **p_file_
 	unsigned int page_offset_in_file_area_temp = *page_offset_in_file_area;
 	struct folio *folio;
 	struct file_area *p_file_area = *p_file_area_ori;
+	unsigned long folio_index_from_xa_index = 0;
 
 	FILE_AREA_PRINT("1:%s %s %d xas.xa_index:%ld page_offset_in_file_area_temp:%d get_page_from_file_area:%d end_pgoff:%ld\n",__func__,current->comm,current->pid,xas->xa_index,page_offset_in_file_area_temp,get_page_from_file_area,end_pgoff);
 
@@ -5595,9 +5625,11 @@ find_page_from_file_area:
 		if(page_offset_in_file_area_temp >= PAGE_COUNT_IN_AREA)
 			panic("2:%s %s %d mapping:0x%llx p_file_area:0x%llx page_offset_in_file_area_temp:%d error\n",__func__,current->comm,current->pid,(u64)mapping,(u64)p_file_area,page_offset_in_file_area_temp);
 
+		folio_index_from_xa_index = (xas->xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area_temp;
 		/*原函数在xas_next_entry()里判断要查找的page索引是否超出end_pgoff，超出的话就退出循环。这里因为
 		 *xas_next_entry()查找的是file_area，故在这里要专门判断超找的page索引是否超出end_pgoff*/
-		if((xas->xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area_temp > end_pgoff){
+		//if((xas->xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area_temp > end_pgoff){
+		if(folio_index_from_xa_index > end_pgoff){
 			FILE_AREA_PRINT("2:%s %s %d p_file_area:0x%llx file_area_state:0x%x xas.xa_index:%ld page_offset_in_file_area_temp:%d return NULL\n",__func__,current->comm,current->pid,(u64)p_file_area,p_file_area->file_area_state,xas->xa_index,page_offset_in_file_area_temp);
 
 			return NULL;
@@ -5608,6 +5640,9 @@ find_page_from_file_area:
 
 		if(!folio)
 			goto next_folio;
+
+		/*检测查找到的page是否正确，不是则crash*/
+		CHECK_FOLIO_FROM_FILE_AREA_VALID(xas,folio,p_file_area,page_offset_in_file_area_temp,folio_index_from_xa_index);
 
 		if (folio_test_locked(folio))
 			goto next_folio;
@@ -5632,7 +5667,8 @@ find_page_from_file_area:
 		/*隐藏很深的问题:原函数在xas_next_entry()里判断要查找的page索引是否超出max_idx，超出的话就goto unlock。这里因为
 		 *xas_next_entry()查找的是file_area，故在这里要专门判断超找的page索引是否超出max_idx*/
 		//if (xas->xa_index >= max_idx)
-		if (((xas->xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area_temp) >= max_idx)
+		//if (((xas->xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area_temp) >= max_idx)
+		if (folio_index_from_xa_index >= max_idx)
 			goto unlock;
 
 #if 0
