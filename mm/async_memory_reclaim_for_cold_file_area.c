@@ -802,10 +802,12 @@ int hot_file_update_file_status(struct address_space *mapping,struct file_stat *
 
 	/*file_stat->temp链表上file_area被多次访问则移动到file_area->temp链表头。
 	 *被频繁访问则标记file_area的hot标记，不再移动file_area到file_stat->hot链表*/
-	if(file_area_in_temp_list(p_file_area)){
+	if(file_area_in_temp_list(p_file_area) && !file_area_in_hot_list(p_file_area)){
 		/*file_stat->temp链表上的file_area被频繁访问后，只是设置file_area的hot标记，不会立即移动到file_stat->hot链表，在异步内存回收线程里实现*/
-		if(!file_area_in_hot_list(p_file_area) && is_file_area_hot(p_file_area)){
-			clear_file_area_in_temp_list(p_file_area);
+		if(/*!file_area_in_hot_list(p_file_area) && */is_file_area_hot(p_file_area)){
+			/* 不清理file_area in_temp_list状态，等把file_area移动到file_stat->hot链表后再清理，目的是:
+			 * 如果重复把这些hot file_area移动挂到file_stat->hot链表，则触发crash*/
+			//clear_file_area_in_temp_list(p_file_area);
 			set_file_area_in_hot_list(p_file_area);
 		}
 		/*file_stat->temp链表上file_area被多次访问，移动到file_stat->temp链表头*/
@@ -840,8 +842,11 @@ int hot_file_update_file_status(struct address_space *mapping,struct file_stat *
 		}
 	}
 	/*file_stat->free链表上的file_area被访问，只是标记file_area in_free_list，异步内存回收线程里再把该file_area移动到file_stat->refault链表*/
-	else if(file_area_in_free_list(p_file_area)){
-		clear_file_area_in_free_list(p_file_area);
+	else if(file_area_in_free_list(p_file_area) && !file_area_in_refault_list(p_file_area)){
+		/* 标记file_area in_refault_list后，不清理file_area in_free_list状态，只有把file_area移动到
+		 * file_stat->refault链表时再清理掉。目的是防止这种file_area在file_stat_other_list_file_area_solve()
+		 * 中重复把这种file_area移动file_area->refault链表*/
+		//clear_file_area_in_free_list(p_file_area);
 		set_file_area_in_refault_list(p_file_area);
 		hot_cold_file_global_info.all_refault_count ++;
 	}
@@ -3197,6 +3202,10 @@ static unsigned int file_stat_other_list_file_area_solve(struct hot_cold_file_gl
 					 *但这是正常现象不合理的！因为这个file_area的page在内存回收时被访问了。于是就通过file_area的access_count大于0而判定这个file_area的
 					 *page在内存回收最后被访问了，于是就不能释放掉file_area。那就要移动到file_stat->temp链表或者refault链表!!!!!!!!!!!!!!!!!!!!*/
 
+					/*file_area必须有in_free_list状态，否则crash，防止file_area重复移动到file_stat->refault链表*/
+					if(!file_area_in_free_list(p_file_area))
+						panic("%s file_area:0x%llx status:%d not in file_area_free error\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+
 					/*把file_area移动到file_stat->refault链表，必须对访问计数清0。否则后续该file_area不再访问则
 					 *访问计数一直大于0，该file_area移动到file_stat->free链表后，因访问计数大于0每次都要移动到file_stat->refault链表*/
 					file_area_access_count_clear(p_file_area);
@@ -3209,7 +3218,7 @@ static unsigned int file_stat_other_list_file_area_solve(struct hot_cold_file_gl
 					/*检测到refault的file_area个数加1*/
 					p_hot_cold_file_global->check_refault_file_area_count ++;
 					//spin_unlock(&p_file_stat->file_stat_lock);	    
-					printk("%s file_area:0x%llx status:0x%x accessed in reclaim\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+					printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x accessed in reclaim\n",__func__,(u64)p_file_stat,(u64)p_file_area,p_file_area->file_area_state);
 				}
 				/*如果file_stat->file_area_free链表上的file_area长时间没有被访问则释放掉file_area结构。之前的代码有问题，判定释放file_area的时间是
 				 *file_area_free_age_dx，这样有问题，会导致file_area被内存回收后，在下个周期file_area立即被释放掉。原因是file_area_free_age_dx=5，
@@ -3250,11 +3259,15 @@ static unsigned int file_stat_other_list_file_area_solve(struct hot_cold_file_gl
 	 * 当上边循环是遍历完所有链表所有成员才退出，p_file_area此时指向的是链表头file_area_list_head，
 	 * 此时 p_file_area->file_area_list 跟 file_area_list_head 就相等了。当然，这种情况，是绝对不能
 	 * 把p_file_area到链表尾的file_area移动到file_area_list_head链表头了，会出严重内核bug*/
+
+	/* 在把遍历过的状态已经改变的file_area移动到file_area_list_head链表头时，必须判断p_file_area不能
+	 * 不是链表头。否则出现了一个bug，因p_file_area是链表头而导致can_file_area_move_to_list_head()误判
+	 * 该p_file_area状态合法，而错误执行list_move_enhance()把遍历过的file_area移动到链表头*/
 	//if(!list_empty(file_area_list_head) && p_file_area->file_area_list != file_area_list_head && p_file_area->file_area_list != file_area_list_head.next)
 	{
 		/*将链表尾已经遍历过的file_area移动到file_area_list_head链表头，下次从链表尾遍历的才是新的未遍历过的file_area。此时不用加锁!!!!!!!!!!!!!*/
-		if(can_file_area_move_to_list_head(p_file_area,file_area_in_list_type))
-		    list_move_enhance(file_area_list_head,&p_file_area->file_area_list);
+		if(can_file_area_move_to_list_head(p_file_area,file_area_list_head,file_area_in_list_type))
+			list_move_enhance(file_area_list_head,&p_file_area->file_area_list);
 	}
 
 	p_hot_cold_file_global->hot_cold_file_shrink_counter.file_area_refault_to_warm_list_count += file_area_refault_to_warm_list_count;
@@ -3304,10 +3317,14 @@ static int file_stat_temp_list_file_area_solve(struct hot_cold_file_global *p_ho
 #endif
 		if(file_area_in_hot_list(p_file_area)){
 			spin_lock(&p_file_stat->file_stat_lock);
-			if(file_area_in_temp_list(p_file_area))
-				clear_file_area_in_temp_list(p_file_area);
-			if(file_area_in_refault_list(p_file_area))
-				clear_file_area_in_refault_list(p_file_area);
+			/* 当file_area被判定为hot后，没有清理in_temp_list状态，因此第一次来这里，没有in_temp_list则crash，
+			 * 防止重复把file_area移动到file_stat->hot链表*/
+			if(!file_area_in_temp_list(p_file_area))
+			    panic("%s file_area:0x%llx status:%d not in file_area_temp error\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+
+			clear_file_area_in_temp_list(p_file_area);
+			//if(file_area_in_refault_list(p_file_area))
+			//	clear_file_area_in_refault_list(p_file_area);
 			/*热file_area肯定来自file_stat->temp链表，因此file_area移动到file_area->hot链表后要减1*/
 			p_file_stat->file_area_count_in_temp_list --;
 			list_move(&p_file_area->file_area_list,&p_file_stat->file_area_hot);
@@ -3387,7 +3404,7 @@ static int file_stat_temp_list_file_area_solve(struct hot_cold_file_global *p_ho
 		/* 将链表尾已经遍历过的file_area移动到file_stat->temp链表头，下次从链表尾遍历的才是新的未遍历过的
 		 * file_area。牵涉到file_stat->temp链表，增删file_area必须要加锁!!!!!!!!!!!!!!!*/
 		spin_lock(&p_file_stat->file_stat_lock);
-		if(can_file_area_move_to_list_head(p_file_area,F_file_area_in_temp_list))
+		if(can_file_area_move_to_list_head(p_file_area,&p_file_stat->file_area_temp,F_file_area_in_temp_list))
 		    list_move_enhance(&p_file_stat->file_area_temp,&p_file_area->file_area_list);
 		spin_unlock(&p_file_stat->file_stat_lock);
 	}
@@ -3463,6 +3480,8 @@ static unsigned int file_stat_warm_list_file_area_solve(struct hot_cold_file_glo
 				clear_file_area_page_read(p_file_area);
 			}
 
+			//access_count清0，如果内存回收期间又被访问了，access_count将大于0，将被判断为refault page。
+			file_area_access_count_clear(p_file_area);
 			scan_cold_file_area_count ++;
 			clear_file_area_in_warm_list(p_file_area);
 			set_file_area_in_free_list(p_file_area);
@@ -3485,7 +3504,7 @@ static unsigned int file_stat_warm_list_file_area_solve(struct hot_cold_file_glo
 		 *链表，file_area就处于错误的file_stat链表了，大bug!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 		 *怎么解决，先执行 can_file_area_move_to_list_head()函数判定file_area是否处于file_stat->warm链表，
 		 *是的话才允许把p_file_area到链表尾的file_area移动到链表头*/
-		if(can_file_area_move_to_list_head(p_file_area,F_file_area_in_warm_list))
+		if(can_file_area_move_to_list_head(p_file_area,&p_file_stat->file_area_warm,F_file_area_in_warm_list))
 			list_move_enhance(&p_file_stat->file_area_warm,&p_file_area->file_area_list);
 	}
 
@@ -3695,7 +3714,7 @@ static int hot_file_stat_solve(struct hot_cold_file_global *p_hot_cold_file_glob
 		}
 
 		/*重点：将链表尾已经遍历过的file_area移动到file_stat->hot链表头，下次从链表尾遍历的才是新的未遍历过的file_area。此时不用加锁!!!!!!!!!!!!!*/
-		if(can_file_area_move_to_list_head(p_file_area,F_file_area_in_hot_list))
+		if(can_file_area_move_to_list_head(p_file_area,&p_file_stat->file_area_hot,F_file_area_in_hot_list))
 		    list_move_enhance(&p_file_stat->file_area_hot,&p_file_area->file_area_list);
 
 		/*该文件file_stat的热file_area个数file_stat->file_area_hot_count小于阀值，则被判定不再是热文件

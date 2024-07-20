@@ -2138,7 +2138,7 @@ static unsigned int mmap_file_stat_warm_list_file_area_solve(struct hot_cold_fil
 	 *链表，file_area就处于错误的file_stat链表了，大bug!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	 *怎么解决，先执行 can_file_area_move_to_list_head()函数判定file_area是否处于file_stat->warm链表，
 	 *是的话才允许把p_file_area到链表尾的file_area移动到链表头*/
-	if(can_file_area_move_to_list_head(p_file_area,F_file_area_in_warm_list))
+	if(can_file_area_move_to_list_head(p_file_area,&p_file_stat->file_area_warm,F_file_area_in_warm_list))
 		list_move_enhance(&p_file_stat->file_area_warm,&p_file_area->file_area_list);
 
 	/*将file_stat->warm链表上近期访问过的file_area移动到file_stat->temp链表头*/

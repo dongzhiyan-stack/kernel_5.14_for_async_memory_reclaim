@@ -1148,6 +1148,7 @@ static int inline file_inode_lock(struct file_stat * p_file_stat)
     /*不能在这里赋值，因为可能文件inode被iput后p_file_stat->mapping赋值NULL，这样会crash*/
 	//struct inode *inode = p_file_stat->mapping->host;
 	struct inode *inode;
+	int lock_fail = 0;
 
 	/*这里有个隐藏很深的bug!!!!!!!!!!!!!!!!如果此时其他进程并发执行iput()最后执行到__destroy_inode_handler_post()触发删除inode，
 	 *然后就会立即把inode结构释放掉。此时当前进程可能执行到file_inode_lock()函数的spin_lock(&inode->i_lock)时，但inode已经被释放了，
@@ -1179,21 +1180,28 @@ static int inline file_inode_lock(struct file_stat * p_file_stat)
 	//unlock_file_stat(p_file_stat);
 	//rcu_read_unlock();
 
-	//如果inode已经被标记释放了，直接return
-	if( ((inode->i_state & (I_FREEING|I_WILL_FREE|I_NEW))) || atomic_read(&inode->i_count) == 0){
-		spin_unlock(&inode->i_lock);
-	    rcu_read_unlock();
-
-		//如果inode已经释放了，则要goto unsed_inode分支释放掉file_stat结构
-		return 0;
+	/*inode正被其他进程iput释放，加锁失败*/
+	if(inode->i_state & (I_FREEING|I_WILL_FREE|I_NEW)){
+		lock_fail = 1;
 	}
-	//令inode引用计数加1，之后就不用担心inode被其他进程释放掉
-	atomic_inc(&inode->i_count);
+	/*如果inode引用计数是0了，说明没人再用，加锁失败。并且iput()强制触发释放掉该inode，否则会成为只有一个文件页的file_stat，
+	 *但是又因加锁失败而无法回收，对内存回收干扰。但iput要放到spin_unlock(&inode->i_lock)后*/
+	else if(atomic_read(&inode->i_count) == 0){
+		//iput(inode);	
+		lock_fail = 2;
+	}
+
+	//加锁成功则令inode引用计数加1，之后就不用担心inode被其他进程释放掉
+	if(0 == lock_fail)
+		atomic_inc(&inode->i_count);
+
 	spin_unlock(&inode->i_lock);
-	
 	rcu_read_unlock();
 
-	return 1;
+	if(2 == lock_fail)
+		iput(inode);
+
+	return (0 == lock_fail);
 }
 static void inline file_area_access_count_clear(struct file_area *p_file_area)
 {
@@ -1240,8 +1248,11 @@ static void inline list_move_enhance(struct list_head *head,struct list_head *fi
 	}
 }
 /*测试file_area是否真的在file_area_in_list_type这个file_stat的链表(file_stat->temp、hot、refault、warm、mapcount链表)，不在则不能把p_file_area到链表尾的file_area移动到链表头*/
-static int inline can_file_area_move_to_list_head(struct file_area *p_file_area,unsigned int file_area_in_list_type)
+static int inline can_file_area_move_to_list_head(struct file_area *p_file_area,struct list_head *file_area_list_head,unsigned int file_area_in_list_type)
 {
+	/*file_area不能是链表头*/
+	if(&p_file_area->file_area_list == file_area_list_head)
+		return 0;
 	/*如果file_area在file_area_in_list_type这个file_stat的链表上，测试失败*/
     if(0 == (p_file_area->file_area_state & (1 << file_area_in_list_type)))
 		return 0;
@@ -1249,6 +1260,7 @@ static int inline can_file_area_move_to_list_head(struct file_area *p_file_area,
 	if(p_file_area->file_area_state & (~(1 << file_area_in_list_type) & FILE_AREA_LIST_MASK))
 		return 0;
 
+	printk("can_file_area_move_to_list_head file_area:0x%llx\n",(u64)p_file_area);
 	return 1;
 }
 /*测试file_stat是否真的在file_stat_in_list_type这个global链表上(global temp、middle、large、hot、mapcount链表)，不在则不能把p_file_stat到链表尾的file_stat移动到链表头*/
@@ -1261,6 +1273,7 @@ static int inline can_file_stat_move_to_list_head(struct file_stat *p_file_stat,
 	if(p_file_stat->file_stat_status & (~(1 << file_stat_in_list_type) & FILE_STAT_LIST_MASK))
 		return 0;
 
+	printk("can_file_stat_move_to_list_head file_stat:0x%llx\n",(u64)p_file_stat);
 	return 1;
 }
 
