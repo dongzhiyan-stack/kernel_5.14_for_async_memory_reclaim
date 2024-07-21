@@ -4389,7 +4389,7 @@ static void filemap_get_read_batch_for_file_area(struct address_space *mapping,
 	smp_rmb();
 
 	//if(!file_stat_in_delete(p_file_stat) && IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)){
-	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)){
+	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping) && (xarray_tree_node_cache_hit != -1)){
 		    //如果此时这个file_area正在被释放，这里还能正常被使用吗？用了rcu机制做防护，后续会写详细分析!!!!!!!!!!!!!!!!!!!!!
             p_file_area = find_file_area_from_xarray_cache_node(&xas,p_file_stat,index);
             if(p_file_area){
@@ -4552,7 +4552,8 @@ retry:
 	 p_file_area赋值时，也对xa_node_vaild赋值所在父节点node。保证 p_file_area和xa_node_vaild是一体的。然后到
 	 这里时，p_file_area是最后一次查找的有效page的file_area，xa_node_vaild是它所在的父节点node，可以直接赋值*/
 	//if(xa_is_node(xas.xa_node) && (p_file_stat->xa_node_cache != xas.xa_node)){
-	if(p_file_area && xa_node_vaild && (p_file_stat->xa_node_cache != xa_node_vaild)){
+	if((xarray_tree_node_cache_hit != -1) 
+			&& p_file_area && xa_node_vaild && (p_file_stat->xa_node_cache != xa_node_vaild)){
 	    /*保存父节点node和这个node节点slots里最小的page索引。这两个赋值可能被多进程并发赋值，导致
 	     *mapping->rh_reserved2和mapping->rh_reserved3 可能不是同一个node节点的，错乱了。这就有大问题了！
 	     *没事，这种情况上边的if(page && page->index == offset)就会不成立了*/

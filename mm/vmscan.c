@@ -2537,12 +2537,16 @@ shrink_inactive_list_async(unsigned long nr_to_scan, struct lruvec *lruvec,
 
 	nr_reclaimed = shrink_inactive_list_for_file_area(nr_to_scan, lruvec,&sc, lru);
 
-	p_hot_cold_file_global->hot_cold_file_shrink_counter.writeback_count += sc.nr.writeback;
-	p_hot_cold_file_global->hot_cold_file_shrink_counter.dirty_count += sc.nr.dirty;
-	if(is_mmap_file)
-		p_hot_cold_file_global->hot_cold_file_shrink_counter.mmap_free_pages_count += nr_reclaimed;
-	else
+	if(is_mmap_file){
+		p_hot_cold_file_global->mmap_file_shrink_counter.writeback_count += sc.nr.writeback;
+		p_hot_cold_file_global->mmap_file_shrink_counter.dirty_count += sc.nr.dirty;
+		p_hot_cold_file_global->mmap_file_shrink_counter.mmap_free_pages_count += nr_reclaimed;
+	}
+	else{
+		p_hot_cold_file_global->hot_cold_file_shrink_counter.writeback_count += sc.nr.writeback;
+		p_hot_cold_file_global->hot_cold_file_shrink_counter.dirty_count += sc.nr.dirty;
 		p_hot_cold_file_global->hot_cold_file_shrink_counter.free_pages_count += nr_reclaimed;
+	}
 
 	isolate_pages = sc.nr.taken;
 

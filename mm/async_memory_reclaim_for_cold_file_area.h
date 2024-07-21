@@ -111,6 +111,54 @@
 #define MMAP_FILE_NAME_LEN 16
 struct mmap_file_shrink_counter
 {
+	//check_one_file_area_cold_page_and_clear
+	unsigned int scan_mapcount_file_area_count;
+	unsigned int scan_hot_file_area_count;
+	unsigned int find_cache_page_count_from_mmap_file;
+
+	//cache_file_area_mmap_page_solve
+	unsigned int scan_file_area_count_from_cache_file;
+	unsigned int scan_cold_file_area_count_from_cache_file;
+	unsigned int free_pages_from_cache_file;
+
+	//reverse_other_file_area_list
+	unsigned int mapcount_to_warm_file_area_count;
+	unsigned int hot_to_warm_file_area_count;
+	unsigned int refault_to_warm_file_area_count;
+	unsigned int check_refault_file_area_count;
+	unsigned int free_file_area_count;
+
+	//mmap_file_stat_warm_list_file_area_solve
+	unsigned int isolate_lru_pages_from_warm;
+	unsigned int scan_cold_file_area_count_from_warm;
+	unsigned int warm_to_temp_file_area_count;
+
+	//check_file_area_cold_page_and_clear
+	unsigned int isolate_lru_pages_from_temp;
+	unsigned int scan_cold_file_area_count_from_temp;
+	unsigned int temp_to_warm_file_area_count;
+	unsigned int temp_to_temp_head_file_area_count;
+	unsigned int scan_file_area_count_file_move_from_cache;
+
+	//get_file_area_from_mmap_file_stat_list
+	unsigned int scan_file_area_count;
+	unsigned int scan_file_stat_count;
+
+	//scan_mmap_mapcount_file_stat
+	unsigned int mapcount_to_temp_file_area_count_from_mapcount_file;
+
+	//scan_mmap_hot_file_stat
+	unsigned int hot_to_temp_file_area_count_from_hot_file;
+
+	//walk_throuth_all_mmap_file_area
+	unsigned int del_file_area_count;
+	unsigned int del_file_stat_count;
+
+	//shrink_inactive_list_async
+	unsigned int mmap_free_pages_count;
+	unsigned int writeback_count;
+	unsigned int dirty_count;
+#if 0	
 	//扫描的file_area个数
 	unsigned int scan_file_area_count;
 	//扫描的file_stat个数
@@ -122,8 +170,6 @@ struct mmap_file_shrink_counter
 	//扫描到的大文件转小文件的个数
 	unsigned int scan_large_to_small_count;
 
-	//释放的page个数
-	unsigned int free_pages;
 	//隔离的page个数
 	unsigned int isolate_lru_pages;
 	//file_stat的refault链表转移到temp链表的file_area个数
@@ -137,9 +183,67 @@ struct mmap_file_shrink_counter
 	unsigned int del_file_area_count;
 	//mmap的文件，但是没有mmap映射的文件页个数
 	unsigned int in_cache_file_page_count;
+
+	unsigned int scan_file_area_count_from_cache_file;	
+#endif	
 };
 struct hot_cold_file_shrink_counter
 {
+	//cold_file_isolate_lru_pages_and_shrink
+	unsigned int find_mmap_page_count_from_cache_file;
+
+	//file_stat_has_zero_file_area_manage
+	unsigned int del_zero_file_area_file_stat_count;
+	unsigned int scan_zero_file_area_file_stat_count;
+
+	//file_stat_other_list_file_area_solve
+	unsigned int file_area_refault_to_warm_list_count;
+	unsigned int file_area_hot_to_warm_list_count;
+	unsigned int file_area_free_count_from_free_list;
+
+	//file_stat_temp_list_file_area_solve
+	unsigned int scan_cold_file_area_count_from_temp;
+	unsigned int scan_read_file_area_count_from_temp;
+	unsigned int temp_to_hot_file_area_count;
+	unsigned int scan_ahead_file_area_count_from_temp;
+	unsigned int temp_to_warm_file_area_count;
+
+
+	//file_stat_warm_list_file_area_solve
+	unsigned int scan_cold_file_area_count_from_warm;
+	unsigned int scan_read_file_area_count_from_warm;            
+	unsigned int scan_ahead_file_area_count_from_warm;
+	unsigned int scan_file_area_count_from_warm;
+	unsigned int warm_to_temp_file_area_count;
+	unsigned int warm_to_hot_file_area_count;
+
+	//mmap_file_area_cache_page_solve
+	unsigned int scan_cold_file_area_count_from_mmap_file;
+	unsigned int isolate_lru_pages_from_mmap_file;
+	unsigned int free_pages_from_mmap_file;
+
+	//hot_file_stat_solve
+	unsigned int file_area_hot_to_warm_from_hot_file;
+
+	//free_page_from_file_area
+	unsigned int isolate_lru_pages;
+
+	//get_file_area_from_file_stat_list
+	unsigned int scan_file_area_count;
+	unsigned int scan_file_stat_count;
+	unsigned int scan_delete_file_stat_count;
+
+	//walk_throuth_all_file_area
+	unsigned int del_file_area_count;
+	unsigned int del_file_stat_count;
+	
+	//shrink_inactive_list_async
+	unsigned int free_pages_count;
+	unsigned int writeback_count;
+	unsigned int dirty_count;
+
+	unsigned int lru_lock_contended_count;
+#if 0
 	/**get_file_area_from_file_stat_list()函数******/
 	//扫描的file_area个数
 	unsigned int scan_file_area_count;
@@ -154,30 +258,14 @@ struct hot_cold_file_shrink_counter
 	//本次扫描到但没有冷file_area的file_stat个数
 	unsigned int scan_fail_file_stat_count;
 
-	/**free_page_from_file_area()函数******/
-	//释放的page个数
-	unsigned int free_pages;
 	//隔离的page个数
 	unsigned int isolate_lru_pages;
-	//file_stat的refault链表转移到temp链表的file_area个数
-	//unsigned int file_area_refault_to_temp_list_count;
-	unsigned int file_area_refault_to_warm_list_count;
-	//释放的file_area结构个数
-	unsigned int file_area_free_count;
-	//file_stat的hot链表转移到temp链表的file_area个数
-	//unsigned int file_area_hot_to_temp_list_count;
-	unsigned int file_area_hot_to_warm_list_count;
 
-	/**free_page_from_file_area()函数******/
-	//file_stat的hot链表转移到temp链表的file_area个数
-	//unsigned int file_area_hot_to_temp_list_count2;
-	unsigned int file_area_hot_to_warm_list_count2;
 	//释放的file_stat个数
 	unsigned int del_file_stat_count;
 	//释放的file_area个数
 	unsigned int del_file_area_count;
 
-	/**async_shrink_free_page()函数******/
 	unsigned int lock_fail_count;
 	unsigned int writeback_count;
 	unsigned int dirty_count;
@@ -187,9 +275,6 @@ struct hot_cold_file_shrink_counter
 	unsigned int free_pages_fail_count;
 	unsigned int page_unevictable_count; 
 	unsigned int nr_unmap_fail;
-
-	/**file_stat_has_zero_file_area_manage()函数****/
-	unsigned int scan_zero_file_area_file_stat_count;
 
 	//进程抢占lru_lock锁的次数
 	unsigned int lru_lock_contended_count;
@@ -224,10 +309,34 @@ struct hot_cold_file_shrink_counter
 	unsigned int mmap_writeback_count;
 	unsigned int mmap_dirty_count;
 
-	unsigned int scan_cold_file_area_count_from_warm;
-	unsigned int scan_read_file_area_count;
-	
+
+	unsigned int find_mmap_page_count_from_cache_file;
+
+	/**file_stat_has_zero_file_area_manage()函数****/
+	unsigned int scan_zero_file_area_file_stat_count;
+
+	unsigned int file_area_refault_to_warm_list_count;
+	unsigned int file_area_hot_to_warm_list_count;
+	//释放的file_area结构个数
+	unsigned int file_area_free_count_from_free_list;
+
+	unsigned int file_area_hot_to_warm_from_hot_file;
+
+	unsigned int scan_cold_file_area_count_from_temp;
+	unsigned int scan_read_file_area_count_from_temp;
+	unsigned int scan_ahead_file_area_count_from_temp;
+	unsigned int temp_to_hot_file_area_count;
+	unsigned int temp_to_warm_file_area_count;
+
 	unsigned int mmap_scan_cold_file_area_count_from_warm;
+	unsigned int scan_cold_file_area_count_from_mmap_file;
+	unsigned int isolate_lru_pages_from_mmap_file;
+	unsigned int scan_ahead_file_area_count_from_warm;
+	unsigned int scan_file_area_count_from_warm;
+	unsigned int warm_to_temp_file_area_count;
+	unsigned int warm_to_hot_file_area_count;
+	unsigned int scan_cold_file_area_count_from_warm;
+#endif	
 };
 //一个file_area表示了一片page范围(默认6个page)的冷热情况，比如page索引是0~5、6~11、12~17各用一个file_area来表示
 struct file_area
@@ -314,6 +423,8 @@ struct file_stat
 		//mmap文件在扫描完一轮file_stat->temp链表上的file_area，进入冷却期，cooling_off_start_age记录当时的global age
 		unsigned int cooling_off_start_age;
 	};
+	/*记录该文件file_stat被遍历时的全局age*/
+	unsigned int recent_traverse_age;
 	//频繁被访问的文件page对应的file_area存入这个头结点
 	struct list_head file_area_hot;
 	//处于中间状态的file_area结构添加到这个链表，新分配的file_area就添加到这里
@@ -448,7 +559,7 @@ struct hot_cold_file_global
 
 	spinlock_t global_lock;
 	//全局age，每个周期加1
-	unsigned long global_age;
+	unsigned int global_age;
 	//异步内存回收周期，单位s
 	unsigned int global_age_period;
 	//热file_area经过file_area_refault_to_temp_age_dx个周期后，还没有被访问，则移动到file_area_temp链表
@@ -472,10 +583,7 @@ struct hot_cold_file_global
 
 	//发生refault的次数,累加值
 	unsigned long all_refault_count;
-	//在内存回收期间产生的refault file_area个数
-	//unsigned int refault_file_area_count_in_free_page;
-	unsigned int check_refault_file_area_count;
-	
+		
 
 	char support_fs_type;
 	char support_fs_uuid[SUPPORT_FS_UUID_LEN];
@@ -530,6 +638,14 @@ struct hot_cold_file_global
 	unsigned int normal1_zone_free_pages_last;
 	/*内存紧张等级，越大表示内存越紧张，并且还会回收有read标记和ahead标记的file_area的page*/
 	unsigned int memory_pressure_level;
+	
+	//从系统启动到目前释放的page个数
+	unsigned long free_pages;
+	//从系统启动到目前释放的mmap page个数
+	unsigned long free_mmap_pages;
+	//在内存回收期间产生的refault file_area个数
+	unsigned int check_refault_file_area_count;
+	unsigned int check_mmap_refault_file_area_count;
 };
 
 
@@ -1278,8 +1394,6 @@ static int inline can_file_stat_move_to_list_head(struct file_stat *p_file_stat,
 }
 
 extern int hot_file_update_file_status(struct address_space *mapping,struct file_stat *p_file_stat,struct file_area *p_file_area,int access_count,int read_or_write);
-extern void printk_shrink_param(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print);
-extern int hot_cold_file_print_all_file_stat(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print);//is_proc_print:1 通过proc触发的打印
 extern void get_file_name(char *file_name_path,struct file_stat * p_file_stat);
 extern unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct list_head *file_area_free,struct list_head *file_area_have_mmap_page_head);
 extern unsigned int cold_mmap_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct file_area *p_file_area,struct page *page_buf[],int cold_page_count);
