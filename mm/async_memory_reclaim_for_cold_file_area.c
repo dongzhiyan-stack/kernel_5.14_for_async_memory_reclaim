@@ -626,7 +626,7 @@ unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_global *p_
 #endif	
 	//mapcount链表
 	list_for_each_entry_safe_reverse(p_file_area,p_file_area_temp,&p_file_stat_del->file_area_mapcount,file_area_list){
-		if(!file_area_in_mapcount_list(p_file_area) || file_area_in_free_list_error(p_file_area))
+		if(!file_area_in_mapcount_list(p_file_area) || file_area_in_mapcount_list_error(p_file_area))
 			panic("%s file_area:0x%llx status:%d not in file_area_mapcount\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 
 		cold_file_area_delete_quick(p_hot_cold_file_global,p_file_stat_del,p_file_area);
@@ -1871,8 +1871,12 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 		//得到file_area对应的page
 		for(i = 0;i < PAGE_COUNT_IN_AREA;i ++){
 			folio = p_file_area->pages[i];
-			if(!folio)
+			if(!folio){
+				if(shrink_page_printk_open1)
+					printk("%s file_area:0x%llx status:0x%x folio NULL\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+
 				continue;
+			}
 			page = &folio->page;
 			if (page && !xa_is_value(page)) {
 				if (!trylock_page(page)){
@@ -4425,6 +4429,8 @@ static int async_memory_reclaim_main_thread(void *p){
 	while(!kthread_should_stop()){
 		/*清空上一轮内存回收统计参数*/
 		memset(&p_hot_cold_file_global->hot_cold_file_shrink_counter,0,sizeof(struct hot_cold_file_shrink_counter));
+		memset(&p_hot_cold_file_global->mmap_file_shrink_counter,0,sizeof(struct mmap_file_shrink_counter));
+
 		/*回收cache文件页*/
 		walk_throuth_all_file_area(p_hot_cold_file_global);
 		/*回收mmap文件页*/

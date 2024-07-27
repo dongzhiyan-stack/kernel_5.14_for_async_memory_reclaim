@@ -845,8 +845,10 @@ FILE_STATUS_ATOMIC(mmap_file)
 FILE_STATUS_ATOMIC(from_cache_file)
 
 extern struct hot_cold_file_global hot_cold_file_global_info;
+
 extern unsigned long async_memory_reclaim_status;
 extern unsigned int open_file_area_printk;
+extern unsigned int open_file_area_printk_important;
 /** file_area的page bit/writeback mark bit/dirty mark bit/towrite mark bit统计**************************************************************/
 #define FILE_AREA_PAGE_COUNT_SHIFT (XA_CHUNK_SHIFT + PAGE_COUNT_IN_AREA_SHIFT)//6+2
 #define FILE_AREA_PAGE_COUNT_MASK ((1 << FILE_AREA_PAGE_COUNT_SHIFT) - 1)//0xFF 
@@ -866,6 +868,12 @@ extern unsigned int open_file_area_printk;
 #define FILE_AREA_PRINT(fmt,...) \
     do{ \
         if(open_file_area_printk) \
+			printk(fmt,##__VA_ARGS__); \
+	}while(0);
+
+#define FILE_AREA_PRINT1(fmt,...) \
+    do{ \
+        if(open_file_area_printk_important) \
 			printk(fmt,##__VA_ARGS__); \
 	}while(0);
 

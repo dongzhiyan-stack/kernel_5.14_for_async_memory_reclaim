@@ -450,7 +450,7 @@ int folio_migrate_mapping_for_file_area(struct address_space *mapping,
 		panic("%s mapping:0x%llx folio:0x%llx != p_file_area->pages:0x%llx\n",__func__,(u64)mapping,(u64)folio,(u64)p_file_area->pages[page_offset_in_file_area]);
 	}
 	p_file_area->pages[page_offset_in_file_area] = newfolio;
-	FILE_AREA_PRINT("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx newfolio:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,(u64)newfolio,page_offset_in_file_area);
+	FILE_AREA_PRINT1("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx newfolio:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,(u64)newfolio,page_offset_in_file_area);
 
 
 	/*

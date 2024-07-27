@@ -60,6 +60,7 @@
 #include "async_memory_reclaim_for_cold_file_area.h"
 unsigned int xarray_tree_node_cache_hit;
 unsigned int open_file_area_printk = 0;
+unsigned int open_file_area_printk_important = 0;
 int is_test_file(struct address_space *mapping)
 {
 #if 0
@@ -233,7 +234,7 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
 		panic("%s mapping:0x%llx folio:0x%llx != p_file_area->pages:0x%llx\n",__func__,(u64)mapping,(u64)folio,(u64)p_file_area->pages[page_offset_in_file_area]);
 	}
 	p_file_area->pages[page_offset_in_file_area] = NULL;
-	FILE_AREA_PRINT("%s mapping:0x%llx folio:0x%llx index:%ld p_file_area:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)folio,folio->index,(u64)p_file_area,page_offset_in_file_area);
+	FILE_AREA_PRINT1("%s mapping:0x%llx folio:0x%llx index:%ld p_file_area:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)folio,folio->index,(u64)p_file_area,page_offset_in_file_area);
 
 	folio->mapping = NULL;
 	mapping->nrpages -= nr;
@@ -553,7 +554,7 @@ find_page_from_file_area:
 			p_file_stat->xa_node_cache_base_index = -1;
 			p_file_stat->xa_node_cache = NULL;
 		}
-		FILE_AREA_PRINT("%s mapping:0x%llx folio:0x%llx index:%ld p_file_area:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)folio,folio->index,(u64)p_file_area,page_offset_in_file_area);
+		FILE_AREA_PRINT1("%s mapping:0x%llx folio:0x%llx index:%ld p_file_area:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)folio,folio->index,(u64)p_file_area,page_offset_in_file_area);
 
 		/*清理这个page在file_area->file_area_statue的对应的bit位，表示这个page被释放了*/
 		clear_file_area_page_bit(p_file_area,page_offset_in_file_area);
@@ -1398,7 +1399,7 @@ void replace_page_cache_page_for_file_area(struct page *old, struct page *new)
 		panic("%s mapping:0x%llx old:0x%llx != p_file_area->pages:0x%llx\n",__func__,(u64)mapping,(u64)old,(u64)p_file_area->pages[page_offset_in_file_area]);
 	}
 	p_file_area->pages[page_offset_in_file_area] = fnew;
-	FILE_AREA_PRINT("%s mapping:0x%llx p_file_area:0x%llx old:0x%llx fnew:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)old,(u64)fnew,page_offset_in_file_area);
+	FILE_AREA_PRINT1("%s mapping:0x%llx p_file_area:0x%llx old:0x%llx fnew:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)old,(u64)fnew,page_offset_in_file_area);
 
 	old->mapping = NULL;
 	/* hugetlb pages do not participate in page cache accounting. */
@@ -1604,7 +1605,7 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 
 find_file_area:
 		set_file_area_page_bit(p_file_area,page_offset_in_file_area);
-		FILE_AREA_PRINT("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx index:%ld page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,index,page_offset_in_file_area);
+		FILE_AREA_PRINT1("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx index:%ld page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,index,page_offset_in_file_area);
 
 		if(NULL != p_file_area->pages[page_offset_in_file_area])
 			panic("%s p_file_area->pages:0x%llx != NULL error folio:0x%llx\n",__func__,(u64)p_file_area->pages[page_offset_in_file_area],(u64)folio);

@@ -1225,7 +1225,9 @@ static noinline int reverse_other_file_area_list(struct hot_cold_file_global *p_
 			for(i = 0;i < PAGE_COUNT_IN_AREA;i ++){
 				folio = p_file_area->pages[i];
 				if(!folio){
-					printk("%s file_area:0x%llx status:0x%x folio NULL\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+					if(shrink_page_printk_open1)
+						printk("%s file_area:0x%llx status:0x%x folio NULL\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+
 					continue;
 				}
 
@@ -3451,7 +3453,7 @@ int walk_throuth_all_mmap_file_area(struct hot_cold_file_global *p_hot_cold_file
 {
 	int ret;
 	unsigned int scan_file_area_max,scan_file_stat_max;
-	unsigned int del_file_area_count,del_file_stat_count;
+	unsigned int del_file_area_count = 0,del_file_stat_count = 0;
 	struct file_stat *p_file_stat,*p_file_stat_temp;
 
 	if(shrink_page_printk_open)

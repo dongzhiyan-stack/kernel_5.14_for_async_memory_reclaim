@@ -113,6 +113,7 @@ extern unsigned int file_area_in_update_count;
 extern unsigned int file_area_in_update_lock_count;
 extern unsigned int file_area_move_to_head_count;
 extern unsigned int open_file_area_printk;
+extern unsigned int open_file_area_printk_important;
 #endif
 /* Constants used for minimum and  maximum */
 #ifdef CONFIG_LOCKUP_DETECTOR
@@ -2625,6 +2626,16 @@ static struct ctl_table vm_table[] = {
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_TWO_HUNDRED,
 	},
+	{
+		.procname	= "open_file_area_printk_important",
+		.data		= &open_file_area_printk_important,
+		.maxlen		= sizeof(open_file_area_printk_important),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_TWO_HUNDRED,
+	},
+
 #endif
 
 #ifdef CONFIG_HUGETLB_PAGE
