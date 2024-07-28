@@ -106,15 +106,7 @@
 #endif
 
 #if defined(CONFIG_SYSCTL)
-
-#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
-extern unsigned int xarray_tree_node_cache_hit;
-extern unsigned int file_area_in_update_count;
-extern unsigned int file_area_in_update_lock_count;
-extern unsigned int file_area_move_to_head_count;
-extern unsigned int open_file_area_printk;
-extern unsigned int open_file_area_printk_important;
-#endif
+#include "../mm/async_memory_reclaim_for_cold_file_area.h"
 /* Constants used for minimum and  maximum */
 #ifdef CONFIG_LOCKUP_DETECTOR
 static int sixty = 60;
@@ -2635,7 +2627,24 @@ static struct ctl_table vm_table[] = {
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_TWO_HUNDRED,
 	},
-
+	{
+		.procname	= "enable_xas_node_cache",
+		.data		= &enable_xas_node_cache,
+		.maxlen		= sizeof(enable_xas_node_cache),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_TWO_HUNDRED,
+	},
+	{
+		.procname	= "enable_update_file_area_age",
+		.data		= &enable_update_file_area_age,
+		.maxlen		= sizeof(enable_update_file_area_age),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_TWO_HUNDRED,
+	},
 #endif
 
 #ifdef CONFIG_HUGETLB_PAGE

@@ -644,8 +644,14 @@ struct hot_cold_file_global
 	//从系统启动到目前释放的mmap page个数
 	unsigned long free_mmap_pages;
 	//在内存回收期间产生的refault file_area个数
-	unsigned int check_refault_file_area_count;
-	unsigned int check_mmap_refault_file_area_count;
+	unsigned long check_refault_file_area_count;
+	unsigned long check_mmap_refault_file_area_count;
+	unsigned long update_file_area_temp_list_count;
+	unsigned long update_file_area_warm_list_count;
+	unsigned long update_file_area_free_list_count;
+
+	unsigned long update_file_area_other_list_count;
+	unsigned long update_file_area_move_to_head_count;
 };
 
 
@@ -723,6 +729,14 @@ FILE_AREA_LIST_STATUS(mapcount_list)
 FILE_AREA_STATUS(ahead)
 FILE_AREA_STATUS(read)
 
+static inline int get_file_area_list_status(struct file_area *p_file_area)
+{
+	return p_file_area->file_area_state & FILE_AREA_LIST_MASK;
+}
+
+#define file_area_in_temp_list_not_have_hot_status (1 << F_file_area_in_temp_list)
+#define file_area_in_warm_list_not_have_hot_status (1 << F_file_area_in_warm_list)
+#define file_area_in_free_list_not_have_refault_status (1 << F_file_area_in_free_list)
 
 /*******file_stat状态**********************************************************/
 enum file_stat_status{//file_area_state是long类型，只有64个bit位可设置
@@ -847,8 +861,18 @@ FILE_STATUS_ATOMIC(from_cache_file)
 extern struct hot_cold_file_global hot_cold_file_global_info;
 
 extern unsigned long async_memory_reclaim_status;
-extern unsigned int open_file_area_printk;
-extern unsigned int open_file_area_printk_important;
+extern unsigned int file_area_in_update_count;
+extern unsigned int file_area_in_update_lock_count;
+extern unsigned int file_area_move_to_head_count;
+
+extern unsigned int enable_xas_node_cache;
+extern unsigned int enable_update_file_area_age;
+extern int shrink_page_printk_open1;
+extern int shrink_page_printk_open;
+extern unsigned int xarray_tree_node_cache_hit;
+extern int open_file_area_printk;
+extern int open_file_area_printk_important;
+
 /** file_area的page bit/writeback mark bit/dirty mark bit/towrite mark bit统计**************************************************************/
 #define FILE_AREA_PAGE_COUNT_SHIFT (XA_CHUNK_SHIFT + PAGE_COUNT_IN_AREA_SHIFT)//6+2
 #define FILE_AREA_PAGE_COUNT_MASK ((1 << FILE_AREA_PAGE_COUNT_SHIFT) - 1)//0xFF 
@@ -1401,7 +1425,7 @@ static int inline can_file_stat_move_to_list_head(struct file_stat *p_file_stat,
 	return 1;
 }
 
-extern int hot_file_update_file_status(struct address_space *mapping,struct file_stat *p_file_stat,struct file_area *p_file_area,int access_count,int read_or_write);
+extern void hot_file_update_file_status(struct address_space *mapping,struct file_stat *p_file_stat,struct file_area *p_file_area,int access_count,int read_or_write);
 extern void get_file_name(char *file_name_path,struct file_stat * p_file_stat);
 extern unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct list_head *file_area_free,struct list_head *file_area_have_mmap_page_head);
 extern unsigned int cold_mmap_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct file_area *p_file_area,struct page *page_buf[],int cold_page_count);
