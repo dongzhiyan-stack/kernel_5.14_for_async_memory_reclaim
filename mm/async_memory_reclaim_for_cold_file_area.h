@@ -1335,8 +1335,17 @@ static int inline file_inode_lock(struct file_stat * p_file_stat)
 	/*如果inode引用计数是0了，说明没人再用，加锁失败。并且iput()强制触发释放掉该inode，否则会成为只有一个文件页的file_stat，
 	 *但是又因加锁失败而无法回收，对内存回收干扰。但iput要放到spin_unlock(&inode->i_lock)后*/
 	else if(atomic_read(&inode->i_count) == 0){
-		//iput(inode);	
-		lock_fail = 2;
+		if(!hlist_empty(&inode->i_dentry)){
+			struct dentry *dentry = hlist_entry(inode->i_dentry.first, struct dentry, d_u.d_alias);
+			if(dentry)
+				printk("%s file_stat:0x%llx inode:0x%llx dentry:0x%llx %s icount0!!!!!!!\n",__func__,(u64)p_file_stat,(u64)inode,(u64)dentry,dentry->d_name.name);
+			else 
+				printk("%s file_stat:0x%llx inode:0x%llx dentry:0x%llx icount0!!!!!!!\n",__func__,(u64)p_file_stat,(u64)inode,(u64)dentry);
+		}else
+			printk("%s file_stat:0x%llx inode:0x%llx icount0!!!!!!! i_nlink:%d nrpages:%ld\n",__func__,(u64)p_file_stat,(u64)inode,inode->i_nlink,inode->i_mapping->nrpages);
+		//iput(inode);
+
+		//lock_fail = 2;引用计数是0是正常现象，此时也能加锁成功，只要保证inode此时不是已经释放的状态
 	}
 
 	//加锁成功则令inode引用计数加1，之后就不用担心inode被其他进程释放掉
@@ -1346,8 +1355,12 @@ static int inline file_inode_lock(struct file_stat * p_file_stat)
 	spin_unlock(&inode->i_lock);
 	rcu_read_unlock();
 
+	/* 这里强制令inode引用计数减1，会导致iput引用计数异常减1，导致删除文件时ihold()中发现inode引用计数少了1而触发warn。
+	 * 还推测可能会inode引用引用计数少了1而被提前iput释放，而此时还有进程在使用这个已经释放的文件inode，就是访问非法内存了*/
+#if 0	
 	if(2 == lock_fail)
 		iput(inode);
+#endif
 
 	return (0 == lock_fail);
 }

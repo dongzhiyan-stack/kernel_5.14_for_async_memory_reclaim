@@ -1596,12 +1596,13 @@ void get_file_name(char *file_name_path,struct file_stat * p_file_stat)
 	if(p_file_stat->mapping && p_file_stat->mapping->host && !hlist_empty(&p_file_stat->mapping->host->i_dentry)){
 		inode = p_file_stat->mapping->host;
 		spin_lock(&inode->i_lock);
-		//如果inode的引用计数是0，说明inode已经在释放环节了，不能再使用了
-		if(atomic_read(&inode->i_count) > 0){
-			dentry = hlist_entry(p_file_stat->mapping->host->i_dentry.first, struct dentry, d_u.d_alias);
+		/*如果inode的引用计数是0，说明inode已经在释放环节了，不能再使用了。现在发现不一定，改为hlist_empty(&inode->i_dentry)判断*/
+		if(/*atomic_read(&inode->i_count) > 0*/ !hlist_empty(&inode->i_dentry)){
+			dentry = hlist_entry(inode->i_dentry.first, struct dentry, d_u.d_alias);
 			//__dget(dentry);------这里不再__dget,因为全程有spin_lock(&inode->i_lock)加锁
-			if(dentry)
-				snprintf(file_name_path,MAX_FILE_NAME_LEN - 2,"dentry:0x%llx %s",(u64)dentry,/*dentry->d_iname*/dentry->d_name.name);
+			if(dentry){
+				snprintf(file_name_path,MAX_FILE_NAME_LEN - 2,"i_count:%d dentry:0x%llx %s",atomic_read(&inode->i_count),(u64)dentry,/*dentry->d_iname*/dentry->d_name.name);
+			}
 			//dput(dentry);
 		}
 		spin_unlock(&inode->i_lock);
@@ -1615,7 +1616,7 @@ static int print_one_list_file_stat(struct hot_cold_file_global *p_hot_cold_file
 	char file_name_path[MAX_FILE_NAME_LEN];
 	unsigned int scan_file_stat_count = 0;
 
-	if(!list_empty(&p_hot_cold_file_global->file_stat_hot_head)){
+	if(!list_empty(file_stat_temp_head)){
 		if(is_proc_print)
 			seq_printf(m,"%s",file_stat_name);
 		else	
@@ -1878,9 +1879,10 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 
 	//lock_file_stat(p_file_stat,0);
 	//rcu_read_lock();
-	if(0 == file_inode_lock(p_file_stat))
+	if(0 == file_inode_lock(p_file_stat)){
+		printk("%s file_stat:0x%llx status 0x%lx inode lock fail\n",__func__,(u64)p_file_stat,p_file_stat->file_stat_status);
 		return 0;
-
+    }
 	/*执行到这里，就不用担心该inode会被其他进程iput释放掉*/
 
 	mapping = p_file_stat->mapping;
