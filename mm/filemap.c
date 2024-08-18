@@ -227,10 +227,13 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
 		panic("%s mapping:0x%llx folio:0x%llx file_area:0x%llx\n",__func__,(u64)mapping,(u64)folio,(u64)p_file_area);
 
 	p_file_area = entry_to_file_area(p_file_area);
-	if(folio != p_file_area->pages[page_offset_in_file_area]){
+	//if(folio != p_file_area->pages[page_offset_in_file_area]){
+	if(folio != rcu_dereference(p_file_area->pages[page_offset_in_file_area])){
 		panic("%s mapping:0x%llx folio:0x%llx != p_file_area->pages:0x%llx\n",__func__,(u64)mapping,(u64)folio,(u64)p_file_area->pages[page_offset_in_file_area]);
 	}
-	p_file_area->pages[page_offset_in_file_area] = NULL;
+	//p_file_area->pages[page_offset_in_file_area] = NULL;
+	rcu_assign_pointer(p_file_area->pages[page_offset_in_file_area], NULL);
+
 	FILE_AREA_PRINT1("%s mapping:0x%llx folio:0x%llx index:%ld p_file_area:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)folio,folio->index,(u64)p_file_area,page_offset_in_file_area);
 
 	folio->mapping = NULL;
@@ -240,7 +243,8 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
 	if(mapping->rh_reserved3){
 		printk("%s delete mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
 	}
-
+    
+	smp_wmb();
 	//清理这个page在file_area->file_area_statue的对应的bit位，表示这个page被释放了
 	clear_file_area_page_bit(p_file_area,page_offset_in_file_area);
 	/* 如果page在xarray tree有dirty、writeback、towrite mark标记，必须清理掉，否则将来这个槽位的再有新的page，
@@ -492,7 +496,9 @@ static void page_cache_delete_batch_for_file_area(struct address_space *mapping,
 		p_file_area = entry_to_file_area(p_file_area);
 
 find_page_from_file_area:
-		folio = p_file_area->pages[page_offset_in_file_area];
+		//folio = p_file_area->pages[page_offset_in_file_area];
+		folio = rcu_dereference(p_file_area->pages[page_offset_in_file_area]);
+
 		/*page_cache_delete_batch()函数能进到这里folio一定不是NULL，但是现在无法保证，需要额外判定。但不能break，而是要去查找
 		 *file_area里的下一个page。因为 xas_for_each()、xas_find()等函数现在从xarray tree查找的是file_area，不是page。只有
 		 *找到的file_area是NULL，才能break结束查找。错了，原page_cache_delete_batch()函数for循环退出条件就有folio是NULL.
@@ -543,7 +549,8 @@ find_page_from_file_area:
 
 		i++;
 		//xas_store(&xas, NULL);
-		p_file_area->pages[page_offset_in_file_area] = NULL;
+		//p_file_area->pages[page_offset_in_file_area] = NULL;
+		rcu_assign_pointer(p_file_area->pages[page_offset_in_file_area], NULL);
 		total_pages += folio_nr_pages(folio);
 
 		/*page_cache_delete_for_file_area函数有详细说明*/
@@ -553,6 +560,7 @@ find_page_from_file_area:
 		}
 		FILE_AREA_PRINT1("%s mapping:0x%llx folio:0x%llx index:%ld p_file_area:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)folio,folio->index,(u64)p_file_area,page_offset_in_file_area);
 
+		smp_wmb();
 		/*清理这个page在file_area->file_area_statue的对应的bit位，表示这个page被释放了*/
 		clear_file_area_page_bit(p_file_area,page_offset_in_file_area);
 		/* 如果page在xarray tree有dirty、writeback、towrite mark标记，必须清理掉，否则将来这个槽位的再有新的page，
@@ -1392,7 +1400,8 @@ void replace_page_cache_page_for_file_area(struct page *old, struct page *new)
 		panic("%s mapping:0x%llx p_file_area:0x%llx error\n",__func__,(u64)mapping,(u64)p_file_area);
 
 	p_file_area = entry_to_file_area(p_file_area);
-	if(old != (struct page *)p_file_area->pages[page_offset_in_file_area]){
+	//if(old != (struct page *)p_file_area->pages[page_offset_in_file_area]){
+	if(old != (struct page *)rcu_dereference(p_file_area->pages[page_offset_in_file_area])){
 		panic("%s mapping:0x%llx old:0x%llx != p_file_area->pages:0x%llx\n",__func__,(u64)mapping,(u64)old,(u64)p_file_area->pages[page_offset_in_file_area]);
 	}
 	p_file_area->pages[page_offset_in_file_area] = fnew;
@@ -1564,7 +1573,8 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 				p_file_area = entry_to_file_area(entry);
 
 				//page已经添加到file_area了
-				if(NULL != p_file_area->pages[page_offset_in_file_area]){
+				//if(NULL != p_file_area->pages[page_offset_in_file_area]){
+				if(NULL != rcu_dereference(p_file_area->pages[page_offset_in_file_area])){
 					xas_set_err(&xas, -EEXIST);
 					goto unlock;
 				}
@@ -1609,8 +1619,45 @@ find_file_area:
 		if(NULL != p_file_area->pages[page_offset_in_file_area])
 			panic("%s p_file_area->pages:0x%llx != NULL error folio:0x%llx\n",__func__,(u64)p_file_area->pages[page_offset_in_file_area],(u64)folio);
 
+		/*这里跟delete file_area page的两个函数配合，在set/clear file_area->file_area_state和向file_area->pages[]保存page/设置NULL
+		 *之间都加了个内存屏障。虽然这3个函数的这些操作前都加了spin_lock(&mapping->host->i_lock锁，但是分析spin_lock/spin_unlock
+		 *源码后，spin_lock加锁能100%保证对两个变量的赋值一定按照顺序生效吗。比如该函数里执行
+		 *"set_file_area_page_bit(p_file_area,page_offset_in_file_area)" 和 "p_file_area->pages[page_offset_in_file_area] = folio"
+		 *后，delete_from_page_cache_batch_for_file_area()函数先执行
+		 *"folio = p_file_area->pages[page_offset_in_file_area] ;if(!folio) goto next_page"和
+		 *"clear_file_area_page_bit(p_file_area,page_offset_in_file_area)" ，存在一种可能，folio = p_file_area->pages[page_offset_in_file_area]
+		 *得到的folio不是NULL，cache在多核cpu之间已经同步生效。但是file_area->file_area_state里的page bit还是0，set操作还没生效。
+		 *于是clear_file_area_page_bit(p_file_area,page_offset_in_file_area)里触发crash，因为file_area->pages[]里存在page，但是对应的
+		 *file_area->file_area_state里的page bit是0，就会触发crash。因此在这两个函数里，才进行
+		 *"set/clear file_area->file_area_state跟向file_area->pages[]保存page/设置NULL，之间都加了个内存屏障"，确保该函数里
+		 *"set_file_area_page_bit(p_file_area,page_offset_in_file_area)"一定先在"p_file_area->pages[page_offset_in_file_area] = folio"
+		 *生效。反过来，delete_from_page_cache_batch_for_file_area()和page_cache_delete_for_file_area()函数里也要加同样的内存屏障，
+		 *确保对"p_file_area->pages[page_offset_in_file_area]=NULL" 先于"clear_file_area_page_bit(p_file_area,page_offset_in_file_area)"
+		 *之前生效，然后保证该函数先看到p_file_area->pages[page_offset_in_file_area]里的page是NULL，
+		 *"set_file_area_page_bit(p_file_area,page_offset_in_file_area)"执行后，p_file_area->pages[page_offset_in_file_area]一定是NULL，
+		 *否则"if(NULL != p_file_area->pages[page_offset_in_file_area])"会触发crash。
+		 *
+		 * 但是理论上spin_lock加锁肯定能防护变量cpu cache同步延迟问题，加个smp_wmb/smp_mb内存屏障没啥用。此时发现个问题，我在看内核原生
+		 * page_cache_delete/page_cache_delete_batch/__filemap_add_folio 向xarray tree保存page指针或者删除page，都是spin_lock(xas_lock)
+		 * 加锁后，执行xas_store(&xas, folio)或xas_store(&xas, folio)，里边最后都是执行rcu_assign_pointer(*slot, entry)把page指针或者NULL
+		 * 保存到xarray tree里父节点的槽位。并且这些函数xas_load查找page指针时，里边都是执行rcu_dereference_check(node->slots[offset],...)
+		 * 返回page指针。于是，在这3个函数里，查找page指针 或者 保存page指针到xarray tree也都使用rcu_assign_pointer和rcu_dereference_check。
+		 * 目的是：这两个rcu函数都是对变量的volatile访问，再加上内存屏障，绝对保证对变量的访问没有cache影响，并且每次都是从内存中访问。
+		 * 实在没其他思路了，只能先这样考虑了。
+		 *
+		 * 还有一点，我怀疑这个bug的触发时机跟我的另一个bug有关:file_stat_lock()里遇到引用计数是0的inode，则错误的执行iput()释放掉该inode。
+		 * 这导致inode的引用计数是-1，后续该inode又被进程访问，inode的引用计数是0.结果此时触发了关机，这导致该inode被进程访问时，该inode
+		 * 被umount进程强制执行evict()释放掉。inode一边被使用一边被释放，可能会触发未知问题。虽然umount进程会执行
+		 * page_cache_delete_batch_for_file_area()释放文件inode的page，而此时访问该inode的进程可能正执行__filemap_add_folio_for_file_area()
+		 * 向file_area->pages[]保存page并设置page在file_area->file_area_state的bit位，但是两个进程都是spin_lock(&mapping->host->i_lock加锁
+		 * 进行的操作，不会有问题吧?其他会导致有问题的场景，也没有。现在已经解决"file_stat_lock()里遇到引用计数是0的inode，则错误的执行
+		 * iput()释放掉该inode"的bug，这个问题估计不会再出现。以上就是针对"20240723  复制新的虚拟机后 clear_file_area_page_bit crash"
+		 * case的最终分析，被折磨了快3周!!!!!!!!!!!!!
+		 */
+		smp_wmb();
 		//folio指针保存到file_area
-		p_file_area->pages[page_offset_in_file_area] = folio;
+		//p_file_area->pages[page_offset_in_file_area] = folio;
+		rcu_assign_pointer(p_file_area->pages[page_offset_in_file_area], folio);
 
 		mapping->nrpages += nr;
 

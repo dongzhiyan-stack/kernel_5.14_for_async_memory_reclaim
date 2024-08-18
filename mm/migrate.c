@@ -446,7 +446,8 @@ int folio_migrate_mapping_for_file_area(struct address_space *mapping,
 		panic("%s mapping:0x%llx p_file_area:0x%llx error\n",__func__,(u64)mapping,(u64)p_file_area);
 
 	p_file_area = entry_to_file_area(p_file_area);
-	if(folio != (struct folio *)p_file_area->pages[page_offset_in_file_area]){
+	//if(folio != (struct folio *)p_file_area->pages[page_offset_in_file_area]){
+	if(folio != (struct folio *)rcu_dereference(p_file_area->pages[page_offset_in_file_area])){
 		panic("%s mapping:0x%llx folio:0x%llx != p_file_area->pages:0x%llx\n",__func__,(u64)mapping,(u64)folio,(u64)p_file_area->pages[page_offset_in_file_area]);
 	}
 	p_file_area->pages[page_offset_in_file_area] = newfolio;
