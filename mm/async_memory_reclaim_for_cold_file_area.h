@@ -586,7 +586,8 @@ struct hot_cold_file_global
 		
 
 	char support_fs_type;
-	char support_fs_uuid[SUPPORT_FS_UUID_LEN];
+	char support_fs_uuid[SUPPORT_FS_COUNT][SUPPORT_FS_UUID_LEN];
+	char support_fs_against_uuid[SUPPORT_FS_UUID_LEN];
 	char support_fs_name[SUPPORT_FS_COUNT][SUPPORT_FS_NAME_LEN];
 
 	/**针对mmap文件新增的****************************/
@@ -1078,8 +1079,10 @@ static inline void is_cold_file_area_reclaim_support_fs(struct address_space *ma
 		}
 	}
 	else if(SUPPORT_FS_UUID == hot_cold_file_global_info.support_fs_type){
-		if(0 == memcmp(sb->s_uuid.b , hot_cold_file_global_info.support_fs_uuid , SUPPORT_FS_UUID_LEN))
-			mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;
+		if(0 == memcmp(sb->s_uuid.b , hot_cold_file_global_info.support_fs_uuid[0], SUPPORT_FS_UUID_LEN) || 0 == memcmp(sb->s_uuid.b , hot_cold_file_global_info.support_fs_uuid[1], SUPPORT_FS_UUID_LEN)){
+			if(memcmp(sb->s_uuid.b , hot_cold_file_global_info.support_fs_against_uuid, SUPPORT_FS_UUID_LEN))
+			    mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;
+		}	
 	}
 }
 /* 测试文件支持file_area形式读写文件和内存回收，并且已经分配了file_stat

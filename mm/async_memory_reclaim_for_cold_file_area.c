@@ -4604,15 +4604,18 @@ static int __init hot_cold_file_init(void)
 	return hot_cold_file_proc_init(&hot_cold_file_global_info);
 }
 subsys_initcall(hot_cold_file_init);
-int uuid_string_convert(char *src_buf,unsigned char *dst_buf)
+
+int one_fs_uuid_string_convert(char **src_buf,unsigned char *dst_buf)
 {
 	char hex_buf[2];
 	unsigned char hex_buf_count = 0;
 	unsigned char dst_buf_count = 0;
 
-	char *p = src_buf;
-	printk("%s uuid_str:%s\n",__func__,src_buf);
-	while(*p){
+	char *p = *src_buf;
+	printk("%s uuid_str:%s\n",__func__,*src_buf);
+	/*字符串尾或者','字符则退出，遇到','表示这是一个新的uuid*/
+	while(*p && *p != ','){
+		/*每一个uuid中间的分隔符，跳过*/
 		if(*p == '-'){
 			p ++;
 			continue;
@@ -4633,6 +4636,7 @@ int uuid_string_convert(char *src_buf,unsigned char *dst_buf)
 				return -1;
 			}
 			dst_buf[dst_buf_count] = hex_buf[0] * 16 + hex_buf[1];
+
 			hex_buf_count = 0;
 			printk("%x\n",dst_buf[dst_buf_count]);
 			dst_buf_count++;
@@ -4643,7 +4647,48 @@ int uuid_string_convert(char *src_buf,unsigned char *dst_buf)
 		printk("%s end hex_buf_count:%d invalid\n",__func__,dst_buf_count);
 		return -1;
 	}
+
+	if(*p == ','){
+		/*p加1令src_buf指向下一个uuid第一个字符*/
+		p ++;
+		*src_buf = p;
+		return 1;
+	}
 	return 0;
+}
+int uuid_string_convert(char *buf)
+{
+	int ret = 0;
+	int support_fs_uuid_count = 0;
+	int support_against_fs_uuid_count = 0;
+	char *dst_buf;
+	char *src_buf = buf;
+
+	do{
+		/*遇到!表示这是一个新的uuid开始，并且是一个排斥的文件系统，禁止该文件系统进行file_area读写*/
+		if(*src_buf == '!'){
+			if(support_against_fs_uuid_count >= 1)
+				break;
+
+			/*加1令src_buf指向下一个uuid第一个字符*/
+			src_buf ++;
+			dst_buf = hot_cold_file_global_info.support_fs_against_uuid;
+			support_against_fs_uuid_count ++;
+		}else{
+			if(support_fs_uuid_count >= SUPPORT_FS_COUNT)
+				break;
+
+			dst_buf = hot_cold_file_global_info.support_fs_uuid[support_fs_uuid_count];
+			support_fs_uuid_count ++;
+		}
+
+		ret = one_fs_uuid_string_convert(&src_buf,dst_buf);
+
+		/*ret 0:uuid字符串结束  1:还有下一个fs uuid需要遍历 -1:遇到错误立即返回*/
+	}while(ret == 1);
+
+	printk("%s ret:%d support_fs_uuid_count:%d\n",__func__,ret,support_fs_uuid_count);
+	return ret;
 }
 static int __init setup_cold_file_area_reclaim_support_fs(char *buf)
 {
@@ -4687,12 +4732,12 @@ static int __init setup_cold_file_area_reclaim_support_fs(char *buf)
 			printk("1_3:setup_cold_file_area_reclaim_support_fs:%s fs_count:%d fs_name_len:%d\n",hot_cold_file_global_info.support_fs_name[fs_count],fs_count,fs_name_len);
 		}
 	}
-	//cold_file_area_reclaim_support_fs=uuid=bee5938b-bdc6-463e-88a0-7eb08eb71dc3
+	//cold_file_area_reclaim_support_fs=uuid=bee5938b-bdc6-463e-88a0-7eb08eb71dc3,8797e618-4fdd-4d92-a554-b553d1985a1a,!fcba6c29-e747-48a0-97a6-7bd8b0639e87
 	else if (!strncmp(buf, "uuid", 4)) {
 		buf += 5;
 		printk("2:setup_cold_file_area_reclaim_support_fs:%s\n",buf);
 		memset(hot_cold_file_global_info.support_fs_uuid,0,SUPPORT_FS_UUID_LEN);
-		if(uuid_string_convert(buf,hot_cold_file_global_info.support_fs_uuid))
+		if(uuid_string_convert(buf))
 			return -1;
 
 		hot_cold_file_global_info.support_fs_type = SUPPORT_FS_UUID;
