@@ -1481,7 +1481,7 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 	int huge = folio_test_hugetlb(folio);
 	bool charged = false;
 	long nr = 1;
-	struct file_stat *p_file_stat;
+	struct file_stat_base *p_file_stat;
 	struct file_area *p_file_area;
 	//令page索引与上0x3得到它在file_area的pages[]数组的下标
 	unsigned int page_offset_in_file_area = index & PAGE_COUNT_IN_AREA_MASK;
@@ -1558,7 +1558,7 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 				goto unlock;
 			}
 		}else
-			p_file_stat = (struct file_stat *)mapping->rh_reserved1;
+			p_file_stat = (struct file_stat_base *)mapping->rh_reserved1;
 
 		if(file_stat_in_delete(p_file_stat))
 			panic("%s %s %d file_stat:0x%llx status:0x%lx in delete\n",__func__,current->comm,current->pid,(u64)p_file_stat,p_file_stat->file_stat_status);
@@ -2940,7 +2940,8 @@ static void *mapping_get_entry_for_file_area(struct address_space *mapping, pgof
 	unsigned int page_offset_in_file_area = index & PAGE_COUNT_IN_AREA_MASK;
 	rcu_read_lock();
 
-	p_file_stat = (struct file_stat *)mapping->rh_reserved1;
+	//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
+	p_file_stat = (struct file_stat_base *)mapping->rh_reserved1;
 	/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
 	 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
 	 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
@@ -4425,7 +4426,7 @@ static void filemap_get_read_batch_for_file_area(struct address_space *mapping,
 	unsigned long folio_index_from_xa_index;
 	
 	rcu_read_lock();
-	p_file_stat = (struct file_stat *)mapping->rh_reserved1;
+	p_file_stat = (struct file_stat_base *)mapping->rh_reserved1;
 	/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
 	 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
 	 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
