@@ -88,7 +88,7 @@ int is_test_file(struct address_space *mapping)
 #endif	
 	return 0;
 }
-inline struct  file_area * find_file_area_from_xarray_cache_node(struct xa_state *xas,struct file_stat *p_file_stat, pgoff_t index)
+inline struct  file_area * find_file_area_from_xarray_cache_node(struct xa_state *xas,struct file_stat_base *p_file_stat, pgoff_t index)
 {
 	//这段代码必须放到rcu lock里，保证node结构不会被释放
 	//判断要查找的page是否在xarray tree的cache node里
@@ -1481,8 +1481,10 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 	int huge = folio_test_hugetlb(folio);
 	bool charged = false;
 	long nr = 1;
+	//struct file_stat *p_file_stat;
 	struct file_stat_base *p_file_stat;
 	struct file_area *p_file_area;
+	
 	//令page索引与上0x3得到它在file_area的pages[]数组的下标
 	unsigned int page_offset_in_file_area = index & PAGE_COUNT_IN_AREA_MASK;
 
@@ -1548,9 +1550,9 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 		if(SUPPORT_FILE_AREA_INIT_OR_DELETE == mapping->rh_reserved1){
 			//if(RB_EMPTY_ROOT(&mapping->i_mmap.rb_root))
 			if(!mapping_mapped(mapping))
-				p_file_stat  = file_stat_alloc_and_init(mapping);
+				p_file_stat  = file_stat_alloc_and_init(mapping,FILE_STAT_SMALL);
 			else
-				p_file_stat = add_mmap_file_stat_to_list(mapping);
+				p_file_stat = add_mmap_file_stat_to_list(mapping,FILE_STAT_SMALL);
 
 			if(!p_file_stat){
 				xas_set_err(&xas, -ENOMEM);
@@ -1560,7 +1562,7 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 		}else
 			p_file_stat = (struct file_stat_base *)mapping->rh_reserved1;
 
-		if(file_stat_in_delete(p_file_stat))
+		if(file_stat_in_delete_base(p_file_stat))
 			panic("%s %s %d file_stat:0x%llx status:0x%lx in delete\n",__func__,current->comm,current->pid,(u64)p_file_stat,p_file_stat->file_stat_status);
 
 		xas_for_each_conflict(&xas, entry) {
@@ -2934,7 +2936,8 @@ static void *mapping_get_entry_for_file_area(struct address_space *mapping, pgof
 	XA_STATE(xas, &mapping->i_pages, area_index_for_page);
 	struct folio *folio = NULL;
 
-	struct file_stat *p_file_stat;
+	//struct file_stat *p_file_stat;
+	struct file_stat_base *p_file_stat;
 	struct file_area *p_file_area;
 	//令page索引与上0x3得到它在file_area的pages[]数组的下标
 	unsigned int page_offset_in_file_area = index & PAGE_COUNT_IN_AREA_MASK;
@@ -4420,7 +4423,8 @@ static void filemap_get_read_batch_for_file_area(struct address_space *mapping,
     
 	//令page索引与上0x3得到它在file_area的pages[]数组的下标
 	unsigned int page_offset_in_file_area = index & PAGE_COUNT_IN_AREA_MASK;
-	struct file_stat *p_file_stat;
+	//struct file_stat *p_file_stat;
+	struct file_stat_base *p_file_stat;
 	struct file_area *p_file_area = NULL;
 	unsigned int page_offset_in_file_area_origin = page_offset_in_file_area;
 	unsigned long folio_index_from_xa_index;

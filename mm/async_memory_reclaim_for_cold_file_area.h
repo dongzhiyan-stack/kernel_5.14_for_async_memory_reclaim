@@ -4,6 +4,13 @@
 
 #define ASYNC_MEMORY_RECLAIM_IN_KERNEL
 
+#define FILE_AREA_IN_HOT_LIST 0
+#define FILE_AREA_IN_REFAULT_LIST 1
+#define FILE_AREA_IN_FREE_LIST 2
+
+#define FILE_STAT_SMALL 0  //小文件
+#define FILE_STAT_NORMAL 1 //普通文件
+
 //一个file_stat结构里缓存的热file_area结构个数
 #define FILE_AREA_CACHE_COUNT 3
 //置1才允许异步内存回收
@@ -599,6 +606,7 @@ struct hot_cold_file_global
 	struct list_head file_stat_hot_head;
 	//新分配的文件file_stat默认添加到file_stat_temp_head链表
 	struct list_head file_stat_temp_head;
+	struct list_head file_stat_small_file_head;
 	/*中等大小文件移动到这个链表*/
 	struct list_head file_stat_middle_file_head;
 	/*如果文件file_stat上的page cache数太多，被判定为大文件，则把file_stat移动到这个链表。将来内存回收时，优先遍历这种file_stat，
@@ -607,11 +615,12 @@ struct hot_cold_file_global
 	struct list_head cold_file_head;
 	//inode被删除的文件的file_stat移动到这个链表
 	struct list_head file_stat_delete_head;
+	struct list_head file_stat_small_delete_head;
 	//0个file_area的file_stat移动到这个链表
 	struct list_head file_stat_zero_file_area_head;
+	struct list_head file_stat_small_zero_file_area_head;
 	//触发drop_cache后的没有file_stat的文件，分配file_stat后保存在这个链表
 	struct list_head drop_cache_file_stat_head;
-	struct list_head file_stat_small_file_head;
 
 	//触发drop_cache后的没有file_stat的文件个数
 	unsigned int drop_cache_file_count;
@@ -622,8 +631,10 @@ struct hot_cold_file_global
 	unsigned int file_stat_middle_count;
 	//文件file_stat个数
 	unsigned int file_stat_count;
+	unsigned int file_stat_small_count;
 	//0个file_area的file_stat个数
 	unsigned int file_stat_count_zero_file_area;
+	unsigned int file_stat_small_count_zero_file_area;
 
 	/*当file_stat的file_area个数达到file_area_level_for_large_file时，表示该文件的page cache数太多，被判定为大文件。但一个file_area
 	 *包含了多个page，一个file_area并不能填满page，因此实际file_stat的file_area个数达到file_area_level_for_large_file时，实际该文件的的page cache数会少点*/
@@ -633,6 +644,7 @@ struct hot_cold_file_global
 	unsigned int nr_pages_level;
 
 	struct kmem_cache *file_stat_cachep;
+	struct kmem_cache *file_stat_small_cachep;
 	struct kmem_cache *file_area_cachep;
 	//保存文件file_stat所有file_area的radix tree
 	struct kmem_cache *hot_cold_file_area_tree_node_cachep;
@@ -690,6 +702,7 @@ struct hot_cold_file_global
 	struct list_head mmap_file_stat_uninit_head;
 	//当一个文件的page都遍历完后，file_stat移动到这个链表
 	struct list_head mmap_file_stat_temp_head;
+	struct list_head mmap_file_stat_small_file_head;
 	struct list_head mmap_file_stat_middle_file_head;
 	//文件file_stat个数超过阀值移动到这个链表
 	struct list_head mmap_file_stat_large_file_head;
@@ -701,7 +714,7 @@ struct hot_cold_file_global
 	struct list_head mmap_file_stat_zero_file_area_head;
 	//inode被删除的文件的file_stat移动到这个链表，暂时不需要
 	struct list_head mmap_file_stat_delete_head;
-	struct list_head mmap_file_stat_small_file_head;
+	struct list_head mmap_file_stat_small_delete_head;
 	//每个周期频繁冗余lru_lock的次数
 	unsigned int lru_lock_count;
 	unsigned int mmap_file_lru_lock_count;
@@ -712,6 +725,7 @@ struct hot_cold_file_global
 	struct file_stat *file_stat_last;
 	//mmap文件个数
 	unsigned int mmap_file_stat_count;
+	unsigned int mmap_file_stat_small_count;
 	//mapcount文件个数
 	unsigned int mapcount_mmap_file_stat_count;
 	//热文件个数
@@ -804,15 +818,15 @@ FILE_AREA_LIST_STATUS(free_list)
 FILE_AREA_LIST_STATUS(refault_list)
 FILE_AREA_LIST_STATUS(mapcount_list)
 
-//清理file_area的状态，在哪个链表
+	//清理file_area的状态，在哪个链表
 #define CLEAR_FILE_AREA_STATUS(status) \
 		static inline void clear_file_area_in_##status(struct file_area *p_file_area)\
 { p_file_area->file_area_state &= ~(1 << F_file_area_in_##status);}
-//设置file_area在哪个链表的状态
+	//设置file_area在哪个链表的状态
 #define SET_FILE_AREA_STATUS(status) \
 		static inline void set_file_area_in_##status(struct file_area *p_file_area)\
 { p_file_area->file_area_state |= (1 << F_file_area_in_##status);}
-//测试file_area在哪个链表
+	//测试file_area在哪个链表
 #define TEST_FILE_AREA_STATUS(status) \
 		static inline int file_area_in_##status(struct file_area *p_file_area)\
 {return p_file_area->file_area_state & (1 << F_file_area_in_##status);}
@@ -822,8 +836,8 @@ FILE_AREA_LIST_STATUS(mapcount_list)
 	SET_FILE_AREA_STATUS(status)  \
 	TEST_FILE_AREA_STATUS(status) 
 
-//FILE_AREA_STATUS(cache)
-FILE_AREA_STATUS(ahead)
+	//FILE_AREA_STATUS(cache)
+	FILE_AREA_STATUS(ahead)
 FILE_AREA_STATUS(read)
 
 static inline int get_file_area_list_status(struct file_area *p_file_area)
@@ -838,11 +852,11 @@ static inline int get_file_area_list_status(struct file_area *p_file_area)
 /*******file_stat状态**********************************************************/
 enum file_stat_status{//file_area_state是long类型，只有64个bit位可设置
 	F_file_stat_in_file_stat_hot_head_list,
+	F_file_stat_in_file_stat_small_file_head_list,
 	F_file_stat_in_file_stat_temp_head_list,
 	F_file_stat_in_file_stat_middle_file_head_list,
 	F_file_stat_in_file_stat_large_file_head_list,
 
-	F_file_stat_in_file_stat_small_file_head_list,
 	F_file_stat_in_zero_file_area_list,
 	F_file_stat_in_mapcount_file_area_list,//文件file_stat是mapcount文件
 	//F_file_stat_in_drop_cache,
@@ -891,9 +905,36 @@ FILE_STAT_STATUS(file_stat_middle_file_head)
 FILE_STAT_STATUS(file_stat_large_file_head)
 FILE_STAT_STATUS(zero_file_area)
 FILE_STAT_STATUS(mapcount_file_area)
-FILE_STAT_STATUS(file_stat_small_file_head)
 
-	//清理文件的状态，大小文件等
+
+	//清理file_stat的状态，在哪个链表
+#define CLEAR_FILE_STAT_STATUS_BASE(name)\
+		static inline void clear_file_stat_in_##name##_list_base(struct file_stat_base *p_file_stat_base)\
+{p_file_stat_base->file_stat_status &= ~(1 << F_file_stat_in_##name##_list);}
+	//设置file_stat在哪个链表的状态
+#define SET_FILE_STAT_STATUS_BASE(name)\
+		static inline void set_file_stat_in_##name##_list_base(struct file_stat_base *p_file_stat_base)\
+{p_file_stat_base->file_stat_status |= (1 << F_file_stat_in_##name##_list);}
+	//测试file_stat在哪个链表
+#define TEST_FILE_STAT_STATUS_BASE(name)\
+		static inline int file_stat_in_##name##_list_base(struct file_stat_base *p_file_stat_base)\
+{return (p_file_stat_base->file_stat_status & (1 << F_file_stat_in_##name##_list));}
+#define TEST_FILE_STAT_STATUS_ERROR_BASE(name)\
+		static inline int file_stat_in_##name##_list##_error_base(struct file_stat_base *p_file_stat_base)\
+{return p_file_stat_base->file_stat_status & (~(1 << F_file_stat_in_##name##_list) & FILE_STAT_LIST_MASK);}
+
+#define FILE_STAT_STATUS_BASE(name) \
+		CLEAR_FILE_STAT_STATUS_BASE(name) \
+	SET_FILE_STAT_STATUS_BASE(name) \
+	TEST_FILE_STAT_STATUS_BASE(name) \
+	TEST_FILE_STAT_STATUS_ERROR_BASE(name)
+
+	FILE_STAT_STATUS_BASE(file_stat_small_file_head)
+FILE_STAT_STATUS_BASE(zero_file_area)
+
+
+
+//清理文件的状态，大小文件等
 #define CLEAR_FILE_STATUS(name)\
 		static inline void clear_file_stat_in_##name(struct file_stat *p_file_stat)\
 {p_file_stat->file_stat_status &= ~(1 << F_file_stat_in_##name);}
@@ -915,9 +956,31 @@ FILE_STAT_STATUS(file_stat_small_file_head)
 	TEST_FILE_STATUS(name)\
 	TEST_FILE_STATUS_ERROR(name)
 
-//FILE_STATUS(large_file)
 FILE_STATUS(delete)
-//FILE_STATUS(drop_cache)
+
+	//清理文件的状态，大小文件等
+#define CLEAR_FILE_STATUS_BASE(name)\
+		static inline void clear_file_stat_in_##name##_base(struct file_stat_base *p_file_stat_base)\
+{p_file_stat_base->file_stat_status &= ~(1 << F_file_stat_in_##name);}
+	//设置文件的状态，大小文件等
+#define SET_FILE_STATUS_BASE(name)\
+		static inline void set_file_stat_in_##name##_base(struct file_stat_base *p_file_stat_base)\
+{p_file_stat_base->file_stat_status |= (1 << F_file_stat_in_##name);}
+	//测试文件的状态，大小文件等
+#define TEST_FILE_STATUS_BASE(name)\
+		static inline int file_stat_in_##name##_base(struct file_stat_base *p_file_stat_base)\
+{return (p_file_stat_base->file_stat_status & (1 << F_file_stat_in_##name));}
+#define TEST_FILE_STATUS_ERROR_BASE(name)\
+		static inline int file_stat_in_##name##_error_base(struct file_stat_base *p_file_stat_base)\
+{return p_file_stat_base->file_stat_status & (~(1 << F_file_stat_in_##name) & FILE_STAT_LIST_MASK);}
+
+#define FILE_STATUS_BASE(name) \
+		CLEAR_FILE_STATUS_BASE(name) \
+	SET_FILE_STATUS_BASE(name) \
+	TEST_FILE_STATUS_BASE(name)\
+	TEST_FILE_STATUS_ERROR_BASE(name)
+
+FILE_STATUS_BASE(delete)
 
 	//清理文件的状态，大小文件等
 #define CLEAR_FILE_STATUS_ATOMIC(name)\
@@ -959,6 +1022,37 @@ FILE_STATUS_ATOMIC(mmap_file)
 
 FILE_STATUS_ATOMIC(from_cache_file)
 FILE_STATUS_ATOMIC(from_small_file)
+
+	//清理文件的状态，大小文件等
+#define CLEAR_FILE_STATUS_ATOMIC_BASE(name)\
+		static inline void clear_file_stat_in_##name##_base(struct file_stat_base *p_file_stat_base)\
+{clear_bit_unlock(F_file_stat_in_##name,&p_file_stat_base->file_stat_status);}
+	//设置文件的状态，大小文件等
+#define SET_FILE_STATUS_ATOMIC_BASE(name)\
+		static inline void set_file_stat_in_##name##_base(struct file_stat_base *p_file_stat_base)\
+{if(test_and_set_bit_lock(F_file_stat_in_##name,&p_file_stat_base->file_stat_status)) \
+	/*如果这个file_stat的bit位被多进程并发设置，不可能,应该发生了某种异常，触发crash*/  \
+	panic("file_stat:0x%llx status:0x%lx alreay set %d bit\n",(u64)p_file_stat_base,p_file_stat_base->file_stat_status,F_file_stat_in_##name); \
+}
+	//测试文件的状态，大小文件等
+#define TEST_FILE_STATUS_ATOMIC_BASE(name)\
+		static inline int file_stat_in_##name##_base(struct file_stat_base *p_file_stat_base)\
+{return test_bit(F_file_stat_in_##name,&p_file_stat_base->file_stat_status);}
+#define TEST_FILE_STATUS_ATOMIC_ERROR_BASE(name)\
+		static inline int file_stat_in_##name##_error_base(struct file_stat_base *p_file_stat_base)\
+{return p_file_stat_base->file_stat_status & (~(1 << F_file_stat_in_##name) & FILE_STAT_LIST_MASK);}
+
+#define FILE_STATUS_ATOMIC_BASE(name) \
+		CLEAR_FILE_STATUS_ATOMIC_BASE(name) \
+	SET_FILE_STATUS_ATOMIC_BASE(name) \
+	TEST_FILE_STATUS_ATOMIC_BASE(name) \
+	TEST_FILE_STATUS_ATOMIC_ERROR_BASE(name) \
+
+	FILE_STATUS_ATOMIC_BASE(cache_file)
+FILE_STATUS_ATOMIC_BASE(mmap_file)
+
+	FILE_STATUS_ATOMIC_BASE(from_cache_file)
+FILE_STATUS_ATOMIC_BASE(from_small_file)
 
 extern struct hot_cold_file_global hot_cold_file_global_info;
 
@@ -1204,14 +1298,22 @@ extern int shrink_page_printk_open1;
 extern int shrink_page_printk_open;
 
 /*判断文件是否是极小的文件*/
-static inline int file_stat_small_type(unsigned long file_stat_)
+static inline int get_file_stat_type(struct file_stat_base *file_stat_base)
 {
-    unsigned char *p = (unsigned char *)file_stat_long;
+	unsigned long file_stat_type = file_stat_base->file_stat_status & FILE_STAT_LIST_MASK;
 
-    return *p & (1 << F_file_stat_in_file_stat_small_temp_head_list); 
+	switch (file_stat_type){
+		case 1 << F_file_stat_in_file_stat_small_file_head_list:
+			return FILE_STAT_SMALL;
+		//case 1 << F_file_stat_in_file_stat_temp_head_list:
+		//	return FILE_STAT_NORMAL;
+		default:
+			return FILE_STAT_NORMAL;
+	}
+	return 0;
 }
-	
-static inline struct file_stat *file_stat_alloc_and_init(struct address_space *mapping,,char file_type)
+
+static inline struct file_stat_base *file_stat_alloc_and_init(struct address_space *mapping,char file_type)
 {
 	struct file_stat * p_file_stat = NULL;
 	struct file_stat_small *p_file_stat_small = NULL;
@@ -1255,7 +1357,7 @@ static inline struct file_stat *file_stat_alloc_and_init(struct address_space *m
 		p_file_stat->mapping = mapping;
 
 		//设置file_stat in_temp_list最好放到把file_stat添加到global temp链表操作前，原因在add_mmap_file_stat_to_list()有分析
-		set_file_stat_in_file_stat_temp_head_list(p_file_stat_small);
+		set_file_stat_in_file_stat_temp_head_list(p_file_stat);
 		smp_wmb();
 		//把针对该文件分配的file_stat结构添加到hot_cold_file_global_info的file_stat_temp_head链表
 		list_add(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.file_stat_temp_head);
@@ -1270,9 +1372,9 @@ static inline struct file_stat *file_stat_alloc_and_init(struct address_space *m
 		}
 		//file_stat个数加1
 		hot_cold_file_global_info.file_stat_small_count ++;
-		memset(p_file_stat,0,sizeof(struct file_stat));
+		memset(p_file_stat_small,0,sizeof(struct file_stat_small));
 		//设置文件是cache文件状态，有些cache文件可能还会被mmap映射，要与mmap文件互斥，要么是cache文件要么是mmap文件，不能两者都是 
-		set_file_stat_in_cache_file(p_file_stat);
+		set_file_stat_in_cache_file_base(&p_file_stat->file_stat_base);
 		//初始化file_area_hot头结点
 		INIT_LIST_HEAD(&p_file_stat->file_area_temp);
 
@@ -1282,7 +1384,7 @@ static inline struct file_stat *file_stat_alloc_and_init(struct address_space *m
 		p_file_stat_small->mapping = mapping;
 
 		//设置file_stat in_temp_list最好放到把file_stat添加到global temp链表操作前，原因在add_mmap_file_stat_to_list()有分析
-		set_file_stat_in_file_stat_temp_head_list(p_file_stat_small);
+		set_file_stat_in_file_stat_small_file_head_list_base(&p_file_stat_small->file_stat_base);
 		smp_wmb();
 		//把针对该文件分配的file_stat结构添加到hot_cold_file_global_info的file_stat_temp_head链表
 		list_add(&p_file_stat_small->hot_cold_file_list,&hot_cold_file_global_info.file_stat_small_file_head);
@@ -1328,7 +1430,7 @@ static inline struct file_stat_base *add_mmap_file_stat_to_list(struct address_s
 	spin_lock(&hot_cold_file_global_info.mmap_file_global_lock);
 	/*1:如果两个进程同时访问一个文件，同时执行到这里，需要加锁。第1个进程加锁成功后，分配file_stat并赋值给
 	  mapping->rh_reserved1，第2个进程获取锁后执行到这里mapping->rh_reserved1就会成立
-      2:异步内存回收功能禁止了*/
+2:异步内存回收功能禁止了*/
 	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)){
 		p_file_stat = (struct file_stat *)mapping->rh_reserved1;
 		spin_unlock(&hot_cold_file_global_info.mmap_file_global_lock);
@@ -1357,11 +1459,22 @@ static inline struct file_stat_base *add_mmap_file_stat_to_list(struct address_s
 		INIT_LIST_HEAD(&p_file_stat->file_area_refault);
 		//file_area对应的page的pagecount大于0的，则把file_area移动到该链表
 		INIT_LIST_HEAD(&p_file_stat->file_area_mapcount);
-		
+
 		//mapping->file_stat记录该文件绑定的file_stat结构，将来判定是否对该文件分配了file_stat
 		mapping->rh_reserved1 = (unsigned long)p_file_stat;
 		p_file_stat->mapping = mapping;
-
+#if 1
+		/*新分配的file_stat必须设置in_file_stat_temp_head_list链表。这个设置file_stat状态的操作必须放到 把file_stat添加到
+		 *tmep链表前边，还要加内存屏障。否则会出现一种极端情况，异步内存回收线程从temp链表遍历到这个file_stat，
+		 *但是file_stat还没有设置为in_temp_list状态。这样有问题会触发panic。因为mmap文件异步内存回收线程，
+		 *从temp链表遍历file_stat没有mmap_file_global_lock加锁，所以与这里存在并发操作。而针对cache文件，异步内存回收线程
+		 *从global temp链表遍历file_stat，全程global_lock加锁，不会跟向global temp链表添加file_stat存在方法，但最好改造一下*/
+		set_file_stat_in_file_stat_temp_head_list(p_file_stat);
+		smp_wmb();
+#endif	
+		spin_lock_init(&p_file_stat->file_stat_lock);
+		list_add(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_temp_head);
+		
 		p_file_stat_base = &p_file_stat->file_stat_base;
 	}else{
 		p_file_stat_small = kmem_cache_alloc(hot_cold_file_global_info.file_stat_small_cachep,GFP_ATOMIC);
@@ -1379,22 +1492,13 @@ static inline struct file_stat_base *add_mmap_file_stat_to_list(struct address_s
 		//设置文件是mmap文件状态，有些mmap文件可能还会被读写，要与cache文件互斥，要么是cache文件要么是mmap文件，不能两者都是 
 		set_file_stat_in_mmap_file(p_file_stat);
 		INIT_LIST_HEAD(&p_file_stat->file_area_temp);
+
+		set_file_stat_in_file_stat_small_file_head_list_base(&p_file_stat_small->file_stat_base);
+		list_add(&p_file_stat_small->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_small_file_head);
+		spin_lock_init(&p_file_stat_small->file_stat_lock);
 		
 		p_file_stat_base = &p_file_stat_small->file_stat_base;
-        }
-#if 1
-	/*新分配的file_stat必须设置in_file_stat_temp_head_list链表。这个设置file_stat状态的操作必须放到 把file_stat添加到
-	 *tmep链表前边，还要加内存屏障。否则会出现一种极端情况，异步内存回收线程从temp链表遍历到这个file_stat，
-	 *但是file_stat还没有设置为in_temp_list状态。这样有问题会触发panic。因为mmap文件异步内存回收线程，
-	 *从temp链表遍历file_stat没有mmap_file_global_lock加锁，所以与这里存在并发操作。而针对cache文件，异步内存回收线程
-	 *从global temp链表遍历file_stat，全程global_lock加锁，不会跟向global temp链表添加file_stat存在方法，但最好改造一下*/
-	set_file_stat_in_file_stat_temp_head_list(p_file_stat_base);
-	smp_wmb();
-#endif	
-
-	list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_temp_head);
-
-	spin_lock_init(&p_file_stat_base->file_stat_lock);
+	}
 
 	spin_unlock(&hot_cold_file_global_info.mmap_file_global_lock);
 	if(shrink_page_printk_open)
@@ -1433,9 +1537,9 @@ out:
 	return p_file_area;
 }
 /*令inode引用计数减1，如果inode引用计数是0则释放inode结构*/
-static void inline file_inode_unlock(struct file_stat * p_file_stat)
+static void inline file_inode_unlock(struct file_stat_base * p_file_stat_base)
 {
-    struct inode *inode = p_file_stat->mapping->host;
+    struct inode *inode = p_file_stat_base->mapping->host;
     //令inode引用计数减1，如果inode引用计数是0则释放inode结构
 	iput(inode);
 }
@@ -1449,7 +1553,7 @@ static void inline file_inode_unlock_mapping(struct address_space *mapping)
 /*对文件inode加锁，如果inode已经处于释放状态则返回0，此时不能再遍历该文件的inode的address_space的radix tree获取page，释放page，
  *此时inode已经要释放了，inode、address_space、radix tree都是无效内存。否则，令inode引用计数加1，然后其他进程就无法再释放这个
  *文件的inode，此时返回1*/
-static int inline file_inode_lock(struct file_stat * p_file_stat)
+static int inline file_inode_lock(struct file_stat_base *p_file_stat_base)
 {
     /*不能在这里赋值，因为可能文件inode被iput后p_file_stat->mapping赋值NULL，这样会crash*/
 	//struct inode *inode = p_file_stat->mapping->host;
@@ -1471,12 +1575,12 @@ static int inline file_inode_lock(struct file_stat * p_file_stat)
 	//lock_file_stat(p_file_stat,0);
 	rcu_read_lock();
 	smp_rmb();
-	if(file_stat_in_delete(p_file_stat) || (NULL == p_file_stat->mapping)){
+	if(file_stat_in_delete_base(p_file_stat_base) || (NULL == p_file_stat_base->mapping)){
 		//不要忘了异常return要先释放锁
 		rcu_read_unlock();
 		return 0;
 	}
-	inode = p_file_stat->mapping->host;
+	inode = p_file_stat_base->mapping->host;
 
 	spin_lock(&inode->i_lock);
 	/*执行到这里，inode肯定没有被释放，并且inode->i_lock加锁成功，其他进程就无法再释放这个inode了。错了，又一个隐藏很深的bug。
@@ -1496,11 +1600,11 @@ static int inline file_inode_lock(struct file_stat * p_file_stat)
 		if(!hlist_empty(&inode->i_dentry)){
 			struct dentry *dentry = hlist_entry(inode->i_dentry.first, struct dentry, d_u.d_alias);
 			if(dentry)
-				printk("%s file_stat:0x%llx inode:0x%llx dentry:0x%llx %s icount0!!!!!!!\n",__func__,(u64)p_file_stat,(u64)inode,(u64)dentry,dentry->d_name.name);
+				printk("%s file_stat:0x%llx inode:0x%llx dentry:0x%llx %s icount0!!!!!!!\n",__func__,(u64)p_file_stat_base,(u64)inode,(u64)dentry,dentry->d_name.name);
 			else 
-				printk("%s file_stat:0x%llx inode:0x%llx dentry:0x%llx icount0!!!!!!!\n",__func__,(u64)p_file_stat,(u64)inode,(u64)dentry);
+				printk("%s file_stat:0x%llx inode:0x%llx dentry:0x%llx icount0!!!!!!!\n",__func__,(u64)p_file_stat_base,(u64)inode,(u64)dentry);
 		}else
-			printk("%s file_stat:0x%llx inode:0x%llx icount0!!!!!!! i_nlink:%d nrpages:%ld\n",__func__,(u64)p_file_stat,(u64)inode,inode->i_nlink,inode->i_mapping->nrpages);
+			printk("%s file_stat:0x%llx inode:0x%llx icount0!!!!!!! i_nlink:%d nrpages:%ld\n",__func__,(u64)p_file_stat_base,(u64)inode,inode->i_nlink,inode->i_mapping->nrpages);
 		//iput(inode);
 
 		//lock_fail = 2;引用计数是0是正常现象，此时也能加锁成功，只要保证inode此时不是已经释放的状态
@@ -1595,18 +1699,37 @@ static int inline can_file_stat_move_to_list_head(struct file_stat *p_file_stat,
 	printk("can_file_stat_move_to_list_head file_stat:0x%llx\n",(u64)p_file_stat);
 	return 1;
 }
+static int inline can_file_stat_small_move_to_list_head(struct file_stat_small *p_file_stat_small,unsigned int file_stat_in_list_type)
+{
+	/*如果file_stat不在file_stat_in_list_type这个global链表上，测试失败*/
+    if(0 == (p_file_stat_small->file_stat_status & (1 << file_stat_in_list_type)))
+		return 0;
+    /*如果file_stat检测到在file_stat_in_list_type除外的其他global链表上，测试失败*/
+	if(p_file_stat_small->file_stat_status & (~(1 << file_stat_in_list_type) & FILE_STAT_LIST_MASK))
+		return 0;
 
-extern void hot_file_update_file_status(struct address_space *mapping,struct file_stat *p_file_stat,struct file_area *p_file_area,int access_count,int read_or_write);
+	printk("can_file_stat_move_to_list_head file_stat:0x%llx\n",(u64)p_file_stat_small);
+	return 1;
+}
+
+static void inline i_file_stat_small_callback(struct rcu_head *head)
+{
+	struct file_stat_small *p_file_stat_small = container_of(head, struct file_stat_small, i_rcu);
+	kmem_cache_free(hot_cold_file_global_info.file_stat_small_cachep,p_file_stat_small);
+}
+
+extern void hot_file_update_file_status(struct address_space *mapping,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,int access_count,int read_or_write);
 extern void get_file_name(char *file_name_path,struct file_stat * p_file_stat);
-extern unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct list_head *file_area_free,struct list_head *file_area_have_mmap_page_head);
-extern unsigned int cold_mmap_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct file_area *p_file_area,struct page *page_buf[],int cold_page_count);
+extern unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_free,struct list_head *file_area_have_mmap_page_head);
+extern unsigned int cold_mmap_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base * p_file_stat_base,struct file_area *p_file_area,struct page *page_buf[],int cold_page_count);
 extern unsigned long shrink_inactive_list_async(unsigned long nr_to_scan, struct lruvec *lruvec,struct hot_cold_file_global *p_hot_cold_file_global,int is_mmap_file, enum lru_list lru);
 extern int walk_throuth_all_mmap_file_area(struct hot_cold_file_global *p_hot_cold_file_global);
-extern int cold_mmap_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat_del);
-extern unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat_del);
-extern int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat_del);
-extern int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat * p_file_stat,struct file_area *p_file_area);
+//extern int cold_mmap_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat_del);
+extern unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,char file_type);
+extern int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base_del,char file_type);
+extern int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area);
+
 extern void file_stat_temp_middle_large_file_change(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,unsigned char file_stat_list_type, unsigned int file_type,char is_cache_file);
-extern int mmap_file_area_cache_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,struct list_head *file_area_have_cache_page_head,struct list_head *file_area_free_temp);
-extern int cache_file_area_mmap_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,struct list_head *file_area_have_mmap_page_head);
+extern int mmap_file_area_cache_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_have_cache_page_head,struct list_head *file_area_free_temp,char file_type);
+extern int cache_file_area_mmap_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_have_mmap_page_head,char file_stat_type);
 #endif
