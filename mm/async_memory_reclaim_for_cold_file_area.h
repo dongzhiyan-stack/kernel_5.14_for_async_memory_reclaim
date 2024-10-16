@@ -1313,7 +1313,7 @@ static inline int get_file_stat_type(struct file_stat_base *file_stat_base)
 	return 0;
 }
 
-static inline struct file_stat_base *file_stat_alloc_and_init(struct address_space *mapping,char file_type)
+static inline struct file_stat_base *file_stat_alloc_and_init(struct address_space *mapping,char file_type,char free_old_file_stat)
 {
 	struct file_stat * p_file_stat = NULL;
 	struct file_stat_small *p_file_stat_small = NULL;
@@ -1324,7 +1324,7 @@ static inline struct file_stat_base *file_stat_alloc_and_init(struct address_spa
 	spin_lock(&hot_cold_file_global_info.global_lock);
 	//如果两个进程同时访问一个文件，同时执行到这里，需要加锁。第1个进程加锁成功后，分配file_stat并赋值给
 	//mapping->rh_reserved1，第2个进程获取锁后执行到这里mapping->rh_reserved1就会成立
-	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)){
+	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping) && !free_old_file_stat){
 		printk("%s file_stat:0x%llx already alloc\n",__func__,(u64)mapping->rh_reserved1);
 		p_file_stat = (struct file_stat *)mapping->rh_reserved1;
 		goto out;
@@ -1421,7 +1421,7 @@ out:
  * 如果后续该文件又mmap映射了，依然判定为cache文件，否则关系会错乱。但不用担心回收内存有问题，因为cache文件内存回收会跳过mmap
  * 的文件页。
  * */
-static inline struct file_stat_base *add_mmap_file_stat_to_list(struct address_space *mapping,char file_type)
+static inline struct file_stat_base *add_mmap_file_stat_to_list(struct address_space *mapping,char file_type,char free_old_file_stat)
 {
 	struct file_stat *p_file_stat = NULL;
 	struct file_stat_small *p_file_stat_small = NULL;
@@ -1430,8 +1430,11 @@ static inline struct file_stat_base *add_mmap_file_stat_to_list(struct address_s
 	spin_lock(&hot_cold_file_global_info.mmap_file_global_lock);
 	/*1:如果两个进程同时访问一个文件，同时执行到这里，需要加锁。第1个进程加锁成功后，分配file_stat并赋值给
 	  mapping->rh_reserved1，第2个进程获取锁后执行到这里mapping->rh_reserved1就会成立
-2:异步内存回收功能禁止了*/
-	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)){
+      2:异步内存回收功能禁止了
+      3:当small file_stat转到normal file_stat，释放老的small file_stat然后分配新的normal file_stat，此时
+	  free_old_file_stat 是1，下边的if不成立，忽略mapping->rh_reserved1，进而才不会goto out，而是分配新的file_stat
+    */
+	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping) && !free_old_file_stat){
 		p_file_stat = (struct file_stat *)mapping->rh_reserved1;
 		spin_unlock(&hot_cold_file_global_info.mmap_file_global_lock);
 		printk("%s file_stat:0x%llx already alloc\n",__func__,(u64)mapping->rh_reserved1);

@@ -1261,6 +1261,7 @@ static inline int mapcount_hot_free_file_area_solve(struct hot_cold_file_global 
 				set_file_area_in_warm_list(p_file_area);
 				//list_move(&p_file_area->file_area_list,&p_file_stat->file_area_temp);
 				list_move(&p_file_area->file_area_list,&p_file_stat->file_area_warm);
+			    mapcount_to_warm_file_area_count ++;
 			}
 			//在file_stat->file_area_temp链表的file_area个数加1
 			//p_file_stat->file_area_count_in_temp_list ++;
@@ -1269,7 +1270,6 @@ static inline int mapcount_hot_free_file_area_solve(struct hot_cold_file_global 
 
 			//在file_stat->file_area_mapcount链表的file_area个数减1
 			p_file_stat->mapcount_file_area_count --;
-			mapcount_to_warm_file_area_count ++;
 		}
 		else{
 			/*否则file_area移动到file_area_list临时链表。但要防止前边file_area被移动到其他file_stat的链表了，此时就不能再把该file_area
@@ -1322,10 +1322,10 @@ static inline int mapcount_hot_free_file_area_solve(struct hot_cold_file_global 
 				//p_file_stat->file_area_count_in_temp_list ++;
 
 				//spin_unlock(&p_file_stat->file_stat_lock);
-				p_file_stat->file_area_hot_count --;
+			    hot_to_warm_file_area_count ++;
 			}
 			//在file_stat->file_area_hot链表的file_area个数减1
-			hot_to_warm_file_area_count ++;
+			p_file_stat->file_area_hot_count --;
 		}
 	}
 	/*遍历file_stat->file_area_refault链表上的file_area，如果长时间没访问，要把file_area移动回file_stat->file_area_temp链表*/
@@ -1365,11 +1365,11 @@ static inline int mapcount_hot_free_file_area_solve(struct hot_cold_file_global 
 
 				//list_move(&p_file_area->file_area_list,&p_file_stat->file_area_temp);
 				list_move(&p_file_area->file_area_list,&p_file_stat->file_area_warm);
+			    refault_to_warm_file_area_count ++;
 				//在file_stat->file_area_temp链表的file_area个数加1
 				//p_file_stat->file_area_count_in_temp_list ++;
 			}
 			//spin_unlock(&p_file_stat->file_stat_lock);
-			refault_to_warm_file_area_count ++;
 		}
 	}
 	/*遍历file_stat->file_area_free链表上file_area，如果长时间不被访问则释放掉file_area结构。如果短时间被访问了，则把file_area移动到
@@ -1449,7 +1449,7 @@ static inline int mapcount_hot_free_file_area_solve(struct hot_cold_file_global 
 			/*现在只要file_stat->free链表上的file_area被访问，不管过了多长时间，都判定为refault file_area*/
 			clear_file_area_in_free_list(p_file_area);
 			if(FILE_STAT_SMALL == file_type)
-				set_file_area_in_temp_list(p_file_area);
+				set_file_area_in_refault_list(p_file_area);
 			else{
 				p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
 
@@ -2149,16 +2149,17 @@ static noinline unsigned int mmap_file_stat_small_list_file_area_solve(struct ho
 	struct page *page_buf[BUF_PAGE_COUNT];
 	int cold_page_count = 0,cold_page_count_last;
 	int ret = 0;
-	unsigned int scan_file_area_count = 0;
+	//unsigned int scan_file_area_count = 0;
 	unsigned int reclaimed_pages = 0;
 	unsigned int isolate_pages = 0;
 	unsigned int scan_cold_file_area_count = 0;
+	unsigned int file_stat_scan_status = FILE_STAT_SCAN_ALL_FILE_AREA;
 	//unsigned int warm_to_temp_file_area_count = 0;
 
 	//从链表尾开始遍历，链表尾的成员更老，链表头的成员是最新添加的
 	list_for_each_entry_safe_reverse(p_file_area,p_file_area_temp,&p_file_stat_small->file_area_temp,file_area_list){
-		if(scan_file_area_count ++ > scan_file_area_max)
-			break;
+		//if(scan_file_area_count ++ > scan_file_area_max)
+		//	break;
 
 		//if(!file_area_in_warm_list(p_file_area) || file_area_in_warm_list_error(p_file_area))
 		//	panic("%s:1 file_area:0x%llx status:0x%x not in file_area_warm\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
@@ -2229,8 +2230,10 @@ static noinline unsigned int mmap_file_stat_small_list_file_area_solve(struct ho
 
 		*already_scan_file_area_count = *already_scan_file_area_count + 1;
 		//超过本轮扫描的最大file_area个数则结束本次的遍历
-		if(*already_scan_file_area_count >= scan_file_area_max)
+		if(*already_scan_file_area_count >= scan_file_area_max){
+			file_stat_scan_status = FILE_STAT_SCAN_MAX_FILE_AREA;
 			break;
+		}
 	}
 
 	//如果本次对文件遍历结束后，有未达到BUF_PAGE_COUNT数目要回收的page，这里就隔离+回收这些page
@@ -2250,7 +2253,7 @@ static noinline unsigned int mmap_file_stat_small_list_file_area_solve(struct ho
 	   p_hot_cold_file_global->mmap_file_shrink_counter.scan_cold_file_area_count_from_warm += scan_cold_file_area_count;
 	   p_hot_cold_file_global->mmap_file_shrink_counter.warm_to_temp_file_area_count += warm_to_temp_file_area_count;
 	   */
-	return scan_file_area_count;
+	return file_stat_scan_status;
 }
 
 static noinline unsigned int mmap_file_stat_warm_list_file_area_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,unsigned int scan_file_area_max,unsigned int *already_scan_file_area_count,unsigned char file_stat_list_type,struct list_head *file_area_have_cache_page_head)
@@ -3266,7 +3269,7 @@ static noinline int get_file_area_from_small_mmap_file_stat_list(struct hot_cold
 
 			//clear_file_stat_in_file_stat_small_file_head_list(p_file_stat_small);
 			//set_file_stat_in_file_stat_temp_file_head_list(p_file_stat_small);
-			p_file_stat_base = file_stat_alloc_and_init(p_file_stat_small->mapping,FILE_STAT_NORMAL);
+			p_file_stat_base = add_mmap_file_stat_to_list(p_file_stat_small->mapping,FILE_STAT_NORMAL,1);
 			p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
 
 			/*注意，file_stat_alloc_and_init()里分配新的file_stat并赋值给mapping->rh_reserved1后，新的进程读写该文件，
@@ -3355,7 +3358,7 @@ static noinline int get_file_area_from_small_mmap_file_stat_list(struct hot_cold
 			/*把未参与内存回收的file_area设置in_warm状态后，再移动到file_stat->file_area_warm链表，后续再参与内存回收*/
 			list_for_each_entry_safe(p_file_area,p_file_area_temp,&file_area_have_cache_page_head,file_area_list){
 				clear_file_area_in_free_list(p_file_area);
-				set_file_area_in_warm_list(p_file_area);
+				set_file_area_in_temp_list(p_file_area);
 			}
 			//list_splice(&file_area_have_cache_page_head,&p_file_stat->file_area_warm);
 			list_splice(&file_area_have_cache_page_head,&p_file_stat_small->file_area_temp);

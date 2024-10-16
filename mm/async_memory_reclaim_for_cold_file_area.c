@@ -560,7 +560,7 @@ static noinline void __destroy_inode_handler_post(struct inode *inode)
 				}
 				else{
 					p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
-					list_move(&p_file_stat_small->hot_cold_file_list,&hot_cold_file_global_info.file_stat_delete_head);
+					list_move(&p_file_stat_small->hot_cold_file_list,&hot_cold_file_global_info.file_stat_small_delete_head);
 				}
 			}else{
 				/*如果到这份分支，说明file_stat先被异步内存回收线程执行cold_file_stat_delete()标记delete了，
@@ -3029,6 +3029,7 @@ file_stat_access:
 			if(!file_stat_in_delete_base(&p_file_stat_small->file_stat_base)){
 				//clear_file_stat_in_file_stat_hot_head_list(p_file_stat);
 				clear_file_stat_in_zero_file_area_list_base(&p_file_stat_small->file_stat_base);
+				set_file_stat_in_file_stat_small_file_head_list_base(&p_file_stat_small->file_stat_base);
 				list_move(&p_file_stat_small->hot_cold_file_list,&p_hot_cold_file_global->file_stat_small_file_head);
 
 			}
@@ -4328,9 +4329,24 @@ static noinline int file_stat_small_list_file_area_solve(struct hot_cold_file_gl
 
 		file_area_age_dx = p_hot_cold_file_global->global_age - p_file_area->file_area_age;
 
+		/*file_area可能同时具有in_refault和in_temp 或者 in_hot和in_temp 属性，因此要先处理in_refault和in_hot链表的file_area*/
+		if(file_area_in_refault_list(p_file_area)){
+			if(file_area_age_dx >  p_hot_cold_file_global->file_area_refault_to_temp_age_dx){
+				clear_file_area_in_refault_list(p_file_area);
+				set_file_area_in_temp_list(p_file_area);
+			}
+		}
+		else if(file_area_in_hot_list(p_file_area)){
+			temp_to_hot_file_area_count ++;
+
+			if(file_area_age_dx > p_hot_cold_file_global->file_area_hot_to_temp_age_dx){
+				clear_file_area_in_hot_list(p_file_area);
+				set_file_area_in_temp_list(p_file_area);
+			}
+		}
 		/*一个file_area可能在hot_file_update_file_status()中被并发设置in_temp_list、in_hot_list、in_refault_list 
 		 * 这3种属性，因此要if(file_area_in_refault_list(p_file_area))也需要判断清理in_hot_list属性。in_hot_list同理*/
-		if(file_area_in_temp_list(p_file_area)){
+		else if(file_area_in_temp_list(p_file_area)){
 
 			/*file_area经过FILE_AREA_TEMP_TO_COLD_AGE_DX个周期还没有被访问，则被判定是冷file_area，然后就释放该file_area的page*/
 			if(file_area_age_dx > p_hot_cold_file_global->file_area_temp_to_cold_age_dx){
@@ -4379,25 +4395,38 @@ static noinline int file_stat_small_list_file_area_solve(struct hot_cold_file_gl
 				scan_cold_file_area_count ++;
 			}
 		}
-		else if(file_area_in_refault_list(p_file_area)){
-			if(file_area_age_dx >  p_hot_cold_file_global->file_area_refault_to_temp_age_dx){
-				clear_file_area_in_refault_list(p_file_area);
-				set_file_area_in_temp_list(p_file_area);
-			}
-		}
-		else if(file_area_in_hot_list(p_file_area)){
-			temp_to_hot_file_area_count ++;
-
-			if(file_area_age_dx > p_hot_cold_file_global->file_area_hot_to_temp_age_dx){
-				clear_file_area_in_hot_list(p_file_area);
-				set_file_area_in_temp_list(p_file_area);
-			}
-		}
 		else if(file_area_in_free_list(p_file_area)){
+
+			if(file_area_in_refault_list(p_file_area) || unlikely(file_area_access_count_get(p_file_area) > 0
+							|| file_area_have_page(p_file_area))){
+					/*这段代码时新加的，是个隐藏很深的小bug。file_area在内存回收前都要对access_count清0，但是在内存回收最后，可能因对应page
+					 *被访问了而access_count加1，然后对age赋值为当时的global age，但是file_area的page内存回收失败了。等了很长时间后，终于再次
+					 *扫描到这个文件file_stat，但是file_area的age还是与global age相差很大了，正常就要判定这个file_area长时间没访问而释放掉。
+					 *但这是正常现象不合理的！因为这个file_area的page在内存回收时被访问了。于是就通过file_area的access_count大于0而判定这个file_area的
+					 *page在内存回收最后被访问了，于是就不能释放掉file_area。那就要移动到file_stat->temp链表或者refault链表!!!!!!!!!!!!!!!!!!!!*/
+
+					/*file_area必须有in_free_list状态，否则crash，防止file_area重复移动到file_stat->refault链表*/
+					if(!file_area_in_free_list(p_file_area) || (file_area_in_free_list_error(p_file_area) && !file_area_in_refault_list(p_file_area)))
+						panic("%s file_area:0x%llx status:%d not in file_area_free error\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+
+					/*把file_area移动到file_stat->refault链表，必须对访问计数清0。否则后续该file_area不再访问则
+					 *访问计数一直大于0，该file_area移动到file_stat->free链表后，因访问计数大于0每次都要移动到file_stat->refault链表*/
+					file_area_access_count_clear(p_file_area);
+					file_area_free_to_refault_list_count ++;
+					//spin_lock(&p_file_stat->file_stat_lock);	    
+					clear_file_area_in_free_list(p_file_area);
+					set_file_area_in_refault_list(p_file_area);
+					/*refault链表上长时间没访问的file_area现在移动到file_stat->warm链表，而不是file_stat->temp链表，这个不用spin_lock(&p_file_stat->file_stat_lock)加锁*/
+					//list_move(&p_file_area->file_area_list,&p_file_stat->file_area_refault);
+					/*检测到refault的file_area个数加1*/
+					p_hot_cold_file_global->check_refault_file_area_count ++;
+					//spin_unlock(&p_file_stat->file_stat_lock);	    
+					printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x accessed in reclaim\n",__func__,(u64)p_file_stat_small,(u64)p_file_area,p_file_area->file_area_state);
+			}
 			/*如果file_stat->file_area_free链表上的file_area长时间没有被访问则释放掉file_area结构。之前的代码有问题，判定释放file_area的时间是
 			 *file_area_free_age_dx，这样有问题，会导致file_area被内存回收后，在下个周期file_area立即被释放掉。原因是file_area_free_age_dx=5，
 			 file_area_temp_to_cold_age_dx=5，下个内存回收周期 global_age - file_area_free_age_dx肯定大于5*/
-			if(file_area_age_dx > 
+			else if(file_area_age_dx > 
 					(p_hot_cold_file_global->file_area_free_age_dx + p_hot_cold_file_global->file_area_temp_to_cold_age_dx)){
 				/*有ahead标记的file_area，即便长时间没访问也不处理，而是仅仅清理file_area的ahead标记且跳过，等到下次遍历到该file_area再处理*/
 				if(file_area_in_ahead(p_file_area)){
@@ -4469,7 +4498,7 @@ static noinline unsigned int get_file_area_from_file_stat_small_list(struct hot_
 
 			//clear_file_stat_in_file_stat_small_file_head_list_base(p_file_stat_small);
 			//set_file_stat_in_file_stat_temp_file_head_list(p_file_stat_small);
-			p_file_stat_base = file_stat_alloc_and_init(p_file_stat_small->mapping,FILE_STAT_NORMAL);
+			p_file_stat_base = file_stat_alloc_and_init(p_file_stat_small->mapping,FILE_STAT_NORMAL,1);
 			p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
 
 			/*注意，file_stat_alloc_and_init()里分配新的file_stat并赋值给mapping->rh_reserved1后，新的进程读写该文件，

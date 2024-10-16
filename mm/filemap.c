@@ -1550,9 +1550,9 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 		if(SUPPORT_FILE_AREA_INIT_OR_DELETE == mapping->rh_reserved1){
 			//if(RB_EMPTY_ROOT(&mapping->i_mmap.rb_root))
 			if(!mapping_mapped(mapping))
-				p_file_stat  = file_stat_alloc_and_init(mapping,FILE_STAT_SMALL);
+				p_file_stat  = file_stat_alloc_and_init(mapping,FILE_STAT_SMALL,0);
 			else
-				p_file_stat = add_mmap_file_stat_to_list(mapping,FILE_STAT_SMALL);
+				p_file_stat = add_mmap_file_stat_to_list(mapping,FILE_STAT_SMALL,0);
 
 			if(!p_file_stat){
 				xas_set_err(&xas, -ENOMEM);
