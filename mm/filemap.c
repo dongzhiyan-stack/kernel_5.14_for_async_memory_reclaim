@@ -1550,9 +1550,9 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 		if(SUPPORT_FILE_AREA_INIT_OR_DELETE == mapping->rh_reserved1){
 			//if(RB_EMPTY_ROOT(&mapping->i_mmap.rb_root))
 			if(!mapping_mapped(mapping))
-				p_file_stat  = file_stat_alloc_and_init(mapping,FILE_STAT_SMALL,0);
+				p_file_stat  = file_stat_alloc_and_init(mapping,FILE_STAT_TINY_SMALL,0);
 			else
-				p_file_stat = add_mmap_file_stat_to_list(mapping,FILE_STAT_SMALL,0);
+				p_file_stat = add_mmap_file_stat_to_list(mapping,FILE_STAT_TINY_SMALL,0);
 
 			if(!p_file_stat){
 				xas_set_err(&xas, -ENOMEM);
@@ -1706,7 +1706,9 @@ noinline int __filemap_add_folio(struct address_space *mapping,
 	 *把对xarray tree槽位的赋值不在filemap.c的__filemap_add_folio函数，在其他文件。只剩下dax entry在这里显式指明。
 	 * */
 	if(/*!dax_mapping(mapping) && !shmem_mapping(mapping) &&*/IS_SUPPORT_FILE_AREA(mapping)){
-		return __filemap_add_folio_for_file_area(mapping,folio,index,gfp,shadowp);
+		smp_rmb();
+		if(IS_SUPPORT_FILE_AREA(mapping))
+		    return __filemap_add_folio_for_file_area(mapping,folio,index,gfp,shadowp);
 	}
 #endif	
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
