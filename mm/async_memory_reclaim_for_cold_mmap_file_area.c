@@ -1250,12 +1250,17 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 	unsigned int refault_to_warm_file_area_count = 0;
 	unsigned int check_refault_file_area_count = 0;
 	unsigned int free_file_area_count = 0;
-	struct file_stat *p_file_stat;
+	struct file_stat *p_file_stat = NULL;
+	struct file_stat_small *p_file_stat_small = NULL;
     
+	
+	/*file_stat和file_type不匹配则主动crash*/
+	is_file_stat_match_error(p_file_stat_base,file_type);
+
 	switch (file_area_type){
 		case (1 << F_file_area_in_mapcount_list):
 			if(!file_area_in_mapcount_list(p_file_area) || file_area_in_mapcount_list_error(p_file_area))
-				panic("%s file_area:0x%llx status:%d not in file_area_mapcount\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+				panic("%s file_stat:0x%llx file_area:0x%llx status:%d not in file_area_mapcount\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
 
 			//file_area被遍历到时记录当时的global_age，不管此时file_area的page是否被访问pte置位了
 			p_file_area->file_area_access_age = p_hot_cold_file_global->global_age;
@@ -1289,13 +1294,15 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 					p_file_stat->file_area_count_in_temp_list ++;
 				}
 				else if(FILE_STAT_SMALL == file_type){
-					spin_lock(&p_file_stat_base->file_stat_lock);
+					p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
+
+					spin_lock(&p_file_stat_small->file_stat_lock);
 					set_file_area_in_temp_list(p_file_area);
-					list_move(&p_file_area->file_area_list,&p_file_stat->file_area_temp);
+					list_move(&p_file_area->file_area_list,&p_file_stat_small->file_area_temp);
 					p_file_stat_base->file_area_count_in_temp_list ++;
-					spin_unlock(&p_file_stat_base->file_stat_lock);
+					spin_unlock(&p_file_stat_small->file_stat_lock);
 				}
-				else{
+				else if(FILE_STAT_NORMAL == file_type){
 					p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
 
 					set_file_area_in_warm_list(p_file_area);
@@ -1304,7 +1311,8 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 					mapcount_to_warm_file_area_count ++;
 					//在file_stat->file_area_temp链表的file_area个数加1，这是把file_area移动到warm链表，不能file_area_count_in_temp_list加1
 					//p_file_stat->file_area_count_in_temp_list ++;
-				}
+				}else
+					BUG();
 
 				//spin_unlock(&p_file_stat->file_stat_lock);
 
@@ -1322,7 +1330,7 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 			break;
 		case (1 << F_file_area_in_hot_list):
 			if(!file_area_in_hot_list(p_file_area) || file_area_in_hot_list_error(p_file_area))
-				panic("%s file_area:0x%llx status:%d not in file_area_hot\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+				panic("%s file_stat:0x%llx file_area:0x%llx status:%d not in file_area_hot\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
 
 			//file_area被遍历到时记录当时的global_age，不管此时file_area的page是否被访问pte置位了
 			p_file_area->file_area_access_age = p_hot_cold_file_global->global_age;
@@ -1352,12 +1360,14 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 					p_file_stat->file_area_count_in_temp_list ++;
 				}
 				else if(FILE_STAT_SMALL == file_type){
-					spin_lock(&p_file_stat_base->file_stat_lock);
+					p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
+
+					spin_lock(&p_file_stat_small->file_stat_lock);
 					set_file_area_in_temp_list(p_file_area);
-					list_move(&p_file_area->file_area_list,&p_file_stat->file_area_temp);
+					list_move(&p_file_area->file_area_list,&p_file_stat_small->file_area_temp);
 					p_file_stat_base->file_area_count_in_temp_list ++;
-					spin_unlock(&p_file_stat_base->file_stat_lock);
-				}else{
+					spin_unlock(&p_file_stat_small->file_stat_lock);
+				}else if(FILE_STAT_NORMAL == file_type){
 					p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
 
 					set_file_area_in_warm_list(p_file_area);
@@ -1371,7 +1381,9 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 
 					//spin_unlock(&p_file_stat->file_stat_lock);
 					hot_to_warm_file_area_count ++;
-				}
+				}else
+					BUG();
+
 				//在file_stat->file_area_hot链表的file_area个数减1
 				p_file_stat->file_area_hot_count --;
 			}
@@ -1380,7 +1392,7 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 			/*遍历file_stat->file_area_refault链表上的file_area，如果长时间没访问，要把file_area移动回file_stat->file_area_temp链表*/
 		case (1 << F_file_area_in_refault_list):
 			if(!file_area_in_refault_list(p_file_area) || file_area_in_refault_list_error(p_file_area))
-				panic("%s file_area:0x%llx status:%d not in file_area_refault\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+				panic("%s file_stat:0x%llx file_area:0x%llx status:%d not in file_area_refault\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
 
 			//file_area被遍历到时记录当时的global_age，不管此时file_area的page是否被访问pte置位了
 			p_file_area->file_area_access_age = p_hot_cold_file_global->global_age;
@@ -1409,13 +1421,15 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 					p_file_stat->file_area_count_in_temp_list ++;
 				}
 				else if(FILE_STAT_SMALL == file_type){
-					spin_lock(&p_file_stat_base->file_stat_lock);
+					p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
+
+					spin_lock(&p_file_stat_small->file_stat_lock);
 					set_file_area_in_temp_list(p_file_area);
-					list_move(&p_file_area->file_area_list,&p_file_stat->file_area_temp);
+					list_move(&p_file_area->file_area_list,&p_file_stat_small->file_area_temp);
 					p_file_stat_base->file_area_count_in_temp_list ++;
-					spin_unlock(&p_file_stat_base->file_stat_lock);
+					spin_unlock(&p_file_stat_small->file_stat_lock);
 				}
-				else{
+				else if(FILE_STAT_NORMAL == file_type){
 					p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
 
 					set_file_area_in_warm_list(p_file_area);
@@ -1426,7 +1440,9 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 					refault_to_warm_file_area_count ++;
 					//在file_stat->file_area_temp链表的file_area个数加1
 					//p_file_stat->file_area_count_in_temp_list ++;
-				}
+				}else
+					BUG();
+
 				//spin_unlock(&p_file_stat->file_stat_lock);
 			}
 
@@ -1436,7 +1452,7 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 		case (1 << F_file_area_in_free_list):
 
 			if(!file_area_in_free_list(p_file_area) || file_area_in_free_list_error(p_file_area))
-				panic("%s file_area:0x%llx status:%d not in file_area_free\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+				panic("%s file_stat:0x%llx file_area:0x%llx status:%d not in file_area_free\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
 
 			//file_area被遍历到时记录当时的global_age，不管此时file_area的page是否被访问pte置位了
 			p_file_area->file_area_access_age = p_hot_cold_file_global->global_age;
@@ -1519,7 +1535,7 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 			}
 			break;
 		default:
-			panic("%s file_area:0x%llx status:%d error\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+			panic("%s file_stat:0x%llx file_area:0x%llx status:%d error\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
 	}
 
 	p_hot_cold_file_global->mmap_file_shrink_counter.mapcount_to_warm_file_area_count += mapcount_to_warm_file_area_count;
@@ -1554,10 +1570,11 @@ static noinline int reverse_other_file_area_list(struct hot_cold_file_global *p_
 
 			break;
 		}
+
 		if(scan_file_area_count ++ > traversal_max_count)
 			break;
 
-  	    reverse_other_file_area_list_common(p_hot_cold_file_global,&p_file_stat->file_stat_base,p_file_area,file_area_type,FILE_STAT_NORMAL,&file_area_list);
+		reverse_other_file_area_list_common(p_hot_cold_file_global,&p_file_stat->file_stat_base,p_file_area,file_area_type,FILE_STAT_NORMAL,&file_area_list);
 
 		//在把file_area移动到其他链表后，file_area_list_head链表可能是空的，没有file_area了，就结束遍历。其实这个判断list_for_each_entry_safe_reverse也有
 		if(list_empty(file_area_list_head)){
@@ -1592,11 +1609,12 @@ static noinline int reverse_other_file_area_list_small_file(struct hot_cold_file
 
 			break;
 		}
+
 		if(scan_file_area_count ++ > traversal_max_count)
 			break;
-        //获取file_area的状态，可能是 hot、free、refault、mapcount 这几种
+		//获取file_area的状态，可能是 hot、free、refault、mapcount 这几种
 		file_area_type = get_file_area_list_status(p_file_area);
-  	    reverse_other_file_area_list_common(p_hot_cold_file_global,&p_file_stat_small->file_stat_base,p_file_area,file_area_type,FILE_STAT_SMALL,&file_area_list);
+		reverse_other_file_area_list_common(p_hot_cold_file_global,&p_file_stat_small->file_stat_base,p_file_area,file_area_type,FILE_STAT_SMALL,&file_area_list);
 
 		//在把file_area移动到其他链表后，file_area_list_head链表可能是空的，没有file_area了，就结束遍历。其实这个判断list_for_each_entry_safe_reverse也有
 		if(list_empty(file_area_list_head)){
@@ -2522,9 +2540,13 @@ static noinline unsigned int check_file_area_cold_page_and_clear(struct hot_cold
 	unsigned int scan_file_area_count_file_move_from_cache = 0;
 	struct file_stat *p_file_stat = NULL;
 	struct file_stat_small *p_file_stat_small = NULL;
+	struct file_stat_tiny_small *p_file_stat_tiny_small = NULL;
 	unsigned int file_area_type;
 
 	memset(page_buf,0,BUF_PAGE_COUNT*sizeof(struct page*));
+
+	/*file_stat和file_type不匹配则主动crash*/
+	is_file_stat_match_error(p_file_stat_base,file_type);
 
 	/*注意，执行该函数的file_stat都是处于global temp链表的，file_stat->file_area_temp和 file_stat->file_area_mapcount 链表上都有file_area,mapcount的file_area
 	 *变多了，达到了该文件要变成mapcount文件的阀值。目前在下边的check_one_file_area_cold_page_and_clear函数里，只会遍历file_stat->file_area_mapcount 链表上
@@ -2871,9 +2893,18 @@ next_file_area:
 			p_file_stat = NULL;
 		}else if(FILE_STAT_SMALL == file_type){
 			p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
+
 			list_splice(&file_area_free,&p_file_stat_small->file_area_other);
 			list_splice(&file_area_have_cache_page_head,&p_file_stat_small->file_area_other);
 			p_file_stat_small = NULL;
+		}else if(FILE_STAT_TINY_SMALL == file_type){
+			p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
+
+			spin_lock(&p_file_stat_tiny_small->file_stat_lock);
+			list_splice(&file_area_free,&p_file_stat_tiny_small->file_area_temp);
+			list_splice(&file_area_have_cache_page_head,&p_file_stat_tiny_small->file_area_temp);
+			spin_unlock(&p_file_stat_tiny_small->file_stat_lock);
+			p_file_stat_tiny_small = NULL;
 		}else
 			BUG();
 	}
@@ -3247,6 +3278,9 @@ static noinline int get_file_area_from_mmap_file_stat_list_common(struct hot_col
 	if(shrink_page_printk_open)
 		printk("1:%s file_stat_last:0x%llx\n",__func__,(u64)p_hot_cold_file_global->file_stat_last);
 
+	/*file_stat和file_type不匹配则主动crash*/
+	is_file_stat_match_error(p_file_stat_base,file_type);
+
 	//每次都从链表尾开始遍历
 	//list_for_each_entry_safe_reverse(p_file_stat,p_file_stat_temp,file_stat_temp_head,hot_cold_file_list){
 
@@ -3254,13 +3288,13 @@ static noinline int get_file_area_from_mmap_file_stat_list_common(struct hot_col
     switch (file_stat_list_type){
 		case F_file_stat_in_file_stat_tiny_small_file_head_list:
 			/*file_stat此时可能被方法iput()释放delete，但file_stat的delete的标记与file_stat in_temp_list 是共存的，不干扰file_stat in_temp_list的判断*/
-			if(!file_stat_in_file_stat_temp_head_list_base(p_file_stat_base) || file_stat_in_file_stat_temp_head_list_error_base(p_file_stat_base))
-				panic("%s file_stat:0x%llx not int file_stat_temp_head status:0x%lx\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+			if(!file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base) || file_stat_in_file_stat_tiny_small_file_head_list_error_base(p_file_stat_base))
+				panic("%s file_stat:0x%llx not int file_stat_tiny_small_file status:0x%lx\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
 			break;
 		case F_file_stat_in_file_stat_small_file_head_list:
 			/*file_stat此时可能被方法iput()释放delete，但file_stat的delete的标记与file_stat in_temp_list 是共存的，不干扰file_stat in_temp_list的判断*/
-			if(!file_stat_in_file_stat_temp_head_list_base(p_file_stat_base) || file_stat_in_file_stat_temp_head_list_error_base(p_file_stat_base))
-				panic("%s file_stat:0x%llx not int file_stat_temp_head status:0x%lx\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+			if(!file_stat_in_file_stat_small_file_head_list_base(p_file_stat_base) || file_stat_in_file_stat_small_file_head_list_error_base(p_file_stat_base))
+				panic("%s file_stat:0x%llx not int file_stat_small_file status:0x%lx\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
 			break;
 		case F_file_stat_in_file_stat_temp_head_list:
 			/*file_stat此时可能被方法iput()释放delete，但file_stat的delete的标记与file_stat in_temp_list 是共存的，不干扰file_stat in_temp_list的判断*/
