@@ -659,13 +659,14 @@ unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_global *p_
 		/* 新的版本hot_file_update_file_status()遇到refault、hot file_area，只是做个标记，而不会把file_area移动到
 		 * file_stat->refault、hot链表，因此file_stat->temp链表上的file_area除了有in_temp_list标记，还有
 		 * in_refault_list、in_hot_list标记，故要把file_area_in_temp_list_error(p_file_area)判断去掉*/
-		if(FILE_STAT_TINY_SMALL == file_type){
-			if(!file_area_in_temp_list(p_file_area) /*|| (file_area_in_temp_list_error(p_file_area) && !file_area_in_hot_list(p_file_area))*/)
-				panic("%s file_area:0x%llx status:%d not in file_area_temp\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+		if(FILE_STAT_TINY_SMALL != file_type){
+			if(!file_area_in_temp_list(p_file_area) || (file_area_in_temp_list_error(p_file_area) && !file_area_in_hot_list(p_file_area)))
+				panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x not in file_area_temp\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
 		}
 		else{
-			if(!file_area_in_temp_list(p_file_area) || (file_area_in_temp_list_error(p_file_area) && !file_area_in_hot_list(p_file_area)))
-				panic("%s file_area:0x%llx status:%d not in file_area_temp\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+			/*tiny_small_file->temp链表可能同时有in_temp、in_hot、in_refault属性的file_area，故不再判断。但如果file_area一个这些状态都没有，也crash*/
+			if(0 == (p_file_area->file_area_state & FILE_AREA_LIST_MASK))
+				panic("%s:1 file_stat:0x%llx file_area:0x%llx status:0x%x not in any file_area_list\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
 		}
 
 		cold_file_area_delete_quick(p_hot_cold_file_global,p_file_stat_base,p_file_area);
@@ -681,6 +682,8 @@ unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_global *p_
 			if(!file_area_in_refault_list(p_file_area) || file_area_in_refault_list_error(p_file_area))
 				panic("%s file_area:0x%llx status:%d not in file_area_refault\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 #endif
+			if(0 == (p_file_area->file_area_state & FILE_AREA_LIST_MASK))
+				panic("%s:2 file_stat:0x%llx file_area:0x%llx status:0x%x not in any file_area_list\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
 
 			cold_file_area_delete_quick(p_hot_cold_file_global,p_file_stat_base,p_file_area);
 			del_file_area_count ++;
@@ -691,7 +694,7 @@ unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_global *p_
 		//refault链表
 		list_for_each_entry_safe_reverse(p_file_area,p_file_area_temp,&p_file_stat_del->file_area_refault,file_area_list){
 			if(!file_area_in_refault_list(p_file_area) || file_area_in_refault_list_error(p_file_area))
-				panic("%s file_area:0x%llx status:%d not in file_area_refault\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+				panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x not in file_area_refault\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
 
 			cold_file_area_delete_quick(p_hot_cold_file_global,p_file_stat_base,p_file_area);
 			del_file_area_count ++;
@@ -699,7 +702,7 @@ unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_global *p_
 		//hot链表
 		list_for_each_entry_safe_reverse(p_file_area,p_file_area_temp,&p_file_stat_del->file_area_hot,file_area_list){
 			if(!file_area_in_hot_list(p_file_area) || file_area_in_hot_list_error(p_file_area))
-				panic("%s file_area:0x%llx status:%d not in file_area_hot\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+				panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x not in file_area_hot\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
 
 			cold_file_area_delete_quick(p_hot_cold_file_global,p_file_stat_base,p_file_area);
 			del_file_area_count ++;
@@ -709,7 +712,7 @@ unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_global *p_
 			/*file_area链表上的file_area可能被hot_file_update_file_status()并发设置了in_refautl状态但没来的及移动到
 			 * file_stat->refault链表，故这里不能判断file_area的in_free状态错误*/
 			if(!file_area_in_free_list(p_file_area) || (file_area_in_free_list_error(p_file_area) && !file_area_in_refault_list(p_file_area)))
-				panic("%s file_area:0x%llx status:%d not in file_area_free\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+				panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x not in file_area_free\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
 
 			cold_file_area_delete_quick(p_hot_cold_file_global,p_file_stat_base,p_file_area);
 			del_file_area_count ++;
@@ -727,7 +730,7 @@ unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_global *p_
 		//mapcount链表
 		list_for_each_entry_safe_reverse(p_file_area,p_file_area_temp,&p_file_stat_del->file_area_mapcount,file_area_list){
 			if(!file_area_in_mapcount_list(p_file_area) || file_area_in_mapcount_list_error(p_file_area))
-				panic("%s file_area:0x%llx status:%d not in file_area_mapcount\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+				panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x not in file_area_mapcount\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
 
 			cold_file_area_delete_quick(p_hot_cold_file_global,p_file_stat_base,p_file_area);
 			del_file_area_count ++;
@@ -735,7 +738,7 @@ unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_global *p_
 		//warm链表,注意，该file_area可能在update函数被并发设置了in_hot标记
 		list_for_each_entry_safe_reverse(p_file_area,p_file_area_temp,&p_file_stat_del->file_area_warm,file_area_list){
 			if(!file_area_in_warm_list(p_file_area) || (file_area_in_warm_list_error(p_file_area) && !file_area_in_hot_list(p_file_area)))
-				panic("%s file_area:0x%llx status:%d not in file_area_wram\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+				panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x not in file_area_wram\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
 
 			cold_file_area_delete_quick(p_hot_cold_file_global,p_file_stat_base,p_file_area);
 			del_file_area_count ++;
@@ -3380,7 +3383,8 @@ static void file_stat_other_list_file_area_solve_common(struct hot_cold_file_glo
 					/*hot链表上长时间没访问的file_area现在移动到file_stat->warm链表，而不是file_stat->temp链表，这个不用spin_lock(&p_file_stat->file_stat_lock)加锁*/
 					list_move(&p_file_area->file_area_list,&p_file_stat->file_area_warm);
 					//spin_unlock(&p_file_stat->file_stat_lock);	    
-				}
+				}else
+					BUG();
 			}
 
 			break;
@@ -3416,7 +3420,7 @@ static void file_stat_other_list_file_area_solve_common(struct hot_cold_file_glo
 					list_move(&p_file_area->file_area_list,&p_file_stat_base->file_area_temp);
 					spin_unlock(&p_file_stat_base->file_stat_lock); 
 				}
-				else{
+				else if(FILE_STAT_NORMAL == file_type){
 					p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
 					//file_area_refault_to_warm_list_count ++;
 					//p_hot_cold_file_global->hot_cold_file_shrink_counter.file_area_refault_to_warm_list_count += file_area_refault_to_warm_list_count;
@@ -3426,7 +3430,8 @@ static void file_stat_other_list_file_area_solve_common(struct hot_cold_file_glo
 					/*refault链表上长时间没访问的file_area现在移动到file_stat->warm链表，而不是file_stat->temp链表，这个不用spin_lock(&p_file_stat->file_stat_lock)加锁*/
 					list_move(&p_file_area->file_area_list,&p_file_stat->file_area_warm);
 					//spin_unlock(&p_file_stat->file_stat_lock);	    
-				}
+				}else
+					BUG();
 			}
 
 			break;
@@ -3701,6 +3706,7 @@ static inline int file_stat_temp_list_file_area_solve(struct hot_cold_file_globa
 			  else if(file_area_in_refault_list(p_file_area))
 			  file_area_type = F_file_area_in_refault_list;*/
 
+			printk("%s:1 file_stat:0x%llx file_area:0x%llx status:0x%x tiny small file\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
 			/*对于同时有in_temp和in_hot属性的file_area，要清理掉in_temp属性，否则file_stat_other_list_file_area_solve_common()
 			 *会因同时具备两种属性而crash*/
 			if(file_area_in_temp_list(p_file_area) && file_area_in_hot_list(p_file_area)){
@@ -3735,6 +3741,7 @@ static inline int file_stat_temp_list_file_area_solve(struct hot_cold_file_globa
 
 				/*if(p_file_stat_base->file_area_count <= SMALL_FILE_AREA_COUNT_LEVEL)*/
 					clear_file_area_in_temp_list(p_file_area);
+					p_file_stat_base->file_area_count_in_temp_list --;
 			}
 			
 			file_area_type = get_file_area_list_status(p_file_area);
@@ -4390,7 +4397,8 @@ static noinline unsigned int free_page_from_file_area(struct hot_cold_file_globa
 		spin_lock(&p_file_stat_tiny_small->file_stat_lock);
 		list_splice(file_area_free_temp,&p_file_stat_tiny_small->file_area_temp);
 		spin_unlock(&p_file_stat_tiny_small->file_stat_lock);
-	}
+	}else
+		BUG();
 	/*list_splice把前者的链表成员a1...an移动到后者链表，并不会清空前者链表。必须INIT_LIST_HEAD清空前者链表，否则它一直指向之前的
 	 *链表成员a1...an。后续再向该链表添加新成员b1...bn。这个链表就指向的成员就有a1...an + b1...+bn。而此时a1...an已经移动到了后者
 	 *链表，相当于前者和后者链表都指向了a1...an成员，这样肯定会出问题.之前get_file_area_from_file_stat_list()函数报错
@@ -4665,10 +4673,38 @@ static inline unsigned int move_tiny_small_file_area_to_normal_file(struct hot_c
 			file_area_type = get_file_area_list_status(p_file_area);
 			/*把老的file_stat的free、refaut、hot属性的file_area移动到新的file_stat对应的file_area链表，这个过程老的
 			 *file_stat不用file_stat_lock加锁，因为已经保证没进程再访问它。新的file_stat也不用，因为不是把file_area移动到新的file_stat->temp链表*/
+#if 0			
 			if(is_cache_file)
 				file_stat_other_list_file_area_solve_common(p_hot_cold_file_global,&p_file_stat->file_stat_base,p_file_area,file_area_type,FILE_STAT_NORMAL);
 			else/*这个函数mmap的tiny small转换成small或normal文件也会调用，这里正是对mmap文件的移动file_area的处理*/
 				reverse_other_file_area_list_common(p_hot_cold_file_global,&p_file_stat->file_stat_base,p_file_area,file_area_type,FILE_STAT_NORMAL,NULL);
+#else
+			/*这里牵涉到一个重大bug，原本针对in_hot、in_free、in_refault等的file_area是执行file_stat_other_list_file_area_solve_common()
+			 *函数处理，想当然的以为该函数会把这些file_area移动到file_stat->free、refault、hot或small_file_stat->other链表，想当然太容易
+			 *埋入隐藏bug。因为比如in_hot的file_area只有长时间只会temp链表，根本不会移动到file_stat->hot或small_file_stat->other链表。
+			 *因此这些in_hot、in_free、in_refault等file_area只会残留在原tiny_smal_file_stat->temp链表，下边list_splice_init再移动到新的
+			 *file_stat的temp链表，等将来遍历到这些temp链表上file_area，就会因没in_temp属性而crash!!!!!!!!!!
+			 */
+			switch (file_area_type){
+				case (1 << F_file_area_in_hot_list):
+					list_move(&p_file_area->file_area_list,&p_file_stat->file_area_hot);
+					break;
+				case (1 << F_file_area_in_refault_list):
+					list_move(&p_file_area->file_area_list,&p_file_stat->file_area_refault);
+					break;
+					/*file_area同时具备in_free的in_refault属性的，那是in_free的被访问update函数设置了in_refault，要移动到file_stat->in_free链表，
+					 *因为这种属性的file_area就是在in_free链表，将来执行file_stat_other_list_file_area_solve_common()会把它移动到in_refault链表*/
+				case (1 << F_file_area_in_refault_list | 1 << F_file_area_in_free_list):
+				case (1 << F_file_area_in_free_list):
+					list_move(&p_file_area->file_area_list,&p_file_stat->file_area_free);
+					break;
+				case (1 << F_file_area_in_mapcount_list):
+					list_move(&p_file_area->file_area_list,&p_file_stat->file_area_mapcount);
+					break;
+				default:
+					panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x error\n",__func__,(u64)p_file_stat_tiny_small,(u64)p_file_area,p_file_area->file_area_state);
+			}
+#endif
 		}
 	}
 	/*把file_stat_tiny_small->temp链表上的temp属性的file_area移动到新的file_stat的temp链表上。不能用list_splice，
@@ -4689,14 +4725,27 @@ static inline unsigned int move_tiny_small_file_area_to_small_file(struct hot_co
 		if(++ scan_file_area_count > SMALL_FILE_AREA_COUNT_LEVEL)
 			break;
 		if(!file_area_in_temp_list(p_file_area)){
+			//printk("move_tiny_small_file_area_to_small_file: file_stat:0x%llx file_area:0x%llx status:0x%x new:0x%llx\n",(u64)p_file_stat_tiny_small,(u64)p_file_area,p_file_area->file_area_state,(u64)p_file_stat_small);
+
 			/* 其实这里就可以判断这些hot、refault的file_area，如果长时间没访问则移动回file_stat->warm链表，
 			 * free的file_area则直接释放掉!!!!!!后续改进。并且，不用加file_stat->file_stat_lock锁。
 			 * file_stat_tiny_small已经保证不会再有进程访问，p_file_stat只有操作p_file_stat->temp链表的file_area才用加锁!!!!!!!*/
 			file_area_type = get_file_area_list_status(p_file_area);
+#if	 0
+
 			if(is_cache_file)
 				file_stat_other_list_file_area_solve_common(p_hot_cold_file_global,&p_file_stat_small->file_stat_base,p_file_area,file_area_type,FILE_STAT_SMALL);
 			else
 				reverse_other_file_area_list_common(p_hot_cold_file_global,&p_file_stat_small->file_stat_base,p_file_area,file_area_type,FILE_STAT_SMALL,NULL);
+#else
+			/*in_free、in_hot、in_refault属性的file_area必须强制移动到新的file_stat的free、hot、refault链表。file_stat_other_list_file_area_solve_common
+			 * 函数并不会把这些file_area必须强制移动到新的small_file_stat的other链表。这导致，这些没有in_temp属性的file_area下边list_splice_init()
+			 * 被移动到新的small_file_stat->temp链表，将来在这个temp链表遍历到没有in_temp属性的file_area就会crash*/
+			list_move(&p_file_area->file_area_list,&p_file_stat_small->file_area_other);
+			/*file_area如果没有in_hot、in_free、in_refault、in_mapcount属性中的一种则触发crash*/
+			if(0 == (p_file_area->file_area_state & FILE_AREA_LIST_MASK))
+				panic("%s file_stat:0x%llx file_area:0x%llx status:%d not in any file_area_list\n",__func__,(u64)p_file_stat_tiny_small,(u64)p_file_area,p_file_area->file_area_state);
+#endif			
 		}
 	}
 	/*把file_stat_tiny_small->temp链表上的temp属性的file_area移动到新的file_stat的temp链表上*/
@@ -4719,10 +4768,35 @@ static inline unsigned int move_small_file_area_to_normal_file(struct hot_cold_f
 			 * free的file_area则直接释放掉!!!!!!后续改进。并且，不用加file_stat->file_stat_lock锁。
 			 * file_stat_tiny_small已经保证不会再有进程访问，p_file_stat只有操作p_file_stat->temp链表的file_area才用加锁!!!!!!!*/
 			file_area_type = get_file_area_list_status(p_file_area);
+#if 0	
 			if(is_cache_file)
 				file_stat_other_list_file_area_solve_common(p_hot_cold_file_global,&p_file_stat->file_stat_base,p_file_area,file_area_type,FILE_STAT_NORMAL);
 			else
 				reverse_other_file_area_list_common(p_hot_cold_file_global,&p_file_stat->file_stat_base,p_file_area,file_area_type,FILE_STAT_NORMAL,NULL);
+#else
+			/*in_free、in_hot、in_refault属性的file_area必须强制移动到新的file_stat的free、hot、refault链表。file_stat_other_list_file_area_solve_common
+			 * 函数并不会把这些file_area必须强制移动到新的file_stat的free、hot、refault链表。这导致，这些没有in_temp属性的file_area下边list_splice_init()
+			 * 被移动到新的file_stat->temp链表，将来在这个temp链表遍历到没有in_temp属性的file_area就会crash*/
+			switch (file_area_type){
+				case (1 << F_file_area_in_hot_list):
+					list_move(&p_file_area->file_area_list,&p_file_stat->file_area_hot);
+					break;
+				case (1 << F_file_area_in_refault_list):
+					list_move(&p_file_area->file_area_list,&p_file_stat->file_area_refault);
+					break;
+					/*file_area同时具备in_free的in_refault属性的，那是in_free的被访问update函数设置了in_refault，要移动到file_stat->in_free链表，
+					 *因为这种属性的file_area就是在in_free链表，将来执行file_stat_other_list_file_area_solve_common()会把它移动到in_refault链表*/
+				case (1 << F_file_area_in_refault_list | 1 << F_file_area_in_free_list):
+				case (1 << F_file_area_in_free_list):
+					list_move(&p_file_area->file_area_list,&p_file_stat->file_area_free);
+					break;
+				case (1 << F_file_area_in_mapcount_list):
+					list_move(&p_file_area->file_area_list,&p_file_stat->file_area_mapcount);
+					break;
+				default:
+					panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x error\n",__func__,(u64)p_file_stat_small,(u64)p_file_area,p_file_area->file_area_state);
+			}
+#endif
 		}
 		/*防止循环耗时太长而适当调度*/
 		cond_resched();
