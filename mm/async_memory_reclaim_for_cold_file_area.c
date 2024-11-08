@@ -100,6 +100,7 @@ static void i_file_stat_callback(struct rcu_head *head)
 int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base * p_file_stat_base,struct file_area *p_file_area)
 {
 	XA_STATE(xas, &((struct address_space *)(p_file_stat_base->mapping))->i_pages, p_file_area->start_index >> PAGE_COUNT_IN_AREA_SHIFT);
+	void *old_file_area;
 
 	/*在释放file_area时，可能正有进程执行hot_file_update_file_status()遍历file_area_tree树中p_file_area指向的file_area结构，需要加锁*/
 	/*如果近期file_area被访问了则不能再释放掉file_area*/
@@ -132,9 +133,12 @@ int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 	}
 	/*从xarray tree剔除。注意，xas_store不仅只是把保存file_area指针的xarray tree的父节点xa_node的槽位设置NULL。
 	 *还有一个隐藏重要作用，如果父节点node没有成员了，还是向上逐级释放父节点xa_node，直至xarray tree全被释放*/
-	xas_store(&xas, NULL);
+	old_file_area = xas_store(&xas, NULL);
+	if((NULL == old_file_area))
+		BUG();
+
 	if (xas_error(&xas)){
-		printk("%s xas_error:%d !!!!!!!!!!!!!!\n",__func__,xas_error(&xas));
+		printk("%s xas_error:%d  !!!!!!!!!!!!!!\n",__func__,xas_error(&xas));
 		xas_unlock_irq(&xas);
 		return -1;
 	}
@@ -4817,10 +4821,15 @@ static inline void old_file_stat_change_to_new(struct file_stat_base *p_file_sta
 	 * 再有进程访问了。目的是：后续要把老的file_stat的file_area全移动到新的file_stat的链表，是没有对老的file_stat_lock加锁，节省性能*/
     synchronize_rcu();	
 
+	if(file_stat_in_replaced_file_base(p_file_stat_base_old))
+	    panic("%s file_stat:0x%llx status:0x%lx\n",__func__,(u64)p_file_stat_base_old,p_file_stat_base_old->file_stat_status);
+		
 	spin_lock(&p_file_stat_base_old->file_stat_lock);
 	spin_lock(&p_file_stat_base_new->file_stat_lock);
 	/*设置老的file_stat是delete状态，后续这个老的file_stat就要被新的file_stat替代了*/
-	set_file_stat_in_delete_base(p_file_stat_base_old);
+	//隐藏bug，这里设置delete，如果此时正好有进程并发读写文件刚执行__filemap_add_folio函数，用到p_file_stat_base_old，发现有delte标记就会crash???去除了
+	//set_file_stat_in_delete_base(p_file_stat_base_old);
+	set_file_stat_in_replaced_file_base(p_file_stat_base_old);
 	//p_file_stat_base_old->mapping->rh_reserved1 =  (unsigned long)p_file_stat_base_new;
     p_file_stat_base_new->mapping = p_file_stat_base_old->mapping; 
 
@@ -4984,6 +4993,8 @@ void can_tiny_small_file_change_to_small_normal_file(struct hot_cold_file_global
 		/*可能此时该文件被iput delete了，要防护,老的和新的file_stat都可能会被并发删除。没有必要再判断新的file_stat的是否delete了。两个文件不应该互相影响*/
 		if(!file_stat_in_delete_base(&p_file_stat_tiny_small->file_stat_base) /*&& !file_stat_in_delete(p_file_stat)*/){
 			/*该file_stat从老的global链表中剔除，下边call_rcu异步释放掉*/
+
+			/*隐藏bug，如果此时有进程在__filemap_add_folio函数()后期正使用p_file_stat_base_old，这里却把它释放了，而__filemap_add_folio函数没有rcu_read_lock保护，导致__filemap_add_folio函数用的p_file_stat_base_old。__filemap_add_folio()加了rcu_read_lock()防止这种情况*/
 			list_del_rcu(&p_file_stat_tiny_small->hot_cold_file_list);
 			call_rcu(&p_file_stat_tiny_small->i_rcu, i_file_stat_tiny_small_callback);
 		}
@@ -5352,6 +5363,9 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 	/* 从global temp和large_file_temp链表尾遍历N个file_stat，回收冷file_area的。对热file_area、refault file_area、
 	 * in_free file_area的各种处理。这个不global lock加锁。但是遇到file_stat移动到其他global 链表才会global lock加锁*/
 	list_for_each_entry_safe_reverse(p_file_stat,p_file_stat_temp,file_stat_temp_head,hot_cold_file_list){
+        /*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug，这个检测必须放到遍历file_stat最开头，防止跳过*/
+		is_file_stat_mapping_error((struct file_stat_base *)(&p_file_stat->file_stat_base));
+		
 		if(scan_file_area_count >= scan_file_area_max)
 			break;
         scan_file_area_count += get_file_area_from_file_stat_list_common(p_hot_cold_file_global,&p_file_stat->file_stat_base,scan_file_area_max,file_stat_list_type,file_type);
@@ -5472,6 +5486,10 @@ static noinline unsigned int get_file_area_from_file_stat_small_list(struct hot_
 	/* 从global temp和large_file_temp链表尾遍历N个file_stat，回收冷file_area的。对热file_area、refault file_area、
 	 * in_free file_area的各种处理。这个不global lock加锁。但是遇到file_stat移动到其他global 链表才会global lock加锁*/
 	list_for_each_entry_safe_reverse(p_file_stat_small,p_file_stat_small_temp,file_stat_temp_head,hot_cold_file_list){
+        /*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug，这个检测必须放到遍历file_stat最开头，防止跳过*/
+		//is_file_stat_mapping_error(&p_file_stat_small->file_stat_base);
+		is_file_stat_mapping_error((struct file_stat_base *)(&p_file_stat_small->file_stat_base));
+
 		if(scan_file_area_count >= scan_file_area_max)
 			break;
 	    /* small文件的file_area个数如果超过阀值则转换成normal文件等。这个操作必须放到get_file_area_from_file_stat_list_common()
@@ -5540,6 +5558,10 @@ static noinline unsigned int get_file_area_from_file_stat_tiny_small_list(struct
 	/* 从global temp和large_file_temp链表尾遍历N个file_stat，回收冷file_area的。对热file_area、refault file_area、
 	 * in_free file_area的各种处理。这个不global lock加锁。但是遇到file_stat移动到其他global 链表才会global lock加锁*/
 	list_for_each_entry_safe_reverse(p_file_stat_tiny_small,p_file_stat_tiny_small_temp,file_stat_temp_head,hot_cold_file_list){
+        /*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug，这个检测必须放到遍历file_stat最开头，防止跳过*/
+		//is_file_stat_mapping_error(&p_file_stat_tiny_small->file_stat_base);
+		is_file_stat_mapping_error((struct file_stat_base *)(&p_file_stat_tiny_small->file_stat_base));
+
 		if(scan_file_area_count >= scan_file_area_max)
 			break;
 	    /* tiny small文件的file_area个数如果超过阀值则转换成small或normal文件等。这个操作必须放到get_file_area_from_file_stat_list_common()

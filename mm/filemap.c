@@ -1534,7 +1534,17 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 	if(nr != 1 || folio_order(folio) != 0){
 		panic("%s index:%ld folio->index:%ld nr:%ld folio_order(folio):%d\n",__func__,index,folio->index,nr,folio_order(folio));
 	}
-
+   
+	/*这里加rcu_read_lock+rmp_rmb() 很重要，目的有两个。详细mapping_get_entry和mapping_get_entry_for_file_area也有说明。
+	 *1：当前文件可能被异步内存回收线程有file_stat_tiny_small转成成file_stat_small，然后标记replaced后，就rcu异步释放掉。
+	     这个rcu_read_lock可以保证file_stat_tiny_small结构体不会被立即释放掉，否则当前函数使用的file_stat_tiny_small内存就是无效
+	  2: 当前文件file_stat可能因长时间不使用被异步内存回收线程并发 cold_file_stat_delete() rcu异步释放掉，并标记
+	     file_stat->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE.rcu_read_lock保证file_stat结构体不会被立即释放掉，否则这里使用
+		 file_stat就是无效内存访问。smp_rmb()是保证立即看到mapping->rh_reserved1是SUPPORT_FILE_AREA_INIT_OR_DELETE。其实不用加内存
+		 屏障cold_file_stat_delete()函数和当前函数都有xas_lock_irq(&xas)加锁判断mapping->rh_reserved1是否是SUPPORT_FILE_AREA_INIT_OR_DELETE
+		 为了保险，还是加上smp_rmb()，以防止将来下边的if(SUPPORT_FILE_AREA_INIT_OR_DELETE == mapping->rh_reserved1)没有放到xas_lock_irq()加锁里*/
+	rcu_read_lock();
+	smp_rmb();
 	do {
 		//这里边有执行xas_load()，感觉浪费性能吧!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 		unsigned int order = xa_get_order(xas.xa, xas.xa_index);
@@ -1677,12 +1687,16 @@ unlock:
 
 	if (xas_error(&xas))
 		goto error;
-
+     
 	trace_mm_filemap_add_to_page_cache(folio);
+
+	rcu_read_unlock();
 	return 0;
 error:
 //if(p_file_area) 在这里把file_area释放掉??????????有没有必要
 //	file_area_alloc_free();
+
+	rcu_read_unlock();
 
 	if (charged)
 		mem_cgroup_uncharge(folio);
@@ -1706,8 +1720,8 @@ noinline int __filemap_add_folio(struct address_space *mapping,
 	 *把对xarray tree槽位的赋值不在filemap.c的__filemap_add_folio函数，在其他文件。只剩下dax entry在这里显式指明。
 	 * */
 	if(/*!dax_mapping(mapping) && !shmem_mapping(mapping) &&*/IS_SUPPORT_FILE_AREA(mapping)){
-		smp_rmb();
-		if(IS_SUPPORT_FILE_AREA(mapping))
+		//smp_rmb();-----------这个内存屏障放到__filemap_add_folio_for_file_area()函数里了
+		//if(IS_SUPPORT_FILE_AREA(mapping))
 		    return __filemap_add_folio_for_file_area(mapping,folio,index,gfp,shadowp);
 	}
 #endif	

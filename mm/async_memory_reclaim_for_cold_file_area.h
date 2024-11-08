@@ -464,7 +464,7 @@ struct file_stat_base
 	//处于中间状态的file_area结构添加到这个链表，新分配的file_area就添加到这里
 	struct list_head file_area_temp;
 	/************base***base***base************/
-};
+}/*__attribute__((packed))*/;
 struct file_stat_tiny_small
 {
 	union{
@@ -525,8 +525,16 @@ struct file_stat_tiny_small
 			/************base***base***base************/
 		};
 	};
-};
+}/*__attribute__((packed))*/;
 
+/*注意，有个隐藏的问题，在filemap.c函数里，是直接p_file_stat = (struct file_stat_base *)mapping->rh_reserved1，
+ *令p_file_stat指向mapping->rh_reserved1内存最开始的地址得到file_stat_base，并不是通过结构体成员的形式获取。因此，
+ 成员file_stat_base file_stat_base必须放到struct file_stat_small结构体最开头。还要加上__attribute__((packed))
+ 禁止编译器优化file_stat_small结构体内部的成员布局，禁止为了凑够8字节对齐而填充空间(比如，一个1字节大小的变量占
+ 空间8个字节)，这会令(struct file_stat_base *)mapping->rh_reserved1获取到的file_stat_base存在地址偏差!!!!!!!!!。
+ 最后，决定alloc_file_stat时，直接mapping->rh_reserved1 = &file_stat.file_stat_base，就是令mapping->rh_reserved1
+ 直接指向file_stat.file_stat_base结构体，这样p_file_stat = (struct file_stat_base *)mapping->rh_reserved1
+ p_file_stat一定指向的是file_stat.file_stat_base结构体，不会再有对齐问题，__attribute__((packed))就不需要了*/
 struct file_stat_small
 {
 	union{
@@ -589,7 +597,7 @@ struct file_stat_small
 	};
 	/*hot、refault、free 等状态的file_area移动到这个链表*/
 	struct list_head file_area_other;
-};
+}/*__attribute__((packed))*/;
 //热点文件统计信息，一个文件一个
 struct file_stat
 {
@@ -666,7 +674,8 @@ struct file_stat
 	struct list_head file_area_mapcount;
 	//存放内存回收的file_area，mmap文件用
 	struct list_head file_area_free_temp;
-};
+}/*__attribute__((packed))*/;
+
 /*hot_cold_file_node_pgdat结构体每个内存节点分配一个，内存回收前，从lruvec lru链表隔离成功page，移动到每个内存节点绑定的
  * hot_cold_file_node_pgdat结构的pgdat_page_list链表上.然后参与内存回收。内存回收后把pgdat_page_list链表上内存回收失败的
  * page在putback移动回lruvec lru链表。这样做的目的是减少内存回收失败的page在putback移动回lruvec lru链表时，可以减少
@@ -957,6 +966,7 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	//F_file_stat_in_large_file,
 	F_file_stat_in_from_cache_file,//mmap文件是从cache文件的global temp链表移动过来的
 	F_file_stat_in_from_small_file,//该文件是从small文件的global small_temp链表移动过来的
+	F_file_stat_in_replaced_file,//file_stat_tiny_small或file_stat_small转成更大的文件时，老的file_stat被标记replaced
 	//F_file_stat_lock,
 	//F_file_stat_lock_not_block,//这个bit位置1，说明inode在删除的，但是获取file_stat锁失败
 };
@@ -1111,9 +1121,9 @@ FILE_STATUS_BASE(delete)
 //FILE_STATUS_ATOMIC(delete)
 FILE_STATUS_ATOMIC(cache_file)
 FILE_STATUS_ATOMIC(mmap_file)
-
 FILE_STATUS_ATOMIC(from_cache_file)
 FILE_STATUS_ATOMIC(from_small_file)
+FILE_STATUS_ATOMIC(replaced_file)
 
 	//清理文件的状态，大小文件等
 #define CLEAR_FILE_STATUS_ATOMIC_BASE(name)\
@@ -1145,6 +1155,7 @@ FILE_STATUS_ATOMIC_BASE(mmap_file)
 
 	FILE_STATUS_ATOMIC_BASE(from_cache_file)
 FILE_STATUS_ATOMIC_BASE(from_small_file)
+FILE_STATUS_ATOMIC_BASE(replaced_file)
 
 extern struct hot_cold_file_global hot_cold_file_global_info;
 
@@ -1420,6 +1431,12 @@ static inline int get_file_stat_type(struct file_stat_base *file_stat_base)
 	panic("%s file_stat:0x%llx match file_type:%d error\n",__func__,(u64)p_file_stat_base,file_type); \
 }
 
+#define is_file_stat_mapping_error(p_file_stat_base) \
+{ \
+	if((unsigned long)p_file_stat_base != (p_file_stat_base)->mapping->rh_reserved1)  \
+	    panic("%s file_stat:0x%llx match mapping:0x%llx 0x%llx error\n",__func__,(u64)p_file_stat_base,(u64)((p_file_stat_base)->mapping),(u64)((p_file_stat_base)->mapping->rh_reserved1)); \
+}
+
 static inline struct file_stat_base *file_stat_alloc_and_init(struct address_space *mapping,unsigned int file_type,char free_old_file_stat)
 {
 	struct file_stat * p_file_stat = NULL;
@@ -1454,8 +1471,8 @@ static inline struct file_stat_base *file_stat_alloc_and_init(struct address_spa
 		//初始化file_area_hot头结点
 		INIT_LIST_HEAD(&p_file_stat_tiny_small->file_area_temp);
 
-		//mapping->file_stat记录该文件绑定的file_stat结构，将来判定是否对该文件分配了file_stat
-		mapping->rh_reserved1 = (unsigned long)p_file_stat_tiny_small;
+		//mapping->file_stat记录该文件绑定的file_stat结构的file_stat_base的地址，将来判定是否对该文件分配了file_stat
+		mapping->rh_reserved1 = (unsigned long)(&p_file_stat_tiny_small->file_stat_base);
 		//file_stat记录mapping结构
 		p_file_stat_tiny_small->mapping = mapping;
 
@@ -1485,7 +1502,7 @@ static inline struct file_stat_base *file_stat_alloc_and_init(struct address_spa
 		INIT_LIST_HEAD(&p_file_stat_small->file_area_other);
 
 		//mapping->file_stat记录该文件绑定的file_stat结构，将来判定是否对该文件分配了file_stat
-		mapping->rh_reserved1 = (unsigned long)p_file_stat_small;
+		mapping->rh_reserved1 = (unsigned long)(&p_file_stat_small->file_stat_base);
 		//file_stat记录mapping结构
 		p_file_stat_small->mapping = mapping;
 
@@ -1521,7 +1538,7 @@ static inline struct file_stat_base *file_stat_alloc_and_init(struct address_spa
 		INIT_LIST_HEAD(&p_file_stat->file_area_mapcount);
 
 		//mapping->file_stat记录该文件绑定的file_stat结构，将来判定是否对该文件分配了file_stat
-		mapping->rh_reserved1 = (unsigned long)p_file_stat;
+		mapping->rh_reserved1 = (unsigned long)(&p_file_stat->file_stat_base);
 		//file_stat记录mapping结构
 		p_file_stat->mapping = mapping;
 
@@ -1597,7 +1614,8 @@ free_old_file_stat 是1，下边的if不成立，忽略mapping->rh_reserved1，�
 		hot_cold_file_global_info.mmap_file_stat_tiny_small_count++;
 		memset(p_file_stat_tiny_small,0,sizeof(struct file_stat_tiny_small));
 		//mapping->file_stat记录该文件绑定的file_stat结构，将来判定是否对该文件分配了file_stat
-		mapping->rh_reserved1 = (unsigned long)p_file_stat_tiny_small;
+		//这里得把file_stat_base赋值给mapping->rh_reserved1，不再是整个file_stat结构体????????????????????????
+		mapping->rh_reserved1 = (unsigned long)(&p_file_stat_tiny_small->file_stat_base);
 		p_file_stat_tiny_small->mapping = mapping;
 		//设置文件是mmap文件状态，有些mmap文件可能还会被读写，要与cache文件互斥，要么是cache文件要么是mmap文件，不能两者都是 
 		set_file_stat_in_mmap_file_base(&p_file_stat_tiny_small->file_stat_base);
@@ -1620,7 +1638,7 @@ free_old_file_stat 是1，下边的if不成立，忽略mapping->rh_reserved1，�
 		hot_cold_file_global_info.mmap_file_stat_small_count++;
 		memset(p_file_stat_small,0,sizeof(struct file_stat_small));
 		//mapping->file_stat记录该文件绑定的file_stat结构，将来判定是否对该文件分配了file_stat
-		mapping->rh_reserved1 = (unsigned long)p_file_stat_small;
+		mapping->rh_reserved1 = (unsigned long)(&p_file_stat_small->file_stat_base);
 		p_file_stat_small->mapping = mapping;
 		//设置文件是mmap文件状态，有些mmap文件可能还会被读写，要与cache文件互斥，要么是cache文件要么是mmap文件，不能两者都是 
 		set_file_stat_in_mmap_file_base(&p_file_stat_small->file_stat_base);
@@ -1656,7 +1674,7 @@ free_old_file_stat 是1，下边的if不成立，忽略mapping->rh_reserved1，�
 		INIT_LIST_HEAD(&p_file_stat->file_area_mapcount);
 
 		//mapping->file_stat记录该文件绑定的file_stat结构，将来判定是否对该文件分配了file_stat
-		mapping->rh_reserved1 = (unsigned long)p_file_stat;
+		mapping->rh_reserved1 = (unsigned long)(&p_file_stat->file_stat_base);
 		p_file_stat->mapping = mapping;
 #if 1
 		/*新分配的file_stat必须设置in_file_stat_temp_head_list链表。这个设置file_stat状态的操作必须放到 把file_stat添加到
@@ -1687,12 +1705,14 @@ static inline struct file_area *file_area_alloc_and_init(unsigned int area_index
 	struct file_area *p_file_area = NULL;
 
 	spin_lock(&p_file_stat_base->file_stat_lock);
+#if 0	
 	/* 如果file_stat是delete的，此时有两种情况，文件被iput()标记了delete，不可能。还有一种情况就是small文件转换成normal文件 
 	 * 或者 tiny small文件转成成small文件，这个老的small或者tiny small file_stat被标记了。则从mapping->rh_reserved1获取新的
 	 * file_stat。详细注释见can_tiny_small_file_change_to_small_normal_file()*/
-	if(file_stat_in_delete_base(p_file_stat_base)){
-		p_file_stat_base = (struct file_stat_base *)p_file_stat_base->mapping->rh_reserved1;
+	if(file_stat_in_replace_file_base(p_file_stat_base)){----------执行到这里时，file_stat可能被异步内存回收线程标记delete或者replace，故不能触发panic
+	    panic("%s file_stat:0x%llx error\n",__func__,(u64)p_file_stat_base); \
 	}
+#endif	
 	/*到这里，针对当前page索引的file_area结构还没有分配,page_slot_in_tree是槽位地址，*page_slot_in_tree是槽位里的数据，就是file_area指针，
 	  但是NULL，于是针对本次page索引，分配file_area结构*/
 	p_file_area = kmem_cache_alloc(hot_cold_file_global_info.file_area_cachep,GFP_ATOMIC);
