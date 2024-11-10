@@ -954,8 +954,8 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	
 	F_file_stat_in_file_stat_middle_file_head_list,
 	F_file_stat_in_file_stat_large_file_head_list,
-	F_file_stat_in_zero_file_area_list,
 	F_file_stat_in_mapcount_file_area_list,//文件file_stat是mapcount文件
+	F_file_stat_in_zero_file_area_list,
 
 	//F_file_stat_in_drop_cache,
 	//F_file_stat_in_free_page,//正在遍历file_stat的file_area的page，尝试释放page
@@ -1404,8 +1404,42 @@ static inline unsigned int get_file_area_list_status(struct file_area *p_file_ar
 {
 	return p_file_area->file_area_state & FILE_AREA_LIST_MASK;
 }
+static inline long get_file_stat_normal_type_all(struct file_stat *file_stat)
+{
+	unsigned long file_stat_type = file_stat->file_stat_status & FILE_STAT_LIST_MASK;
+
+	switch (file_stat_type){
+		case 1 << F_file_stat_in_file_stat_temp_head_list:
+		case 1 << F_file_stat_in_file_stat_middle_file_head_list:
+		case 1 << F_file_stat_in_file_stat_large_file_head_list:
+			return 1;
+
+		default:
+			return 0;
+	}
+	return 0;
+
+}
+static inline long get_file_stat_normal_type(struct file_stat *file_stat)
+{
+	unsigned long file_stat_type = file_stat->file_stat_status & FILE_STAT_LIST_MASK;
+
+	switch (file_stat_type){
+		case 1 << F_file_stat_in_file_stat_temp_head_list:
+			return TEMP_FILE;
+		case 1 << F_file_stat_in_file_stat_middle_file_head_list:
+			return MIDDLE_FILE;
+		case 1 << F_file_stat_in_file_stat_large_file_head_list:
+			return LARGE_FILE;
+
+		default:
+			return -1;
+	}
+	return -1;
+
+}
 /*判断文件是否是tiny small文件、small文件、普通文件*/
-static inline int get_file_stat_type(struct file_stat_base *file_stat_base)
+static inline long get_file_stat_type(struct file_stat_base *file_stat_base)
 {
 	unsigned long file_stat_type = file_stat_base->file_stat_status & FILE_STAT_LIST_MASK;
 
@@ -1416,8 +1450,10 @@ static inline int get_file_stat_type(struct file_stat_base *file_stat_base)
 			return FILE_STAT_TINY_SMALL;
 
 		case 1 << F_file_stat_in_file_stat_temp_head_list:
+		case 1 << F_file_stat_in_file_stat_hot_head_list:
 		case 1 << F_file_stat_in_file_stat_middle_file_head_list:
 		case 1 << F_file_stat_in_file_stat_large_file_head_list:
+		case 1 << F_file_stat_in_mapcount_file_area_list:
 			return FILE_STAT_NORMAL;
 
 		default:
