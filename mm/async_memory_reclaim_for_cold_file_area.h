@@ -1467,10 +1467,16 @@ static inline long get_file_stat_type(struct file_stat_base *file_stat_base)
 	panic("%s file_stat:0x%llx match file_type:%d error\n",__func__,(u64)p_file_stat_base,file_type); \
 }
 
+/*检测该file_stat跟file_stat->mapping->rh_reserved1是否一致。但如果检测时该文件被并发iput()，执行到__destroy_inode_handler_post()
+ *赋值file_stat->mapping->rh_reserved1赋值0，此时不能crash，但要给出告警信息*/
 #define is_file_stat_mapping_error(p_file_stat_base) \
 { \
-	if((unsigned long)p_file_stat_base != (p_file_stat_base)->mapping->rh_reserved1)  \
-	    panic("%s file_stat:0x%llx match mapping:0x%llx 0x%llx error\n",__func__,(u64)p_file_stat_base,(u64)((p_file_stat_base)->mapping),(u64)((p_file_stat_base)->mapping->rh_reserved1)); \
+	if((unsigned long)p_file_stat_base != (p_file_stat_base)->mapping->rh_reserved1){  \
+		if(0 == (p_file_stat_base)->mapping->rh_reserved1)\
+	        printk(KERN_EMERG"%s file_stat:0x%llx status:0x%lx mapping:0x%llx delete!!!!!!!!!!!!\n",__func__,(u64)p_file_stat_base,(p_file_stat_base)->file_stat_status,(u64)((p_file_stat_base)->mapping)); \
+		else \
+	        panic("%s file_stat:0x%llx match mapping:0x%llx 0x%llx error\n",__func__,(u64)p_file_stat_base,(u64)((p_file_stat_base)->mapping),(u64)((p_file_stat_base)->mapping->rh_reserved1)); \
+	}\
 }
 
 static inline struct file_stat_base *file_stat_alloc_and_init(struct address_space *mapping,unsigned int file_type,char free_old_file_stat)

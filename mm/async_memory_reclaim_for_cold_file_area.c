@@ -354,6 +354,7 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 		}
 		else{
 			mapping->rh_reserved1 = 0;
+			p_file_stat_base_del->mapping = NULL;
 			/*避免spin lock时有printk打印*/
 			spin_unlock_irq(&hot_cold_file_global_info.global_lock);
 			printk("%s p_file_stat:0x%llx status:0x%lx already delete\n",__func__,(u64)p_file_stat_base_del,p_file_stat_base_del->file_stat_status);
@@ -374,6 +375,7 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 		}
 		else{
 			mapping->rh_reserved1 = 0;
+			p_file_stat_base_del->mapping = NULL;
 			/*避免spin lock时有printk打印*/
 			spin_unlock_irq(&hot_cold_file_global_info.mmap_file_global_lock);
 			printk("%s p_file_stat:0x%llx status:0x%lx already delete\n",__func__,(u64)p_file_stat_base_del,p_file_stat_base_del->file_stat_status);
@@ -561,7 +563,10 @@ static noinline void __destroy_inode_handler_post(struct inode *inode)
 		 * 得到的file_area指针当成page，必然会crash*/
 		//inode->i_mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;原来赋值0，现在赋值1，原理一样
 		inode->i_mapping->rh_reserved1 = 0;
-		p_file_stat_base->mapping = NULL;
+		/*这里把p_file_stat_base->mapping设置成NULL，会导致遍历各个file_stat时，使用is_file_stat_mapping_error()判断
+		 *p_file_stat_base->mapping->rh_reserved1跟file_stat是否匹配时因p_file_stat_base->mapping是NULL，而crash。
+		 *目前的做法是把这个赋值放到了cold_file_delete_stat()函数里*/
+		//p_file_stat_base->mapping = NULL;
 
 		/*在这个加个内存屏障，保证前后代码隔离开。即file_stat有delete标记后，inode->i_mapping->rh_reserved1一定无效，p_file_stat->mapping一定是NULL*/
 		smp_wmb();
