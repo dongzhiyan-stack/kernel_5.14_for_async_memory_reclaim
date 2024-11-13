@@ -3264,6 +3264,8 @@ next:
 static noinline int get_file_area_from_mmap_file_stat_list_common(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,unsigned int scan_file_area_max,unsigned int file_stat_list_type,unsigned int file_type)//file_stat_temp_head链表来自 global temp、middle、large file 链表
 {
 	struct file_stat *p_file_stat = NULL,*p_file_stat_temp = NULL;
+	struct file_stat_small *p_file_stat_small = NULL;
+	struct file_stat_tiny_small *p_file_stat_tiny_small = NULL;
 	unsigned int scan_file_area_count  = 0;
 	unsigned int scan_file_stat_count  = 0;
 	//unsigned int free_pages = 0;
@@ -3353,6 +3355,28 @@ static noinline int get_file_area_from_mmap_file_stat_list_common(struct hot_col
 		return 0;
 	}else if(file_stat_in_delete_base(p_file_stat_base)){
 		printk("%s p_file_stat:0x%llx status:0x%lx in_delete\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+		spin_lock_irq(&p_hot_cold_file_global->mmap_file_global_lock);
+		if(!file_stat_in_delete_base(p_file_stat_base) || file_stat_in_delete_file_base(p_file_stat_base))
+			panic("%s p_file_stat:0x%llx status:0x%lx delete status fial\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+		if(FILE_STAT_NORMAL == file_type){
+			p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
+			list_move(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_delete_head);
+		}
+		else if(FILE_STAT_SMALL == file_type){
+			p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
+			list_move(&p_file_stat_small->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_small_delete_head);
+		}
+		else{
+			if(FILE_STAT_TINY_SMALL != file_type)
+				panic("%s file_stat:0x%llx status:0x%lx file_stat_type:0x%x error\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_type);
+
+			p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
+			list_move(&p_file_stat_tiny_small->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_tiny_small_delete_head);
+		}
+		spin_unlock_irq(&p_hot_cold_file_global->mmap_file_global_lock);
+
 		return 0;
 	}
 
@@ -3461,14 +3485,25 @@ static noinline int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_
 	if(shrink_page_printk_open)
 		printk("1:%s file_stat_last:0x%llx\n",__func__,(u64)p_hot_cold_file_global->file_stat_last);
 
+	file_stat_delete_protect_lock(0);
 	//每次都从链表尾开始遍历
 	list_for_each_entry_safe_reverse(p_file_stat,p_file_stat_temp,file_stat_temp_head,hot_cold_file_list){
 		if(scan_file_area_count >= scan_file_area_max)
 			break;
+		file_stat_delete_protect_unlock(0);
+
+        /*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug，这个检测必须放到遍历file_stat最开头，防止跳过*/
+		is_file_stat_mapping_error((struct file_stat_base *)(&p_file_stat->file_stat_base));
 
 		scan_file_area_count += get_file_area_from_mmap_file_stat_list_common(p_hot_cold_file_global,&p_file_stat->file_stat_base,scan_file_area_max,file_stat_list_type,FILE_STAT_NORMAL);
 		scan_file_stat_count ++;
+		
+		file_stat_delete_protect_lock(0);
+		if(&p_file_stat_temp->hot_cold_file_list == file_stat_temp_head  || file_stat_in_delete_file_base(&p_file_stat_temp->file_stat_base))
+			break;
 	}
+    file_stat_delete_protect_test_unlock(0);
+
 //err:
 	//如果file_stat_list临时链表还有file_stat，则把这些file_stat移动到global temp链表头，下轮循环就能从链表尾巴扫描还没有扫描的file_stat了
 	spin_lock(&p_hot_cold_file_global->mmap_file_global_lock);/*这是把file_stat移动到global temp链表头，因此必须要加global lock*/
@@ -3507,10 +3542,16 @@ static noinline int get_file_area_from_mmap_file_stat_small_list(struct hot_cold
 	if(shrink_page_printk_open)
 		printk("1:%s file_stat_last:0x%llx\n",__func__,(u64)p_hot_cold_file_global->file_stat_last);
 
+	file_stat_delete_protect_lock(0);
 	//每次都从链表尾开始遍历
 	list_for_each_entry_safe_reverse(p_file_stat_small,p_file_stat_small_temp,file_stat_temp_head,hot_cold_file_list){	   
 		if(scan_file_area_count >= scan_file_area_max)
 			break;
+		file_stat_delete_protect_unlock(0);
+        
+		/*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug，这个检测必须放到遍历file_stat最开头，防止跳过*/
+		is_file_stat_mapping_error((struct file_stat_base *)(&p_file_stat_small->file_stat_base));
+
 		/* small文件的file_area个数如果超过阀值则转换成normal文件等。这个操作必须放到get_file_area_from_file_stat_list_common()
 		 * 函数里遍历该file_stat的file_area前边，以保证该文件的in_refault、in_hot、in_free属性的file_area都集中在small->other链表尾的640
 		 * 个file_area，后续即便大量新增file_area，都只在small->other链表头，详情见can_small_file_change_to_normal_file()注释*/
@@ -3520,7 +3561,13 @@ static noinline int get_file_area_from_mmap_file_stat_small_list(struct hot_cold
 			scan_file_area_count += get_file_area_from_mmap_file_stat_list_common(p_hot_cold_file_global,&p_file_stat_small->file_stat_base,scan_file_area_max,file_stat_list_type,FILE_STAT_SMALL);
 
 		scan_file_stat_count ++;
+		
+		file_stat_delete_protect_lock(0);
+		if(&p_file_stat_small_temp->hot_cold_file_list == file_stat_temp_head  || file_stat_in_delete_file_base(&p_file_stat_small_temp->file_stat_base))
+			break;
 	}
+    file_stat_delete_protect_test_unlock(0);
+
 //err:
 	//如果file_stat_list临时链表还有file_stat，则把这些file_stat移动到global temp链表头，下轮循环就能从链表尾巴扫描还没有扫描的file_stat了
 	spin_lock(&p_hot_cold_file_global->mmap_file_global_lock);/*这是把file_stat移动到global temp链表头，因此必须要加global lock*/
@@ -3559,10 +3606,16 @@ static noinline int get_file_area_from_mmap_file_stat_tiny_small_list(struct hot
 	if(shrink_page_printk_open)
 		printk("1:%s file_stat_last:0x%llx\n",__func__,(u64)p_hot_cold_file_global->file_stat_last);
 
+	file_stat_delete_protect_lock(0);
 	//每次都从链表尾开始遍历
 	list_for_each_entry_safe_reverse(p_file_stat_tiny_small,p_file_stat_tiny_small_temp,file_stat_temp_head,hot_cold_file_list){
 		if(scan_file_area_count >= scan_file_area_max)
 			break;
+		file_stat_delete_protect_unlock(0);
+        
+		/*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug，这个检测必须放到遍历file_stat最开头，防止跳过*/
+		is_file_stat_mapping_error((struct file_stat_base *)(&p_file_stat_tiny_small->file_stat_base));
+
 		/* tiny small文件的file_area个数如果超过阀值则转换成small或normal文件等。这个操作必须放到get_file_area_from_file_stat_list_common()
 		 * 函数里遍历该file_stat的file_area前边，以保证该文件的in_refault、in_hot、in_free属性的file_area都集中在tiny small->temp链表尾的64
 		 * file_area，后续即便大量新增file_area，都只在tiny small->temp链表头，详情见can_tiny_small_file_change_to_small_normal_file()注释*/
@@ -3571,7 +3624,13 @@ static noinline int get_file_area_from_mmap_file_stat_tiny_small_list(struct hot
 		else 
 			scan_file_area_count += get_file_area_from_mmap_file_stat_list_common(p_hot_cold_file_global,&p_file_stat_tiny_small->file_stat_base,scan_file_area_max,file_stat_list_type,FILE_STAT_TINY_SMALL);
 		scan_file_stat_count ++;
+		
+		file_stat_delete_protect_lock(0);
+		if(&p_file_stat_tiny_small_temp->hot_cold_file_list == file_stat_temp_head  || file_stat_in_delete_file_base(&p_file_stat_tiny_small_temp->file_stat_base))
+			break;
 	}
+    file_stat_delete_protect_test_unlock(0);
+
 //err:
 	//如果file_stat_list临时链表还有file_stat，则把这些file_stat移动到global temp链表头，下轮循环就能从链表尾巴扫描还没有扫描的file_stat了
 	spin_lock(&p_hot_cold_file_global->mmap_file_global_lock);/*这是把file_stat移动到global temp链表头，因此必须要加global lock*/

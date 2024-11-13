@@ -582,20 +582,30 @@ static noinline void __destroy_inode_handler_post(struct inode *inode)
 				/*file_stat不一定只会在global temp链表，也会在global hot等链表，这些标记不清理了*/
 				//clear_file_stat_in_file_stat_temp_head_list(p_file_stat);
 				set_file_stat_in_delete_base(p_file_stat_base);
-				if(FILE_STAT_NORMAL == file_stat_type){
-					p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
-					list_move(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.file_stat_delete_head);
-				}
-				else if(FILE_STAT_SMALL == file_stat_type){
-					p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
-					list_move(&p_file_stat_small->hot_cold_file_list,&hot_cold_file_global_info.file_stat_small_delete_head);
-				}
-				else{
-					if(FILE_STAT_TINY_SMALL != file_stat_type)
-				        panic("%s file_stat:0x%llx status:0x%lx file_stat_type:0x%lx error\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_type);
 
-					p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
-					list_move(&p_file_stat_tiny_small->hot_cold_file_list,&hot_cold_file_global_info.file_stat_tiny_small_delete_head);
+				/*尝试test_and_set_bit(file_stat_delete_protect)令变量置1，如果成功，异步内存回收线程无法再从global temp链表
+				 *获取到file_stat，否则这个file_stat将在这里被从global temp链表移动到global delete链表。这样获取到的file_stat就
+				 *不再是global temp链表的了，会出大问题。如果这里令变量置1失败，则只是设置file_stat的in_delete标记*/
+				if(file_stat_delete_protect_try_lock(1)){
+					/*只有file_stat被移动到global delete标记才会设置in_delete_file标记*/
+					set_file_stat_in_delete_file_base(p_file_stat_base);
+					if(FILE_STAT_NORMAL == file_stat_type){
+						p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
+						list_move(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.file_stat_delete_head);
+					}
+					else if(FILE_STAT_SMALL == file_stat_type){
+						p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
+						list_move(&p_file_stat_small->hot_cold_file_list,&hot_cold_file_global_info.file_stat_small_delete_head);
+					}
+					else{
+						if(FILE_STAT_TINY_SMALL != file_stat_type)
+							panic("%s file_stat:0x%llx status:0x%lx file_stat_type:0x%lx error\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_type);
+
+						p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
+						list_move(&p_file_stat_tiny_small->hot_cold_file_list,&hot_cold_file_global_info.file_stat_tiny_small_delete_head);
+					}
+
+					file_stat_delete_protect_unlock(1);
 				}
 			}else{
 				/*如果到这份分支，说明file_stat先被异步内存回收线程执行cold_file_stat_delete()标记delete了，
@@ -618,20 +628,26 @@ static noinline void __destroy_inode_handler_post(struct inode *inode)
 				/*file_stat不一定只会在global temp链表，也会在global hot等链表，这些标记不清理了*/
 				//clear_file_stat_in_file_stat_temp_head_list(p_file_stat);
 				set_file_stat_in_delete_base(p_file_stat_base);
-				if(FILE_STAT_NORMAL == file_stat_type){
-					p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
-					list_move(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_delete_head);
-				}
-				else if(FILE_STAT_SMALL == file_stat_type){
-					p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
-					list_move(&p_file_stat_small->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_small_delete_head);
-				}
-				else{
-					if(FILE_STAT_TINY_SMALL != file_stat_type)
-				        panic("%s file_stat:0x%llx status:0x%lx file_stat_type:0x%lx error\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_type);
 
-					p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
-					list_move(&p_file_stat_tiny_small->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_tiny_small_delete_head);
+				if(file_stat_delete_protect_try_lock(0)){
+					set_file_stat_in_delete_file_base(p_file_stat_base);
+					if(FILE_STAT_NORMAL == file_stat_type){
+						p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
+						list_move(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_delete_head);
+					}
+					else if(FILE_STAT_SMALL == file_stat_type){
+						p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
+						list_move(&p_file_stat_small->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_small_delete_head);
+					}
+					else{
+						if(FILE_STAT_TINY_SMALL != file_stat_type)
+							panic("%s file_stat:0x%llx status:0x%lx file_stat_type:0x%lx error\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_type);
+
+						p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
+						list_move(&p_file_stat_tiny_small->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_tiny_small_delete_head);
+					}
+
+					file_stat_delete_protect_unlock(0);
 				}
 			}
 			else{
@@ -5136,6 +5152,7 @@ static inline unsigned int get_file_area_from_file_stat_list_common(struct hot_c
 {
 	struct file_stat *p_file_stat = NULL;
 	struct file_stat_small *p_file_stat_small = NULL;
+	struct file_stat_tiny_small *p_file_stat_tiny_small = NULL;
 	//struct file_stat_tiny_small *p_file_stat_tiny_small = NULL;
 	//struct file_area *p_file_area,*p_file_area_temp;
 	LIST_HEAD(file_area_free_temp);
@@ -5244,6 +5261,28 @@ static inline unsigned int get_file_area_from_file_stat_list_common(struct hot_c
 		//scan_delete_file_stat_count ++;
 		p_hot_cold_file_global->hot_cold_file_shrink_counter.scan_delete_file_stat_count += 1;
 		printk("%s file_stat:0x%llx delete status:0x%lx\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+		spin_lock_irq(&p_hot_cold_file_global->global_lock);
+		/*如果file_stat有in_delete标记则移动到global delete链表，但如果有in_delete_file标记则crash，global temp链表上的file_stat不可能有in_delete_file标记*/
+		if(!file_stat_in_delete_base(p_file_stat_base) || file_stat_in_delete_file_base(p_file_stat_base))
+			panic("%s p_file_stat:0x%llx status:0x%lx delete status fial\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+		if(FILE_STAT_NORMAL == file_type){
+			p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
+			list_move(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.file_stat_delete_head);
+		}
+		else if(FILE_STAT_SMALL == file_type){
+			p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
+			list_move(&p_file_stat_small->hot_cold_file_list,&hot_cold_file_global_info.file_stat_small_delete_head);
+		}
+		else{
+			if(FILE_STAT_TINY_SMALL != file_type)
+				panic("%s file_stat:0x%llx status:0x%lx file_stat_type:0x%x error\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_type);
+
+			p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
+			list_move(&p_file_stat_tiny_small->hot_cold_file_list,&hot_cold_file_global_info.file_stat_tiny_small_delete_head);
+		}
+		spin_unlock_irq(&p_hot_cold_file_global->global_lock);
 		return scan_file_area_count;
 	}
 	/* 如果file_stat的file_area全被释放了，则把file_stat移动到hot_cold_file_global->file_stat_zero_file_area_head链表。
@@ -5393,18 +5432,63 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 	//unsigned int cold_file_area_for_file_stat = 0;
 	//unsigned int file_stat_count_in_cold_list = 0;
 
+	/*又一个重大隐藏bug，在global temp、large_file、middle_file、small file、tiny small file链表遍历file_stat、file_stat_small、
+	 *file_stat_tiny_small时(因file_stat为例)。如果此时遍历到的file_stat被iput()->__destroy_inode_handler_post()并发释放，而file_stat从
+	 *global temp链表剔除，然后移动到global delete链表，就出现
+	 *"进程1遍历A链表时，A链表的成员被进程2并发移动到B链表，导致从A链表获取到的成员是B链表的成员或者B链表的链表头。导致进程1获取到非法链表成员而crash，或者遍历A链表时陷入死循环"
+	 *重大bug。怎么解决，完整可以spin_lock加锁防护，__destroy_inode_handler_post()用原子变量作为宽限期保护。这些太复杂，其实有个更简单的方法
+	 *test_and_set_bit_lock(lock_bit,&hot_cold_file_global_info.file_stat_delete_protect)。"当前函数遍历global temp链表的file_stat" 和 
+	 iput()->__destroy_inode_handler_post()把file_stat从global temp链表剔除并移动到global delete链表，两个流程全用
+	 *file_stat_delete_protect_lock()->test_and_set_bit_lock(file_stat_delete_protect)防护。
+	 *test_and_set_bit_lock(file_stat_delete_protect)是原子操作，有内存屏障防护，不用担心并发。这样有两个结果
+	 *1：进程1"在当前函数遍历global temp链表的file_stat" 首先test_and_set_bit(file_stat_delete_protect)令变量置1
+	 * 然后list_for_each_entry_safe_reverse()遍历获取到global temp链表的file_stat，这个过程进程2因test_and_set_bit(file_stat_delete_protect)
+	 * 令变量置1失败，无法执行"在__destroy_inode_handler_post()把file_stat从global temp链表剔除并移动到global delete链表"，而只是把标记file_stat的in_delete标记，
+	 * 此时没有并发问题。后续，异步内存回收线程从global temp链表遍历到in_delete标记的file_stat，再把该file_stat移动到global delete链表，完美。
+	 *
+	 *2：进程2"iput()->__destroy_inode_handler_post()把file_stat从global temp链表剔除并移动到global delete链表" 
+	 首先test_and_set_bit(file_stat_delete_protect)令变量置1.此时进程1因file_stat_delete_protect_lock->test_and_set_bit(file_stat_delete_protect)
+	 *令变量置1失败而陷入形如while(test_and_set_bit(file_stat_delete_protect)) msleep(1) 的死循环而休眠。等到进程2执行
+	 *file_stat_delete_protect_unlock(1)令变量清0，进程1从while(test_and_set_bit(file_stat_delete_protect)) msleep(1)成功令原子变量加1而加锁成功。
+	 *后续进程1就可以放心list_for_each_entry_safe_reverse()遍历获取到global temp链表的file_stat，不用担心并发。
+	 *
+	 *这个并发设计的好处是，"iput()->__destroy_inode_handler_post()"即便test_and_set_bit(file_stat_delete_protect)令变量置1失败，也不用休眠，
+	 *而是直接设置file_stat的in_delete标记就可以返回。并且file_stat_delete_protect_lock()和file_stat_delete_protect_unlock之间的代码很少。没有性能问题。
+	 *
+	 *又想到一个重大bug：
+	 *就是list_for_each_entry_safe_reverse()循环最后，然后执行下一次循环，从p_file_stat_temp得到新的p_file_stat，这个过程有问题。就是
+	 *这个过程p_file_stat_temp可能被"iput()->__destroy_inode_handler_post()"进程并发移动到global delete链表，这样从p_file_stat_temp得到新的p_file_stat
+	 *就是global delete链表的file_stat了，不是global temp链表的file_stat，就会再次复现本case最初的问题。
+	 *
+	 *解决办法是：进程1先file_stat_delete_protect_lock(1)尝试加锁，如果这个过程p_file_stat_temp被"iput()->__destroy_inode_handler_post()"进程并发移动到
+	 *global delete链表，p_file_stat_temp将有in_delete_file标记。然后进程1先file_stat_delete_protect_lock(1)加锁成功，
+	 *file_stat_in_delete_file_base(p_file_stat_temp)返回1，此时进程1直接跳出循环，结束遍历。当然也可以重新遍历global temp链表！
+	 *
+	 *对了，p_file_stat_temp也可能是global temp链表头，这种情况也要结束遍历，因为p_file_stat_temp是非法的file_stat。
+	 */
+	file_stat_delete_protect_lock(1);
 	/* 从global temp和large_file_temp链表尾遍历N个file_stat，回收冷file_area的。对热file_area、refault file_area、
 	 * in_free file_area的各种处理。这个不global lock加锁。但是遇到file_stat移动到其他global 链表才会global lock加锁*/
 	list_for_each_entry_safe_reverse(p_file_stat,p_file_stat_temp,file_stat_temp_head,hot_cold_file_list){
-        /*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug，这个检测必须放到遍历file_stat最开头，防止跳过*/
-		is_file_stat_mapping_error((struct file_stat_base *)(&p_file_stat->file_stat_base));
-		
 		if(scan_file_area_count >= scan_file_area_max)
 			break;
+
+		/*目前的设计在跳出该循环时，必须保持file_stat_delete_protect_lock的lock状态，于是这个判断要放到break后边*/
+		file_stat_delete_protect_unlock(1);
+
+        /*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug。
+		 *这个检测必须放到遍历file_stat最开头，防止跳过*/
+		is_file_stat_mapping_error((struct file_stat_base *)(&p_file_stat->file_stat_base));
+		
         scan_file_area_count += get_file_area_from_file_stat_list_common(p_hot_cold_file_global,&p_file_stat->file_stat_base,scan_file_area_max,file_stat_list_type,file_type);
 
 		scan_file_stat_count ++;
+
+		file_stat_delete_protect_lock(1);
+		if(&p_file_stat_temp->hot_cold_file_list == file_stat_temp_head  || file_stat_in_delete_file_base(&p_file_stat_temp->file_stat_base))
+			break;
 	}
+    file_stat_delete_protect_test_unlock(1);
 
 	/* 这里有个重大隐藏bug，下边list_move_enhance()将p_file_stat~链表尾的遍历过的file_stat移动到file_stat_temp_head
 	 * 链表头。如果这些file_stat被并发iput()释放，在__destroy_inode_handler_post()中标记file_stat delete，然后把
@@ -5516,15 +5600,18 @@ static noinline unsigned int get_file_area_from_file_stat_small_list(struct hot_
 	//unsigned int cold_file_area_for_file_stat = 0;
 	//unsigned int file_stat_count_in_cold_list = 0;
 
+	file_stat_delete_protect_lock(1);
 	/* 从global temp和large_file_temp链表尾遍历N个file_stat，回收冷file_area的。对热file_area、refault file_area、
 	 * in_free file_area的各种处理。这个不global lock加锁。但是遇到file_stat移动到其他global 链表才会global lock加锁*/
 	list_for_each_entry_safe_reverse(p_file_stat_small,p_file_stat_small_temp,file_stat_temp_head,hot_cold_file_list){
-        /*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug，这个检测必须放到遍历file_stat最开头，防止跳过*/
+		if(scan_file_area_count >= scan_file_area_max)
+			break;
+		file_stat_delete_protect_unlock(1);
+        
+		/*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug，这个检测必须放到遍历file_stat最开头，防止跳过*/
 		//is_file_stat_mapping_error(&p_file_stat_small->file_stat_base);
 		is_file_stat_mapping_error((struct file_stat_base *)(&p_file_stat_small->file_stat_base));
 
-		if(scan_file_area_count >= scan_file_area_max)
-			break;
 	    /* small文件的file_area个数如果超过阀值则转换成normal文件等。这个操作必须放到get_file_area_from_file_stat_list_common()
 		 * 函数里遍历该file_stat的file_area前边，以保证该文件的in_refault、in_hot、in_free属性的file_area都集中在small->other链表尾的640
 		 * 个file_area，后续即便大量新增file_area，都只在small->other链表头，详情见can_small_file_change_to_normal_file()注释*/
@@ -5534,7 +5621,11 @@ static noinline unsigned int get_file_area_from_file_stat_small_list(struct hot_
             scan_file_area_count += get_file_area_from_file_stat_list_common(p_hot_cold_file_global,&p_file_stat_small->file_stat_base,scan_file_area_max,file_stat_list_type,file_type);
 
 		scan_file_stat_count ++;
+		file_stat_delete_protect_lock(1);
+		if(&p_file_stat_small_temp->hot_cold_file_list == file_stat_temp_head  || file_stat_in_delete_file_base(&p_file_stat_small_temp->file_stat_base))
+			break;
 	}
+    file_stat_delete_protect_test_unlock(1);
 
 	/* file_stat_temp_head链表非空且p_file_area不是指向链表头且p_file_area不是该链表的第一个成员，
 	 * 则执行list_move_enhance()把本次遍历过的file_area~链表尾的file_area移动到链表
@@ -5588,15 +5679,17 @@ static noinline unsigned int get_file_area_from_file_stat_tiny_small_list(struct
 	//unsigned int cold_file_area_for_file_stat = 0;
 	//unsigned int file_stat_count_in_cold_list = 0;
 
+	file_stat_delete_protect_lock(1);
 	/* 从global temp和large_file_temp链表尾遍历N个file_stat，回收冷file_area的。对热file_area、refault file_area、
 	 * in_free file_area的各种处理。这个不global lock加锁。但是遇到file_stat移动到其他global 链表才会global lock加锁*/
 	list_for_each_entry_safe_reverse(p_file_stat_tiny_small,p_file_stat_tiny_small_temp,file_stat_temp_head,hot_cold_file_list){
-        /*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug，这个检测必须放到遍历file_stat最开头，防止跳过*/
-		//is_file_stat_mapping_error(&p_file_stat_tiny_small->file_stat_base);
-		is_file_stat_mapping_error((struct file_stat_base *)(&p_file_stat_tiny_small->file_stat_base));
-
 		if(scan_file_area_count >= scan_file_area_max)
 			break;
+		file_stat_delete_protect_unlock(1);
+
+        /*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug，这个检测必须放到遍历file_stat最开头，防止跳过*/
+		is_file_stat_mapping_error((struct file_stat_base *)(&p_file_stat_tiny_small->file_stat_base));
+
 	    /* tiny small文件的file_area个数如果超过阀值则转换成small或normal文件等。这个操作必须放到get_file_area_from_file_stat_list_common()
 		 * 函数里遍历该file_stat的file_area前边，以保证该文件的in_refault、in_hot、in_free属性的file_area都集中在tiny small->temp链表尾的64
 		 * file_area，后续即便大量新增file_area，都只在tiny small->temp链表头，详情见can_tiny_small_file_change_to_small_normal_file()注释*/
@@ -5606,7 +5699,11 @@ static noinline unsigned int get_file_area_from_file_stat_tiny_small_list(struct
             scan_file_area_count += get_file_area_from_file_stat_list_common(p_hot_cold_file_global,&p_file_stat_tiny_small->file_stat_base,scan_file_area_max,file_stat_list_type,file_type);
 
 		scan_file_stat_count ++;
+	    file_stat_delete_protect_lock(1);
+		if(&p_file_stat_tiny_small_temp->hot_cold_file_list == file_stat_temp_head  || file_stat_in_delete_file_base(&p_file_stat_tiny_small_temp->file_stat_base))
+			break;
 	}
+    file_stat_delete_protect_test_unlock(1);
 
 	/* file_stat_temp_head链表非空且p_file_area不是指向链表头且p_file_area不是该链表的第一个成员，
 	 * 则执行list_move_enhance()把本次遍历过的file_area~链表尾的file_area移动到链表

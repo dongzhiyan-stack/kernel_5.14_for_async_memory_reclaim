@@ -4,6 +4,9 @@
 
 #define ASYNC_MEMORY_RECLAIM_IN_KERNEL
 
+#define CACHE_FILE_DELETE_PROTECT_BIT 0
+#define MMAP_FILE_DELETE_PROTECT_BIT 1
+
 #define FILE_AREA_IN_HOT_LIST 0
 #define FILE_AREA_IN_REFAULT_LIST 1
 #define FILE_AREA_IN_FREE_LIST 2
@@ -862,6 +865,8 @@ struct hot_cold_file_global
 
 	unsigned long update_file_area_other_list_count;
 	unsigned long update_file_area_move_to_head_count;
+	
+	unsigned long file_stat_delete_protect;
 };
 
 
@@ -956,11 +961,12 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	F_file_stat_in_file_stat_large_file_head_list,
 	F_file_stat_in_mapcount_file_area_list,//文件file_stat是mapcount文件
 	F_file_stat_in_zero_file_area_list,
-
+	
+	F_file_stat_in_delete_file,//标识该file_stat被移动到了global delete链表
 	//F_file_stat_in_drop_cache,
 	//F_file_stat_in_free_page,//正在遍历file_stat的file_area的page，尝试释放page
 	//F_file_stat_in_free_page_done,//正在遍历file_stat的file_area的page，完成了page的内存回收,
-	F_file_stat_in_delete,
+	F_file_stat_in_delete,//仅仅表示该file_stat被触发delete了，并不能说明file_stat被移动到了global delete链表
 	F_file_stat_in_cache_file,//cache文件，sysctl读写产生pagecache。有些cache文件可能还会被mmap映射，要与mmap文件互斥
 	F_file_stat_in_mmap_file,//mmap文件，有些mmap文件可能也会被sysctl读写产生pagecache，要与cache文件互斥
 	//F_file_stat_in_large_file,
@@ -1059,6 +1065,7 @@ FILE_STAT_STATUS_BASE(zero_file_area)
 	TEST_FILE_STATUS_ERROR(name)
 
 FILE_STATUS(delete)
+FILE_STATUS(delete_file)
 
 	//清理文件的状态，大小文件等
 #define CLEAR_FILE_STATUS_BASE(name)\
@@ -1083,6 +1090,7 @@ FILE_STATUS(delete)
 	TEST_FILE_STATUS_ERROR_BASE(name)
 
 FILE_STATUS_BASE(delete)
+FILE_STATUS_BASE(delete_file)
 
 	//清理文件的状态，大小文件等
 #define CLEAR_FILE_STATUS_ATOMIC(name)\
@@ -1399,6 +1407,49 @@ static inline void is_cold_file_area_reclaim_support_fs(struct address_space *ma
 /*****************************************************************************************************************************************************/
 extern int shrink_page_printk_open1;
 extern int shrink_page_printk_open;
+
+static inline void file_stat_delete_protect_lock(char is_cache_file)
+{
+	unsigned long lock_bit;
+	if(is_cache_file)
+		lock_bit = CACHE_FILE_DELETE_PROTECT_BIT;
+	else
+		lock_bit = MMAP_FILE_DELETE_PROTECT_BIT;
+
+	while(test_and_set_bit_lock(lock_bit,&hot_cold_file_global_info.file_stat_delete_protect))
+		cond_resched();
+}
+static inline int file_stat_delete_protect_try_lock(char is_cache_file)
+{
+	unsigned long lock_bit;
+	if(is_cache_file)
+		lock_bit = CACHE_FILE_DELETE_PROTECT_BIT;
+	else
+		lock_bit = MMAP_FILE_DELETE_PROTECT_BIT;
+
+	return  (0 == test_and_set_bit_lock(lock_bit,&hot_cold_file_global_info.file_stat_delete_protect));
+}
+static inline void file_stat_delete_protect_unlock(char is_cache_file)
+{
+	unsigned long lock_bit;
+	if(is_cache_file)
+		lock_bit = CACHE_FILE_DELETE_PROTECT_BIT;
+	else
+		lock_bit = MMAP_FILE_DELETE_PROTECT_BIT;
+
+	clear_bit_unlock(lock_bit,&hot_cold_file_global_info.file_stat_delete_protect);
+}
+static inline void file_stat_delete_protect_test_unlock(char is_cache_file)
+{
+	unsigned long lock_bit;
+	if(is_cache_file)
+		lock_bit = CACHE_FILE_DELETE_PROTECT_BIT;
+	else
+		lock_bit = MMAP_FILE_DELETE_PROTECT_BIT;
+
+	if(!test_and_clear_bit(lock_bit,&hot_cold_file_global_info.file_stat_delete_protect))
+		BUG();
+}
 
 static inline unsigned int get_file_area_list_status(struct file_area *p_file_area)
 {
