@@ -1520,6 +1520,11 @@ static inline long get_file_stat_type(struct file_stat_base *file_stat_base)
 
 /*检测该file_stat跟file_stat->mapping->rh_reserved1是否一致。但如果检测时该文件被并发iput()，执行到__destroy_inode_handler_post()
  *赋值file_stat->mapping->rh_reserved1赋值0，此时不能crash，但要给出告警信息*/
+
+/*遇到一个重大bug，inode->mapping->rh_reserved1被释放后又被新的进程分配而导致mapping->rh_reserved1不是0。这就导致!!!!!!!!!!!!!!!!!!!
+ *p_file_stat_base != (p_file_stat_base)->mapping->rh_reserved1成立，但是因为inode又被新的进程分配了而mapping->rh_reserved1是新的file_stat指针，
+ *于是这里crash。因此要替换成file_stat_in_delete_base(p_file_stat_base)是否成立，这个file_stat的in_delete标记是我的代码控制*/
+#if 0
 #define is_file_stat_mapping_error(p_file_stat_base) \
 { \
 	if((unsigned long)p_file_stat_base != (p_file_stat_base)->mapping->rh_reserved1){  \
@@ -1529,6 +1534,144 @@ static inline long get_file_stat_type(struct file_stat_base *file_stat_base)
 	        panic("%s file_stat:0x%llx match mapping:0x%llx 0x%llx error\n",__func__,(u64)p_file_stat_base,(u64)((p_file_stat_base)->mapping),(u64)((p_file_stat_base)->mapping->rh_reserved1)); \
 	}\
 }
+#else
+/* 
+ *  当前有问题的方案
+ *  iput()->destroy_inode()，释放inode，标记file_stat in_delete
+ *  {
+ *	   //p_file_stat_base->mapping = NULL; 这是先注释掉，异步内存回收线程再把它设置NULL
+ *     p_file_stat_base->mapping->rh_reserved1 = 0；
+ *     smp_wmb();
+ *     set_file_stat_in_delete(p_file_stat_base)
+ *     file_stat_delete_protect_lock(){
+ *         //加锁成功才会把file_stat移动到global delete链表
+ *         list_move(file_stat,global_delete_list)
+ *     }
+ *  }
+ *
+ * 在异步内存回收线程遍历global temp、small、tiny small链表上的file_stat时，首先执行is_file_stat_mapping_error()判断p_file_stat_base
+ * 跟p_file_stat_base->mapping->rh_reserved1是否相等，如果不相等则crash。除非p_file_stat_base->mapping->rh_reserved1是0，
+ * 因为p_file_stat_base->mapping->rh_reserved1是0，说明该file_stat在iput()被释放而标记0。
+ *
+ *is_file_stat_mapping_error(p_file_stat_base)
+ *{
+ *	if((unsigned long)p_file_stat_base != p_file_stat_base->mapping->rh_reserved1){
+ *		if(0 == (p_file_stat_base)->mapping->rh_reserved1)
+ *	        printk(""); 
+ *		else 
+ *	        panic(); 
+ *	}
+ *}
+ * 
+ * 这个方案看着貌似没问题，但是有隐患
+ *
+ * bug：如果iput()->destroy_inode() 释放inode时，可能因file_stat_delete_protect_lock()加锁失败而只是标记file_stat1的in_delete
+ * 标记，且p_file_stat1_base->mapping->rh_reserved1赋值0，而没有把file_stat1移动到global delete链表。等异步内存回收线程后来
+ * 遍历global temp、small、tiny small链表上的file_stat时，遍历到这个已经标记in_delete的file_stat1。
+ * p_file_stat_base1->mapping->rh_reserved1可能不再是0了。因为p_file_stat1_base->mapping指向的inode被iput()释放后，然后
+ * 这个inode又被新的进程、新的文件分配，mapping包含在inode结构体里。于是mapping->rh_reserved1=新的文件的file_stat2。
+ * 于是执行到is_file_stat_mapping_error()判断file_stat1是否合法时，if(0 == p_file_stat_base->mapping->rh_reserved1)就是
+ * 本质就是 if(0 != p_file_stat2_base)，p_file_stat_base->mapping->rh_reserved1指向的是file_stat2了，这样会crash。
+ *
+ * 于是，如果出现p_file_stat_base跟 (p_file_stat_base)->mapping->rh_reserved1 不一致的情况，说明这个file_stat被iput()释放了。
+ * 不能if(0 == p_file_stat_base->mapping->rh_reserved1)判断file_stat是否被delete了。而是要判断file_stat是否有in_delete标记，
+ * 如果有in_delete标记，就不在触发crash。
+ *
+ * 想了几个解决方案
+ *
+ * 方案1：这个是曾经想过的一个失败的方案，但是很有意义，因为这个错误很容易犯
+ *
+ * iput()->destroy_inode()里释放inode，标记file_stat in_delete
+ * {
+	   p_rh_reserved1 = &p_file_stat_base->mapping->rh_reserved1;
+ *     p_file_stat_base->mapping = NULL;
+ *     smp_wmb();
+ *     p_file_stat_base->mapping->rh_reserved1 = 0; (实际代码是*p_rh_reserved1 = 0，这里为了演示方便)
+ *     set_file_stat_in_delete(p_file_stat_base)
+ * }
+ * 
+ * 异步内存回收线程遍历global temp、small、tiny small链表上的file_stat时，is_file_stat_mapping_error()里执行
+ * is_file_stat_mapping_error(p_file_stat_base)
+ *  {
+ *     smp_rmb();
+ *     if(p_file_stat_base->mapping){
+ *         if((unsigned long)p_file_stat_base != p_file_stat_base->mapping->rh_reserved1){
+ *             smp_rmb();
+ *             if(NULL == p_file_stat_base->mapping)
+ *                 printk("file_stat delete");
+ *             else 
+ *                 panic();
+ *         }
+ *     }
+ * }
+ * 如果if((unsigned long)p_file_stat_base != p_file_stat_base->mapping->rh_reserved1)成立，再判断
+ * p_file_stat_base->mapping是NUll,说明file_stat被释放了，就不再crash。貌似方案没事，但有大问题
+ *
+ * 这个设计会因p_file_stat_base->mapping是NULL而crash。因为 if(p_file_stat_base->mapping)成立后，
+ * 此时异步内存回收线程执行if((unsigned long)p_file_stat_base != p_file_stat_base->mapping->rh_reserved1)这行代码时，
+ * 该文件file_stat被iput()->destroy_inode()并发释放了，于是此时p_file_stat_base->mapping 赋值0。
+ * 于是异步内存回收线程执行is_file_stat_mapping_error()里的if((unsigned long)p_file_stat_base != p_file_stat_base->mapping->rh_reserved1)
+ * 因p_file_stat_base->mapping是NULL而crash。
+ *
+ * 这个问题如果iput()->destroy_inode()和is_file_stat_mapping_error()都spin_lock加锁防护这个并发问题能很容易解决。
+ * 但是我不想用spin_lock锁，真的就无法靠内存屏障、rcu实现无锁编程吗？
+ *
+ * 苦想，终于想到了，
+ *
+ * iput()->destroy_inode()这样设计
+ * {
+ *     //p_file_stat_base->mapping = NULL;这个赋值去掉，不在iput()时标记p_file_stat_base->mapping为NULL
+ *
+ *      set_file_stat_in_delete(p_file_stat_base)
+ *      smp_wmb(); //保证file_stat的In_delete标记先于p_file_stat_base->mapping->rh_reserved1赋值0生效
+ *      p_file_stat_base->mapping->rh_reserved1 = 0;
+ *  }
+ *
+ *  is_file_stat_mapping_error()里这样设计
+ *  {
+ *      if((unsigned long)p_file_stat_base != p_file_stat_base->mapping->rh_reserved1)
+ *      {
+ *           smp_rmb();
+ *           if(file_stat_in_delete_base(p_file_stat_base))
+ *               printk("file_stat delete")
+ *           else 
+ *              panic();
+ *      }
+ *  }
+ *  如果is_file_stat_mapping_error()里发现p_file_stat_base 和 p_file_stat_base->mapping->rh_reserved1不相等，
+ *  说明该文件被iput()->destroy_inode()释放了，此时smp_rmb()后，if(file_stat_in_delete_base(p_file_stat_base))
+ *  file_stat一定有in_delete标记，此时只是printk打印，不会panic。该方案iput()->destroy_inode()中不再
+ *  p_file_stat_base->mapping = NULL赋值  。故is_file_stat_mapping_error()不用担心它被并发赋值NULL。
+ *  并且，iput()->destroy_inode()中的设计，保证file_stat的in_delete标记先于p_file_stat_base->mapping->rh_reserved1赋值0生效.
+ *  is_file_stat_mapping_error()中看到if((unsigned long)p_file_stat_base != p_file_stat_base->mapping->rh_reserved1)
+	不相等，此时一定file_stat一定有in_delete标记，故if(file_stat_in_delete_base(p_file_stat_base))一定成立，就不会crash
+ *  
+ *  这是个很完美的无锁并发设计模型，要充分吸取这个无锁编程的思想。
+ *  
+ *  最后，还有一个很重要的地方，如果 is_file_stat_mapping_error()里使用 p_file_stat_base->mapping->rh_reserved1是，
+ *  该文件inode被iput()并发释放了，p_file_stat_base->mapping就是无效内存访问了。要防护这种情况，于是is_file_stat_mapping_error()
+ *  里还要加上rcu_read_lock()
+ *
+ * 1:rcu_read_lock()防止inode被iput()释放了，导致 p_file_stat_base->mapping->rh_reserved1无效内存访问。
+ * 2:rcu_read_lock()加printk打印会导致休眠吧，这点要控制
+ * 3:smp_rmb()保证p_file_stat_base->mapping->rh_reserved1在iput()被赋值0后，file_stat一定有delete标记。iput()里是set_file_stat_in_delete;smp_wmb;p_file_stat_base->mapping->rh_reserved1=0*/
+#define is_file_stat_mapping_error(p_file_stat_base) \
+{ \
+	rcu_read_lock();\
+	if((unsigned long)p_file_stat_base != (p_file_stat_base)->mapping->rh_reserved1){  \
+		smp_rmb();\
+		if(file_stat_in_delete_base(p_file_stat_base)){\
+			rcu_read_unlock(); \
+			printk(KERN_EMERG"%s file_stat:0x%llx status:0x%lx mapping:0x%llx delete!!!!!!!!!!!!\n",__func__,(u64)p_file_stat_base,(p_file_stat_base)->file_stat_status,(u64)((p_file_stat_base)->mapping)); \
+			goto out;\
+		} \
+		else \
+		panic("%s file_stat:0x%llx match mapping:0x%llx 0x%llx error\n",__func__,(u64)p_file_stat_base,(u64)((p_file_stat_base)->mapping),(u64)((p_file_stat_base)->mapping->rh_reserved1)); \
+	}\
+	rcu_read_unlock();\
+out:	\
+}
+#endif
 
 static inline struct file_stat_base *file_stat_alloc_and_init(struct address_space *mapping,unsigned int file_type,char free_old_file_stat)
 {

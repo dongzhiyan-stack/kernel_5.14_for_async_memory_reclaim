@@ -562,14 +562,20 @@ static noinline void __destroy_inode_handler_post(struct inode *inode)
 		 * 文件读写的文件系统。这样就会crash了，因为tmpfs文件系统不支持file_area，会从xarray tree
 		 * 得到的file_area指针当成page，必然会crash*/
 		//inode->i_mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;原来赋值0，现在赋值1，原理一样
+#if 0
+		/*这个赋值移动到该函数最后边。一定得放到标记file_stat in_delete前边吗？会不会跟异步内存回收线程此时正并发
+		 *cold_file_stat_delete()释放该file_stat，存在同时修改该file_stat的问题？不会，cold_file_stat_delete()会
+		 file_inode_lock()对inode加锁释放而直接返回，无法再释放该file_stat*/
 		inode->i_mapping->rh_reserved1 = 0;
-		/*这里把p_file_stat_base->mapping设置成NULL，会导致遍历各个file_stat时，使用is_file_stat_mapping_error()判断
+
+		/*这里把p_file_stat_base->mapping设置成NULL，会导致异步内存回收线程遍历各个global temp等链表的file_stat时，使用is_file_stat_mapping_error()判断
 		 *p_file_stat_base->mapping->rh_reserved1跟file_stat是否匹配时因p_file_stat_base->mapping是NULL，而crash。
 		 *目前的做法是把这个赋值放到了cold_file_delete_stat()函数里*/
 		//p_file_stat_base->mapping = NULL;
 
 		/*在这个加个内存屏障，保证前后代码隔离开。即file_stat有delete标记后，inode->i_mapping->rh_reserved1一定无效，p_file_stat->mapping一定是NULL*/
 		smp_wmb();
+#endif
 		if(file_stat_in_cache_file_base(p_file_stat_base)){
 			/* 又遇到一个重大的隐藏bug。如果当前文件文件页page全释放后还是长时间没访问，此时异步内存回收线程正好执行
 			 * cold_file_stat_delete()释放file_stat，并global_lock加锁，标记file_stat delete，然后list_del(p_file_stat)。
@@ -659,6 +665,15 @@ static noinline void __destroy_inode_handler_post(struct inode *inode)
 			spin_unlock_irq(&hot_cold_file_global_info.mmap_file_global_lock);
 		}
 err:
+		/*这个内存屏障保证前边的set_file_stat_in_delete_base(p_file_stat_base)一定在inode->i_mapping->rh_reserved1 = 0前生效。
+		 *原因是遍历global temp、small、tiny_small链表上的file_stat时，会执行is_file_stat_mapping_error()判断p_file_stat跟
+		 *file_stat->mapping->rh_reserved1是否一致。这个内存屏障保证is_file_stat_mapping_error()里判断出if(p_file_stat != 
+		 *p_file_stat->mapping->rh_reserved1)后，执行smp_rmb();if(file_stat_in_delete(p_file_stat))判断出file_stat一定有
+		 *file_stat有in_delete标记*/
+		smp_wmb();
+		/*必须保证即便该函数走了error分支，也要执行该赋值*/
+		inode->i_mapping->rh_reserved1 = 0;
+
 		if(shrink_page_printk_open1)
 			FILE_AREA_PRINT("%s file_stat:0x%llx iput delete !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_stat);
 	}
