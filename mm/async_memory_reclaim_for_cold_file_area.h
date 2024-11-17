@@ -2,7 +2,8 @@
 #define _ASYNC_MEMORY_RECLAIM_BASH_H_
 #include <linux/mm.h>
 
-#define ASYNC_MEMORY_RECLAIM_IN_KERNEL
+//#define ASYNC_MEMORY_RECLAIM_IN_KERNEL ------在pagemap.h定义过了
+//#define ASYNC_MEMORY_RECLAIM_DEBUG
 
 #define CACHE_FILE_DELETE_PROTECT_BIT 0
 #define MMAP_FILE_DELETE_PROTECT_BIT 1
@@ -423,21 +424,24 @@ struct file_stat_base
 		struct rcu_head		i_rcu;
 	};
 	//file_stat状态
-	unsigned long file_stat_status;
+	//unsigned long file_stat_status;--------------调整成int型，节省内存空间
+	unsigned int file_stat_status;
 	//总file_area个数
 	unsigned int file_area_count;
 	//热file_area个数
-	unsigned int file_area_hot_count;
+	//unsigned int file_area_hot_count;------------------------------------------
 	//文件的file_area结构按照索引保存到这个radix tree
 	//struct hot_cold_file_area_tree_root hot_cold_file_area_tree_root_node;
 	//file_stat锁
 	spinlock_t file_stat_lock;
 	//file_stat里age最大的file_area的age，调试用
-	unsigned long max_file_area_age;
+	//unsigned long max_file_area_age;
+#ifdef ASYNC_MEMORY_RECLAIM_DEBUG	
 	/*最近一次访问的page的file_area所在的父节点，通过它直接得到file_area，然后得到page，不用每次都遍历xarray tree*/
 	struct xa_node *xa_node_cache;
 	/*xa_node_cache父节点保存的起始file_area的page的索引*/
 	pgoff_t  xa_node_cache_base_index;
+#endif	
 
 	union{
 		//cache文件file_stat最近一次被异步内存回收访问时的age，调试用
@@ -456,11 +460,11 @@ struct file_stat_base
 	//最新一次访问的file_area，mmap文件用
 	struct file_area *file_area_last;
 	//件file_stat->file_area_temp链表上已经扫描的file_stat个数，如果达到file_area_count_in_temp_list，说明这个文件的file_stat扫描完了，才会扫描下个文件file_stat的file_area
-	unsigned int scan_file_area_count_temp_list;
+	//unsigned int scan_file_area_count_temp_list;-
 	//在文件file_stat->file_area_temp链表上的file_area个数
 	unsigned int file_area_count_in_temp_list;
 	//文件 mapcount大于1的file_area的个数
-	unsigned int mapcount_file_area_count;
+	//unsigned int mapcount_file_area_count;--------------------------------------
 	//当扫描完一轮文件file_stat的temp链表上的file_area时，置1，进入冷却期，在N个age周期内不再扫描这个文件上的file_area。
 	bool cooling_off_start;
 	
@@ -470,64 +474,7 @@ struct file_stat_base
 }/*__attribute__((packed))*/;
 struct file_stat_tiny_small
 {
-	union{
-		struct file_stat_base file_stat_base;
-		struct{
-			/************base***base***base************/
-			struct address_space *mapping;
-			union{
-				//file_stat通过hot_cold_file_list添加到hot_cold_file_global的file_stat_hot_head链表
-				struct list_head hot_cold_file_list;
-				//rcu_head和list_head都是16个字节
-				struct rcu_head		i_rcu;
-			};
-			//file_stat状态
-			unsigned long file_stat_status;
-			//总file_area个数
-			unsigned int file_area_count;
-			//热file_area个数
-			unsigned int file_area_hot_count;
-			//文件的file_area结构按照索引保存到这个radix tree
-			//struct hot_cold_file_area_tree_root hot_cold_file_area_tree_root_node;
-			//file_stat锁
-			spinlock_t file_stat_lock;
-			//file_stat里age最大的file_area的age，调试用
-			unsigned long max_file_area_age;
-			/*最近一次访问的page的file_area所在的父节点，通过它直接得到file_area，然后得到page，不用每次都遍历xarray tree*/
-			struct xa_node *xa_node_cache;
-			/*xa_node_cache父节点保存的起始file_area的page的索引*/
-			pgoff_t  xa_node_cache_base_index;
-
-			union{
-				//cache文件file_stat最近一次被异步内存回收访问时的age，调试用
-				unsigned int recent_access_age;
-				//mmap文件在扫描完一轮file_stat->temp链表上的file_area，进入冷却期，cooling_off_start_age记录当时的global age
-				unsigned int cooling_off_start_age;
-			};
-			/*记录该文件file_stat被遍历时的全局age*/
-			unsigned int recent_traverse_age;
-			/*统计一个周期内file_stat->temp链表上file_area移动到file_stat->temp链表头的次数，每一个一次减1，减少到0则禁止
-			 *file_stat->temp链表上file_area再移动到file_stat->temp链表头*/
-			short file_area_move_to_head_count;
-
-
-			/**针对mmap文件新增的****************************/
-			//最新一次访问的file_area，mmap文件用
-			struct file_area *file_area_last;
-			//件file_stat->file_area_temp链表上已经扫描的file_stat个数，如果达到file_area_count_in_temp_list，说明这个文件的file_stat扫描完了，才会扫描下个文件file_stat的file_area
-			unsigned int scan_file_area_count_temp_list;
-			//在文件file_stat->file_area_temp链表上的file_area个数
-			unsigned int file_area_count_in_temp_list;
-			//文件 mapcount大于1的file_area的个数
-			unsigned int mapcount_file_area_count;
-			//当扫描完一轮文件file_stat的temp链表上的file_area时，置1，进入冷却期，在N个age周期内不再扫描这个文件上的file_area。
-			bool cooling_off_start;
-
-			//处于中间状态的file_area结构添加到这个链表，新分配的file_area就添加到这里
-			struct list_head file_area_temp;
-			/************base***base***base************/
-		};
-	};
+	struct file_stat_base file_stat_base;
 }/*__attribute__((packed))*/;
 
 /*注意，有个隐藏的问题，在filemap.c函数里，是直接p_file_stat = (struct file_stat_base *)mapping->rh_reserved1，
@@ -540,128 +487,17 @@ struct file_stat_tiny_small
  p_file_stat一定指向的是file_stat.file_stat_base结构体，不会再有对齐问题，__attribute__((packed))就不需要了*/
 struct file_stat_small
 {
-	union{
-		struct file_stat_base file_stat_base;
-		struct{
-			/************base***base***base************/
-			struct address_space *mapping;
-			union{
-				//file_stat通过hot_cold_file_list添加到hot_cold_file_global的file_stat_hot_head链表
-				struct list_head hot_cold_file_list;
-				//rcu_head和list_head都是16个字节
-				struct rcu_head		i_rcu;
-			};
-			//file_stat状态
-			unsigned long file_stat_status;
-			//总file_area个数
-			unsigned int file_area_count;
-			//热file_area个数
-			unsigned int file_area_hot_count;
-			//文件的file_area结构按照索引保存到这个radix tree
-			//struct hot_cold_file_area_tree_root hot_cold_file_area_tree_root_node;
-			//file_stat锁
-			spinlock_t file_stat_lock;
-			//file_stat里age最大的file_area的age，调试用
-			unsigned long max_file_area_age;
-			/*最近一次访问的page的file_area所在的父节点，通过它直接得到file_area，然后得到page，不用每次都遍历xarray tree*/
-			struct xa_node *xa_node_cache;
-			/*xa_node_cache父节点保存的起始file_area的page的索引*/
-			pgoff_t  xa_node_cache_base_index;
-
-			union{
-				//cache文件file_stat最近一次被异步内存回收访问时的age，调试用
-				unsigned int recent_access_age;
-				//mmap文件在扫描完一轮file_stat->temp链表上的file_area，进入冷却期，cooling_off_start_age记录当时的global age
-				unsigned int cooling_off_start_age;
-			};
-			/*记录该文件file_stat被遍历时的全局age*/
-			unsigned int recent_traverse_age;
-			/*统计一个周期内file_stat->temp链表上file_area移动到file_stat->temp链表头的次数，每一个一次减1，减少到0则禁止
-			 *file_stat->temp链表上file_area再移动到file_stat->temp链表头*/
-			short file_area_move_to_head_count;
-
-
-			/**针对mmap文件新增的****************************/
-			//最新一次访问的file_area，mmap文件用
-			struct file_area *file_area_last;
-			//件file_stat->file_area_temp链表上已经扫描的file_stat个数，如果达到file_area_count_in_temp_list，说明这个文件的file_stat扫描完了，才会扫描下个文件file_stat的file_area
-			unsigned int scan_file_area_count_temp_list;
-			//在文件file_stat->file_area_temp链表上的file_area个数
-			unsigned int file_area_count_in_temp_list;
-			//文件 mapcount大于1的file_area的个数
-			unsigned int mapcount_file_area_count;
-			//当扫描完一轮文件file_stat的temp链表上的file_area时，置1，进入冷却期，在N个age周期内不再扫描这个文件上的file_area。
-			bool cooling_off_start;
-
-			//处于中间状态的file_area结构添加到这个链表，新分配的file_area就添加到这里
-			struct list_head file_area_temp;
-			/************base***base***base************/
-		};
-	};
+	struct file_stat_base file_stat_base;
 	/*hot、refault、free 等状态的file_area移动到这个链表*/
 	struct list_head file_area_other;
 }/*__attribute__((packed))*/;
 //热点文件统计信息，一个文件一个
 struct file_stat
 {
-	union{
-		struct file_stat_base file_stat_base;
-		struct{
-			/************base***base***base************/
-			struct address_space *mapping;
-			union{
-				//file_stat通过hot_cold_file_list添加到hot_cold_file_global的file_stat_hot_head链表
-				struct list_head hot_cold_file_list;
-				//rcu_head和list_head都是16个字节
-				struct rcu_head		i_rcu;
-			};
-			//file_stat状态
-			unsigned long file_stat_status;
-			//总file_area个数
-			unsigned int file_area_count;
-			//热file_area个数
-			unsigned int file_area_hot_count;
-			//文件的file_area结构按照索引保存到这个radix tree
-			//struct hot_cold_file_area_tree_root hot_cold_file_area_tree_root_node;
-			//file_stat锁
-			spinlock_t file_stat_lock;
-			//file_stat里age最大的file_area的age，调试用
-			unsigned long max_file_area_age;
-			/*最近一次访问的page的file_area所在的父节点，通过它直接得到file_area，然后得到page，不用每次都遍历xarray tree*/
-			struct xa_node *xa_node_cache;
-			/*xa_node_cache父节点保存的起始file_area的page的索引*/
-			pgoff_t  xa_node_cache_base_index;
+	struct file_stat_base file_stat_base;
+	unsigned int file_area_hot_count;
+	unsigned int mapcount_file_area_count;
 
-			union{
-				//cache文件file_stat最近一次被异步内存回收访问时的age，调试用
-				unsigned int recent_access_age;
-				//mmap文件在扫描完一轮file_stat->temp链表上的file_area，进入冷却期，cooling_off_start_age记录当时的global age
-				unsigned int cooling_off_start_age;
-			};
-			/*记录该文件file_stat被遍历时的全局age*/
-			unsigned int recent_traverse_age;
-			/*统计一个周期内file_stat->temp链表上file_area移动到file_stat->temp链表头的次数，每一个一次减1，减少到0则禁止
-			 *file_stat->temp链表上file_area再移动到file_stat->temp链表头*/
-			short file_area_move_to_head_count;
-
-
-			/**针对mmap文件新增的****************************/
-			//最新一次访问的file_area，mmap文件用
-			struct file_area *file_area_last;
-			//件file_stat->file_area_temp链表上已经扫描的file_stat个数，如果达到file_area_count_in_temp_list，说明这个文件的file_stat扫描完了，才会扫描下个文件file_stat的file_area
-			unsigned int scan_file_area_count_temp_list;
-			//在文件file_stat->file_area_temp链表上的file_area个数
-			unsigned int file_area_count_in_temp_list;
-			//文件 mapcount大于1的file_area的个数
-			unsigned int mapcount_file_area_count;
-			//当扫描完一轮文件file_stat的temp链表上的file_area时，置1，进入冷却期，在N个age周期内不再扫描这个文件上的file_area。
-			bool cooling_off_start;
-
-			//处于中间状态的file_area结构添加到这个链表，新分配的file_area就添加到这里
-			struct list_head file_area_temp;
-			/************base***base***base************/
-		};
-	};
 	//频繁被访问的文件page对应的file_area存入这个头结点
 	struct list_head file_area_hot;
 	/*快接近冷file_area的移动到这个链表*/
@@ -981,6 +817,7 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 #define MAX_FILE_STAT_LIST_BIT F_file_stat_in_mapcount_file_area_list
 #define FILE_STAT_LIST_MASK ((1 << (MAX_FILE_STAT_LIST_BIT + 1)) - 1)
 
+#if 0
 //清理file_stat的状态，在哪个链表
 #define CLEAR_FILE_STAT_STATUS(name)\
 	static inline void clear_file_stat_in_##name##_list(struct file_stat *p_file_stat)\
@@ -1009,7 +846,7 @@ FILE_STAT_STATUS(file_stat_middle_file_head)
 FILE_STAT_STATUS(file_stat_large_file_head)
 FILE_STAT_STATUS(zero_file_area)
 FILE_STAT_STATUS(mapcount_file_area)
-
+#endif
 
 	//清理file_stat的状态，在哪个链表
 #define CLEAR_FILE_STAT_STATUS_BASE(name)\
@@ -1033,15 +870,17 @@ FILE_STAT_STATUS(mapcount_file_area)
 	TEST_FILE_STAT_STATUS_BASE(name) \
 	TEST_FILE_STAT_STATUS_ERROR_BASE(name)
 
+FILE_STAT_STATUS_BASE(file_stat_hot_head)
 FILE_STAT_STATUS_BASE(file_stat_temp_head)
 FILE_STAT_STATUS_BASE(file_stat_middle_file_head)
 FILE_STAT_STATUS_BASE(file_stat_large_file_head)
 FILE_STAT_STATUS_BASE(file_stat_small_file_head)
 FILE_STAT_STATUS_BASE(file_stat_tiny_small_file_head)
 FILE_STAT_STATUS_BASE(zero_file_area)
+FILE_STAT_STATUS_BASE(mapcount_file_area)
 
 
-
+#if 0
 //清理文件的状态，大小文件等
 #define CLEAR_FILE_STATUS(name)\
 		static inline void clear_file_stat_in_##name(struct file_stat *p_file_stat)\
@@ -1066,6 +905,13 @@ FILE_STAT_STATUS_BASE(zero_file_area)
 
 FILE_STATUS(delete)
 FILE_STATUS(delete_file)
+FILE_STATUS(cache_file)
+FILE_STATUS(mmap_file)
+FILE_STATUS(from_cache_file)
+FILE_STATUS(from_small_file)
+FILE_STATUS(replaced_file)
+#endif
+
 
 	//清理文件的状态，大小文件等
 #define CLEAR_FILE_STATUS_BASE(name)\
@@ -1091,7 +937,25 @@ FILE_STATUS(delete_file)
 
 FILE_STATUS_BASE(delete)
 FILE_STATUS_BASE(delete_file)
+FILE_STATUS_BASE(cache_file)
+FILE_STATUS_BASE(mmap_file)
+FILE_STATUS_BASE(from_cache_file)
+FILE_STATUS_BASE(from_small_file)
+FILE_STATUS_BASE(replaced_file)
 
+
+/*设置/清除file_stat状态使用test_and_set_bit/clear_bit，是异步内存回收1.0版本的产物，现在不再需要。
+ *因为设置/清理file_stat状态全都spin_lock加锁。并且会置/清除file_stat状态的只有两个场景，
+ *一个是第1次创建file_stat添加到global temp链表时，这个有spin_lock加锁不用担心。第2个场景是，
+ *文件被异步iput()释放file_stat并标记file_stat delete，此时也有spin_lock加锁，但是异步内存回收线程
+ *遍历global temp/small/tiny small文件时，会spin_lock加锁情况下在is_file_stat_mapping_error()函数里
+ *判断file_stat是否有delete标记。并且，异步内存回收线程会在对file_stat进行内存回收时判断file_stat是否有
+ *delete标记。这就得非常注意了，因为file_stat的delete标记可能不会立即感知到，因此这两处异步内存回收线程
+ *还通过内存屏障+其他变量辅助判断方法，判断file_stat是否有delete标记。后续，如果还有其他地方要判断
+ *file_stat是否有delete标记，需要特别注意
+ */
+#if 0 
+	//-----------------------------这段注释掉的代码不要删除
 	//清理文件的状态，大小文件等
 #define CLEAR_FILE_STATUS_ATOMIC(name)\
 		static inline void clear_file_stat_in_##name(struct file_stat *p_file_stat)\
@@ -1127,7 +991,7 @@ FILE_STATUS_BASE(delete_file)
 //FILE_STATUS_ATOMIC(free_page_done)
 /*标记file_stat delete可能在cold_file_stat_delete()和__destroy_inode_handler_post()并发执行，存在重复设置可能，用FILE_STATUS_ATOMIC会因重复设置而crash*/
 //FILE_STATUS_ATOMIC(delete)
-FILE_STATUS_ATOMIC(cache_file)
+FILE_STATUS_ATOMIC(cache_file)//------------设置这些file_stat状态都有spin_lock加锁，因为不用
 FILE_STATUS_ATOMIC(mmap_file)
 FILE_STATUS_ATOMIC(from_cache_file)
 FILE_STATUS_ATOMIC(from_small_file)
@@ -1164,6 +1028,7 @@ FILE_STATUS_ATOMIC_BASE(mmap_file)
 	FILE_STATUS_ATOMIC_BASE(from_cache_file)
 FILE_STATUS_ATOMIC_BASE(from_small_file)
 FILE_STATUS_ATOMIC_BASE(replaced_file)
+#endif
 
 extern struct hot_cold_file_global hot_cold_file_global_info;
 
@@ -1455,9 +1320,9 @@ static inline unsigned int get_file_area_list_status(struct file_area *p_file_ar
 {
 	return p_file_area->file_area_state & FILE_AREA_LIST_MASK;
 }
-static inline long get_file_stat_normal_type_all(struct file_stat *file_stat)
+static inline long get_file_stat_normal_type_all(struct file_stat_base *file_stat_base)
 {
-	unsigned long file_stat_type = file_stat->file_stat_status & FILE_STAT_LIST_MASK;
+	unsigned long file_stat_type = file_stat_base->file_stat_status & FILE_STAT_LIST_MASK;
 
 	switch (file_stat_type){
 		case 1 << F_file_stat_in_file_stat_temp_head_list:
@@ -1471,9 +1336,9 @@ static inline long get_file_stat_normal_type_all(struct file_stat *file_stat)
 	return 0;
 
 }
-static inline long get_file_stat_normal_type(struct file_stat *file_stat)
+static inline long get_file_stat_normal_type(struct file_stat_base *file_stat_base)
 {
-	unsigned long file_stat_type = file_stat->file_stat_status & FILE_STAT_LIST_MASK;
+	unsigned long file_stat_type = file_stat_base->file_stat_status & FILE_STAT_LIST_MASK;
 
 	switch (file_stat_type){
 		case 1 << F_file_stat_in_file_stat_temp_head_list:
@@ -1654,7 +1519,8 @@ static inline long get_file_stat_type(struct file_stat_base *file_stat_base)
  *
  * 1:rcu_read_lock()防止inode被iput()释放了，导致 p_file_stat_base->mapping->rh_reserved1无效内存访问。
  * 2:rcu_read_lock()加printk打印会导致休眠吧，这点要控制
- * 3:smp_rmb()保证p_file_stat_base->mapping->rh_reserved1在iput()被赋值0后，file_stat一定有delete标记。iput()里是set_file_stat_in_delete;smp_wmb;p_file_stat_base->mapping->rh_reserved1=0*/
+ * 3:smp_rmb()保证p_file_stat_base->mapping->rh_reserved1在iput()被赋值0后，file_stat一定有delete标记。iput()里是set_file_stat_in_delete;smp_wmb;p_file_stat_base->mapping->rh_reserved1=0
+ * */
 #define is_file_stat_mapping_error(p_file_stat_base) \
 { \
 	rcu_read_lock();\
@@ -1662,14 +1528,14 @@ static inline long get_file_stat_type(struct file_stat_base *file_stat_base)
 		smp_rmb();\
 		if(file_stat_in_delete_base(p_file_stat_base)){\
 			rcu_read_unlock(); \
-			printk(KERN_EMERG"%s file_stat:0x%llx status:0x%lx mapping:0x%llx delete!!!!!!!!!!!!\n",__func__,(u64)p_file_stat_base,(p_file_stat_base)->file_stat_status,(u64)((p_file_stat_base)->mapping)); \
+			printk(KERN_WARNING "%s file_stat:0x%llx status:0x%x mapping:0x%llx delete!!!!!!!!!!!!\n",__func__,(u64)p_file_stat_base,(p_file_stat_base)->file_stat_status,(u64)((p_file_stat_base)->mapping)); \
 			goto out;\
 		} \
 		else \
 		panic("%s file_stat:0x%llx match mapping:0x%llx 0x%llx error\n",__func__,(u64)p_file_stat_base,(u64)((p_file_stat_base)->mapping),(u64)((p_file_stat_base)->mapping->rh_reserved1)); \
 	}\
 	rcu_read_unlock();\
-out:	\
+	out:	\
 }
 #endif
 
@@ -1702,24 +1568,24 @@ static inline struct file_stat_base *file_stat_alloc_and_init(struct address_spa
 		//file_stat个数加1
 		hot_cold_file_global_info.file_stat_tiny_small_count ++;
 		memset(p_file_stat_tiny_small,0,sizeof(struct file_stat_tiny_small));
+		p_file_stat_base = &p_file_stat_tiny_small->file_stat_base;
 		//设置文件是cache文件状态，有些cache文件可能还会被mmap映射，要与mmap文件互斥，要么是cache文件要么是mmap文件，不能两者都是 
-		set_file_stat_in_cache_file_base(&p_file_stat_tiny_small->file_stat_base);
+		set_file_stat_in_cache_file_base(p_file_stat_base);
 		//初始化file_area_hot头结点
-		INIT_LIST_HEAD(&p_file_stat_tiny_small->file_area_temp);
+		INIT_LIST_HEAD(&p_file_stat_base->file_area_temp);
 
 		//mapping->file_stat记录该文件绑定的file_stat结构的file_stat_base的地址，将来判定是否对该文件分配了file_stat
-		mapping->rh_reserved1 = (unsigned long)(&p_file_stat_tiny_small->file_stat_base);
+		mapping->rh_reserved1 = (unsigned long)(p_file_stat_base);
 		//file_stat记录mapping结构
-		p_file_stat_tiny_small->mapping = mapping;
+		p_file_stat_base->mapping = mapping;
 
 		//设置file_stat in_temp_list最好放到把file_stat添加到global temp链表操作前，原因在add_mmap_file_stat_to_list()有分析
-		set_file_stat_in_file_stat_tiny_small_file_head_list_base(&p_file_stat_tiny_small->file_stat_base);
+		set_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
 		smp_wmb();
 		//把针对该文件分配的file_stat结构添加到hot_cold_file_global_info的file_stat_temp_head链表
-		list_add(&p_file_stat_tiny_small->hot_cold_file_list,&hot_cold_file_global_info.file_stat_tiny_small_file_head);
-	    spin_lock_init(&p_file_stat_tiny_small->file_stat_lock);
+		list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_tiny_small_file_head);
+	    spin_lock_init(&p_file_stat_base->file_stat_lock);
 
-		p_file_stat_base = &p_file_stat_tiny_small->file_stat_base;
 	}
 	else if(FILE_STAT_SMALL == file_type){
 		//新的文件分配file_stat,一个文件一个，保存文件热点区域访问数据
@@ -1731,25 +1597,25 @@ static inline struct file_stat_base *file_stat_alloc_and_init(struct address_spa
 		//file_stat个数加1
 		hot_cold_file_global_info.file_stat_small_count ++;
 		memset(p_file_stat_small,0,sizeof(struct file_stat_small));
+		p_file_stat_base = &p_file_stat_small->file_stat_base;
 		//设置文件是cache文件状态，有些cache文件可能还会被mmap映射，要与mmap文件互斥，要么是cache文件要么是mmap文件，不能两者都是 
-		set_file_stat_in_cache_file_base(&p_file_stat_small->file_stat_base);
+		set_file_stat_in_cache_file_base(p_file_stat_base);
 		//初始化file_area_hot头结点
-		INIT_LIST_HEAD(&p_file_stat_small->file_area_temp);
+		INIT_LIST_HEAD(&p_file_stat_base->file_area_temp);
 		INIT_LIST_HEAD(&p_file_stat_small->file_area_other);
 
 		//mapping->file_stat记录该文件绑定的file_stat结构，将来判定是否对该文件分配了file_stat
-		mapping->rh_reserved1 = (unsigned long)(&p_file_stat_small->file_stat_base);
+		mapping->rh_reserved1 = (unsigned long)(p_file_stat_base);
 		//file_stat记录mapping结构
-		p_file_stat_small->mapping = mapping;
+		p_file_stat_base->mapping = mapping;
 
 		//设置file_stat in_temp_list最好放到把file_stat添加到global temp链表操作前，原因在add_mmap_file_stat_to_list()有分析
-		set_file_stat_in_file_stat_small_file_head_list_base(&p_file_stat_small->file_stat_base);
+		set_file_stat_in_file_stat_small_file_head_list_base(p_file_stat_base);
 		smp_wmb();
 		//把针对该文件分配的file_stat结构添加到hot_cold_file_global_info的file_stat_temp_head链表
-		list_add(&p_file_stat_small->hot_cold_file_list,&hot_cold_file_global_info.file_stat_small_file_head);
-	    spin_lock_init(&p_file_stat_small->file_stat_lock);
+		list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_small_file_head);
+	    spin_lock_init(&p_file_stat_base->file_stat_lock);
 
-		p_file_stat_base = &p_file_stat_small->file_stat_base;
 	}
 	/*如果是小文件使用精简的file_stat_small，大文件才使用file_stat结构，为了降低内存消耗*/
 	else if(FILE_STAT_NORMAL == file_type){
@@ -1762,11 +1628,12 @@ static inline struct file_stat_base *file_stat_alloc_and_init(struct address_spa
 		//file_stat个数加1
 		hot_cold_file_global_info.file_stat_count ++;
 		memset(p_file_stat,0,sizeof(struct file_stat));
+		p_file_stat_base = &p_file_stat->file_stat_base;
 		//设置文件是cache文件状态，有些cache文件可能还会被mmap映射，要与mmap文件互斥，要么是cache文件要么是mmap文件，不能两者都是 
-		set_file_stat_in_cache_file(p_file_stat);
+		set_file_stat_in_cache_file_base(p_file_stat_base);
 		//初始化file_area_hot头结点
 		INIT_LIST_HEAD(&p_file_stat->file_area_hot);
-		INIT_LIST_HEAD(&p_file_stat->file_area_temp);
+		INIT_LIST_HEAD(&p_file_stat_base->file_area_temp);
 		INIT_LIST_HEAD(&p_file_stat->file_area_warm);
 		//INIT_LIST_HEAD(&p_file_stat->file_area_free_temp);
 		INIT_LIST_HEAD(&p_file_stat->file_area_free);
@@ -1774,18 +1641,17 @@ static inline struct file_stat_base *file_stat_alloc_and_init(struct address_spa
 		INIT_LIST_HEAD(&p_file_stat->file_area_mapcount);
 
 		//mapping->file_stat记录该文件绑定的file_stat结构，将来判定是否对该文件分配了file_stat
-		mapping->rh_reserved1 = (unsigned long)(&p_file_stat->file_stat_base);
+		mapping->rh_reserved1 = (unsigned long)(p_file_stat_base);
 		//file_stat记录mapping结构
-		p_file_stat->mapping = mapping;
+		p_file_stat_base->mapping = mapping;
 
 		//设置file_stat in_temp_list最好放到把file_stat添加到global temp链表操作前，原因在add_mmap_file_stat_to_list()有分析
-		set_file_stat_in_file_stat_temp_head_list(p_file_stat);
+		set_file_stat_in_file_stat_temp_head_list_base(p_file_stat_base);
 		smp_wmb();
 		//把针对该文件分配的file_stat结构添加到hot_cold_file_global_info的file_stat_temp_head链表
-		list_add(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.file_stat_temp_head);
-	    spin_lock_init(&p_file_stat->file_stat_lock);
+		list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_temp_head);
+	    spin_lock_init(&p_file_stat_base->file_stat_lock);
 
-		p_file_stat_base = &p_file_stat->file_stat_base;
 	}else
 		BUG();
 
@@ -1849,19 +1715,19 @@ free_old_file_stat 是1，下边的if不成立，忽略mapping->rh_reserved1，�
 		//设置file_stat的in mmap文件状态
 		hot_cold_file_global_info.mmap_file_stat_tiny_small_count++;
 		memset(p_file_stat_tiny_small,0,sizeof(struct file_stat_tiny_small));
+		p_file_stat_base = &p_file_stat_tiny_small->file_stat_base;
 		//mapping->file_stat记录该文件绑定的file_stat结构，将来判定是否对该文件分配了file_stat
 		//这里得把file_stat_base赋值给mapping->rh_reserved1，不再是整个file_stat结构体????????????????????????
-		mapping->rh_reserved1 = (unsigned long)(&p_file_stat_tiny_small->file_stat_base);
-		p_file_stat_tiny_small->mapping = mapping;
+		mapping->rh_reserved1 = (unsigned long)(p_file_stat_base);
+		p_file_stat_base->mapping = mapping;
 		//设置文件是mmap文件状态，有些mmap文件可能还会被读写，要与cache文件互斥，要么是cache文件要么是mmap文件，不能两者都是 
-		set_file_stat_in_mmap_file_base(&p_file_stat_tiny_small->file_stat_base);
-		INIT_LIST_HEAD(&p_file_stat_tiny_small->file_area_temp);
+		set_file_stat_in_mmap_file_base(p_file_stat_base);
+		INIT_LIST_HEAD(&p_file_stat_base->file_area_temp);
 
-		set_file_stat_in_file_stat_tiny_small_file_head_list_base(&p_file_stat_tiny_small->file_stat_base);
-		list_add(&p_file_stat_tiny_small->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_tiny_small_file_head);
-		spin_lock_init(&p_file_stat_tiny_small->file_stat_lock);
+		set_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
+		list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_tiny_small_file_head);
+		spin_lock_init(&p_file_stat_base->file_stat_lock);
 
-		p_file_stat_base = &p_file_stat_tiny_small->file_stat_base;
 	}
 	else if(FILE_STAT_SMALL == file_type){
 		p_file_stat_small = kmem_cache_alloc(hot_cold_file_global_info.file_stat_small_cachep,GFP_ATOMIC);
@@ -1873,19 +1739,19 @@ free_old_file_stat 是1，下边的if不成立，忽略mapping->rh_reserved1，�
 		//设置file_stat的in mmap文件状态
 		hot_cold_file_global_info.mmap_file_stat_small_count++;
 		memset(p_file_stat_small,0,sizeof(struct file_stat_small));
+		p_file_stat_base = &p_file_stat_small->file_stat_base;
 		//mapping->file_stat记录该文件绑定的file_stat结构，将来判定是否对该文件分配了file_stat
-		mapping->rh_reserved1 = (unsigned long)(&p_file_stat_small->file_stat_base);
-		p_file_stat_small->mapping = mapping;
+		mapping->rh_reserved1 = (unsigned long)(p_file_stat_base);
+		p_file_stat_base->mapping = mapping;
 		//设置文件是mmap文件状态，有些mmap文件可能还会被读写，要与cache文件互斥，要么是cache文件要么是mmap文件，不能两者都是 
-		set_file_stat_in_mmap_file_base(&p_file_stat_small->file_stat_base);
-		INIT_LIST_HEAD(&p_file_stat_small->file_area_temp);
+		set_file_stat_in_mmap_file_base(p_file_stat_base);
+		INIT_LIST_HEAD(&p_file_stat_base->file_area_temp);
 		INIT_LIST_HEAD(&p_file_stat_small->file_area_other);
 
-		set_file_stat_in_file_stat_small_file_head_list_base(&p_file_stat_small->file_stat_base);
-		list_add(&p_file_stat_small->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_small_file_head);
-		spin_lock_init(&p_file_stat_small->file_stat_lock);
+		set_file_stat_in_file_stat_small_file_head_list_base(p_file_stat_base);
+		list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_small_file_head);
+		spin_lock_init(&p_file_stat_base->file_stat_lock);
 
-		p_file_stat_base = &p_file_stat_small->file_stat_base;
 	}
 	else if(FILE_STAT_NORMAL == file_type){
 		p_file_stat = kmem_cache_alloc(hot_cold_file_global_info.file_stat_cachep,GFP_ATOMIC);
@@ -1897,10 +1763,11 @@ free_old_file_stat 是1，下边的if不成立，忽略mapping->rh_reserved1，�
 		//设置file_stat的in mmap文件状态
 		hot_cold_file_global_info.mmap_file_stat_count++;
 		memset(p_file_stat,0,sizeof(struct file_stat));
+		p_file_stat_base = &p_file_stat->file_stat_base;
 		//设置文件是mmap文件状态，有些mmap文件可能还会被读写，要与cache文件互斥，要么是cache文件要么是mmap文件，不能两者都是 
-		set_file_stat_in_mmap_file(p_file_stat);
+		set_file_stat_in_mmap_file_base(p_file_stat_base);
 		INIT_LIST_HEAD(&p_file_stat->file_area_hot);
-		INIT_LIST_HEAD(&p_file_stat->file_area_temp);
+		INIT_LIST_HEAD(&p_file_stat_base->file_area_temp);
 		INIT_LIST_HEAD(&p_file_stat->file_area_warm);
 		/*mmap文件需要p_file_stat->file_area_free_temp暂存参与内存回收的file_area，不能注释掉*/
 		//INIT_LIST_HEAD(&p_file_stat->file_area_free_temp);
@@ -1910,21 +1777,20 @@ free_old_file_stat 是1，下边的if不成立，忽略mapping->rh_reserved1，�
 		INIT_LIST_HEAD(&p_file_stat->file_area_mapcount);
 
 		//mapping->file_stat记录该文件绑定的file_stat结构，将来判定是否对该文件分配了file_stat
-		mapping->rh_reserved1 = (unsigned long)(&p_file_stat->file_stat_base);
-		p_file_stat->mapping = mapping;
+		mapping->rh_reserved1 = (unsigned long)(p_file_stat_base);
+		p_file_stat_base->mapping = mapping;
 #if 1
 		/*新分配的file_stat必须设置in_file_stat_temp_head_list链表。这个设置file_stat状态的操作必须放到 把file_stat添加到
 		 *tmep链表前边，还要加内存屏障。否则会出现一种极端情况，异步内存回收线程从temp链表遍历到这个file_stat，
 		 *但是file_stat还没有设置为in_temp_list状态。这样有问题会触发panic。因为mmap文件异步内存回收线程，
 		 *从temp链表遍历file_stat没有mmap_file_global_lock加锁，所以与这里存在并发操作。而针对cache文件，异步内存回收线程
 		 *从global temp链表遍历file_stat，全程global_lock加锁，不会跟向global temp链表添加file_stat存在方法，但最好改造一下*/
-		set_file_stat_in_file_stat_temp_head_list(p_file_stat);
+		set_file_stat_in_file_stat_temp_head_list_base(p_file_stat_base);
 		smp_wmb();
 #endif	
-		spin_lock_init(&p_file_stat->file_stat_lock);
-		list_add(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_temp_head);
+		spin_lock_init(&p_file_stat_base->file_stat_lock);
+		list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_temp_head);
 
-		p_file_stat_base = &p_file_stat->file_stat_base;
 	}else
 		BUG();
 
@@ -2126,16 +1992,16 @@ static int inline can_file_area_move_to_list_head(struct file_area *p_file_area,
 	return 1;
 }
 /*测试file_stat是否真的在file_stat_in_list_type这个global链表上(global temp、middle、large、hot、mapcount链表)，不在则不能把p_file_stat到链表尾的file_stat移动到链表头*/
-static int inline can_file_stat_move_to_list_head(struct file_stat *p_file_stat,unsigned int file_stat_in_list_type)
+static int inline can_file_stat_move_to_list_head(struct file_stat_base *p_file_stat_base,unsigned int file_stat_in_list_type)
 {
 	/*如果file_stat不在file_stat_in_list_type这个global链表上，测试失败*/
-    if(0 == (p_file_stat->file_stat_status & (1 << file_stat_in_list_type)))
+    if(0 == (p_file_stat_base->file_stat_status & (1 << file_stat_in_list_type)))
 		return 0;
     /*如果file_stat检测到在file_stat_in_list_type除外的其他global链表上，测试失败*/
-	if(p_file_stat->file_stat_status & (~(1 << file_stat_in_list_type) & FILE_STAT_LIST_MASK))
+	if(p_file_stat_base->file_stat_status & (~(1 << file_stat_in_list_type) & FILE_STAT_LIST_MASK))
 		return 0;
 
-	printk("can_file_stat_move_to_list_head file_stat:0x%llx\n",(u64)p_file_stat);
+	printk("can_file_stat_move_to_list_head file_stat:0x%llx\n",(u64)p_file_stat_base);
 	return 1;
 }
 static int inline can_file_stat_move_to_list_head_base(struct file_stat_base *p_file_stat_base,unsigned int file_stat_in_list_type)
@@ -2153,21 +2019,25 @@ static int inline can_file_stat_move_to_list_head_base(struct file_stat_base *p_
 
 static void inline i_file_stat_small_callback(struct rcu_head *head)
 {
-	struct file_stat_small *p_file_stat_small = container_of(head, struct file_stat_small, i_rcu);
+	struct file_stat_base *p_file_stat_base = container_of(head, struct file_stat_base, i_rcu);
+	struct file_stat_small *p_file_stat_small = container_of(p_file_stat_base, struct file_stat_small, file_stat_base);
+
 	/*有必要在这里判断file_stat的temp、refault、hot、free、mapcount链表是否空，如果有残留file_area则panic。
 	 * 防止can_tiny_small_file_change_to_small_normal_file()把tiny small转换成其他文件时，因代码有问题，导致没处理干净所有的file_area*/
-	if(!list_empty(&p_file_stat_small->file_area_temp) || !list_empty(&p_file_stat_small->file_area_other))
-		panic("%s file_stat_small:0x%llx status:0x%llx  list nor empty\n",__func__,(u64)p_file_stat_small,(u64)p_file_stat_small->file_stat_status);
+	if(!list_empty(&p_file_stat_small->file_stat_base.file_area_temp) || !list_empty(&p_file_stat_small->file_area_other))
+		panic("%s file_stat_small:0x%llx status:0x%llx  list nor empty\n",__func__,(u64)p_file_stat_small,(u64)p_file_stat_small->file_stat_base.file_stat_status);
 
 	kmem_cache_free(hot_cold_file_global_info.file_stat_small_cachep,p_file_stat_small);
 }
 static void inline i_file_stat_tiny_small_callback(struct rcu_head *head)
 {
-	struct file_stat_tiny_small *p_file_stat_tiny_small = container_of(head, struct file_stat_tiny_small, i_rcu);
+	struct file_stat_base *p_file_stat_base = container_of(head, struct file_stat_base, i_rcu);
+	struct file_stat_tiny_small *p_file_stat_tiny_small = container_of(p_file_stat_base, struct file_stat_tiny_small, file_stat_base);
+
 	/*有必要在这里判断file_stat的temp、refault、hot、free、mapcount链表是否空，如果有残留file_area则panic。
 	 * 防止can_small_file_change_to_normal_file()把tiny small转换成其他文件时，因代码有问题，导致没处理干净所有的file_area*/
-	if(!list_empty(&p_file_stat_tiny_small->file_area_temp))
-		panic("%s file_stat_small:0x%llx status:0x%llx  list nor empty\n",__func__,(u64)p_file_stat_tiny_small,(u64)p_file_stat_tiny_small->file_stat_status);
+	if(!list_empty(&p_file_stat_tiny_small->file_stat_base.file_area_temp))
+		panic("%s file_stat_small:0x%llx status:0x%llx  list nor empty\n",__func__,(u64)p_file_stat_tiny_small,(u64)p_file_stat_tiny_small->file_stat_base.file_stat_status);
 
 	kmem_cache_free(hot_cold_file_global_info.file_stat_tiny_small_cachep,p_file_stat_tiny_small);
 }
@@ -2265,7 +2135,7 @@ extern void can_small_file_change_to_normal_file(struct hot_cold_file_global *p_
 extern int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,unsigned int file_area_type,unsigned int file_type,struct list_head *file_area_list);
 
 extern void hot_file_update_file_status(struct address_space *mapping,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,int access_count,int read_or_write);
-extern void get_file_name(char *file_name_path,struct file_stat * p_file_stat);
+extern void get_file_name(char *file_name_path,struct file_stat_base *p_file_stat_base);
 extern unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_free,struct list_head *file_area_have_mmap_page_head);
 extern unsigned int cold_mmap_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base * p_file_stat_base,struct file_area *p_file_area,struct page *page_buf[],int cold_page_count);
 extern unsigned long shrink_inactive_list_async(unsigned long nr_to_scan, struct lruvec *lruvec,struct hot_cold_file_global *p_hot_cold_file_global,int is_mmap_file, enum lru_list lru);
@@ -2275,7 +2145,7 @@ extern unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_glo
 extern int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base_del,unsigned int file_type);
 extern int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area);
 
-extern void file_stat_temp_middle_large_file_change(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,unsigned int file_stat_list_type, unsigned int file_type,char is_cache_file);
+extern void file_stat_temp_middle_large_file_change(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,unsigned int file_stat_list_type, unsigned int file_type,char is_cache_file);
 extern int mmap_file_area_cache_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_have_cache_page_head,struct list_head *file_area_free_temp,unsigned int file_type);
 extern int cache_file_area_mmap_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_have_mmap_page_head,unsigned int file_type);
 #endif

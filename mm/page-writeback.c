@@ -2119,7 +2119,7 @@ void tag_pages_for_writeback_for_file_area(struct address_space *mapping,
 	void *page;
 
 	struct file_area *p_file_area;
-	struct file_stat *p_file_stat;
+	struct file_stat_base *p_file_stat_base;
 	//令page索引与上0x3得到它在file_area的pages[]数组的下标
 	unsigned int page_offset_in_file_area = start & PAGE_COUNT_IN_AREA_MASK;
 	pgoff_t file_area_end_index = end >> PAGE_COUNT_IN_AREA_SHIFT;
@@ -2128,7 +2128,8 @@ void tag_pages_for_writeback_for_file_area(struct address_space *mapping,
 	/*该函数没有rcu_read_lock，但是有xa_lock_irqsave加锁，也能防止file_stat被方法delete*/
 	xas_lock_irq(&xas);
 
-	p_file_stat = (struct file_stat *)mapping->rh_reserved1;
+	//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
+	p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
 	/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
 	 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
 	 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
@@ -2162,7 +2163,7 @@ find_page_from_file_area:
 
 		/*是调试的文件，打印调试信息*/
 		if(mapping->rh_reserved3){
-			printk("%s mark_towrite mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx\n",__func__,(u64)mapping,(u64)p_file_stat,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)page);
+			printk("%s mark_towrite mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)page);
 		}
 
 		/*file_area里的4个page都是dirty页吗，那可不一定，必须检测是否有脏页mark的page，才能在file_area里设置towrite mark*/
@@ -2588,12 +2589,13 @@ void __folio_mark_dirty_for_file_area(struct folio *folio, struct address_space 
 		int warn)
 {
 	unsigned long flags;
-    struct file_stat *p_file_stat;
+    struct file_stat_base *p_file_stat_base;
 	FILE_AREA_PRINT("%s %s %d mapping:0x%llx folio:0x%llx\n",__func__,current->comm,current->pid,(u64)mapping,(u64)folio);
 
 	/*该函数没有rcu_read_lock，但是有xa_lock_irqsave加锁，也能防止file_stat被方法delete*/
 	xa_lock_irqsave(&mapping->i_pages, flags);
-	p_file_stat = (struct file_stat *)mapping->rh_reserved1;
+	//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
+	p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
 	/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
 	 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
 	 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
@@ -2634,7 +2636,7 @@ void __folio_mark_dirty_for_file_area(struct folio *folio, struct address_space 
 
 		/*是调试的文件，打印调试信息*/
 		if(mapping->rh_reserved3){
-			printk("%s mark_dirty mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
+			printk("%s mark_dirty mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
 		}
 	}
 	xa_unlock_irqrestore(&mapping->i_pages, flags);
@@ -2961,12 +2963,13 @@ bool __folio_end_writeback_for_file_area(struct folio *folio)
 		struct inode *inode = mapping->host;
 		struct backing_dev_info *bdi = inode_to_bdi(inode);
 		unsigned long flags;
-        struct file_stat *p_file_stat;
+        struct file_stat_base *p_file_stat_base;
 		FILE_AREA_PRINT("%s %s %d mapping:0x%llx folio:0x%llx index:%ld\n",__func__,current->comm,current->pid,(u64)mapping,(u64)folio,folio->index);
 		/*该函数没有rcu_read_lock，但是有xa_lock_irqsave加锁，也能防止file_stat被方法delete*/
 		xa_lock_irqsave(&mapping->i_pages, flags);
 		
-		p_file_stat = (struct file_stat *)mapping->rh_reserved1;
+		//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
+		p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
 		/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
 		 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
 		 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
@@ -3011,7 +3014,7 @@ bool __folio_end_writeback_for_file_area(struct folio *folio)
 				xas_clear_mark(&xas, PAGECACHE_TAG_WRITEBACK);
 
 			if(mapping->rh_reserved3){
-				printk("%s clear_writeback mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
+				printk("%s clear_writeback mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
 			}
 
 			if (bdi->capabilities & BDI_CAP_WRITEBACK_ACCT) {
@@ -3113,7 +3116,7 @@ bool __folio_start_writeback_for_file_area(struct folio *folio, bool keep_write)
 		unsigned long flags;
 
 		struct file_area *p_file_area;
-		struct file_stat *p_file_stat;
+		struct file_stat_base *p_file_stat_base;
 		//令page索引与上0x3得到它在file_area的pages[]数组的下标
 		unsigned int page_offset_in_file_area = folio_index(folio) & PAGE_COUNT_IN_AREA_MASK;
 
@@ -3121,7 +3124,8 @@ bool __folio_start_writeback_for_file_area(struct folio *folio, bool keep_write)
 		/*该函数没有rcu_read_lock，但是有xa_lock_irqsave加锁，也能防止file_stat被方法delete*/
 		xas_lock_irqsave(&xas, flags);
 
-		p_file_stat = (struct file_stat *)mapping->rh_reserved1;
+		//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
+		p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
 		/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
 		 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
 		 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
@@ -3176,7 +3180,7 @@ bool __folio_start_writeback_for_file_area(struct folio *folio, bool keep_write)
 		
 		/*是调试的文件，打印调试信息*/
 		if(mapping->rh_reserved3){
-			printk("%s clear_dirty mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
+			printk("%s clear_dirty mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
 		}
 
 		if (!folio_test_dirty(folio)){
@@ -3189,13 +3193,13 @@ bool __folio_start_writeback_for_file_area(struct folio *folio, bool keep_write)
 				xas_clear_mark(&xas, PAGECACHE_TAG_DIRTY);
 
 			if(mapping->rh_reserved3){
-				printk("%s real_clear_dirty mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
+				printk("%s real_clear_dirty mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
 			}
 		}
 
 		/*是调试的文件，打印调试信息*/
 		if(mapping->rh_reserved3){
-			printk("%s clear_towrite mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx keep_write:%d\n",__func__,(u64)mapping,(u64)p_file_stat,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags,keep_write);
+			printk("%s clear_towrite mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx keep_write:%d\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags,keep_write);
 		}
 
 		if (!keep_write){
