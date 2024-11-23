@@ -1661,8 +1661,6 @@ static inline struct file_stat_base *file_stat_alloc_and_init(struct address_spa
 			printk("%s file_stat alloc fail\n",__func__);
 			goto out;
 		}
-		//file_stat个数加1
-		hot_cold_file_global_info.file_stat_count ++;
 		memset(p_file_stat,0,sizeof(struct file_stat));
 		p_file_stat_base = &p_file_stat->file_stat_base;
 		//设置文件是cache文件状态，有些cache文件可能还会被mmap映射，要与mmap文件互斥，要么是cache文件要么是mmap文件，不能两者都是 
@@ -1691,6 +1689,8 @@ static inline struct file_stat_base *file_stat_alloc_and_init(struct address_spa
 	}else
 		BUG();
 
+	//file_stat个数加1
+	hot_cold_file_global_info.file_stat_count ++;
 	//新分配的file_stat必须设置in_file_stat_temp_head_list链表
 	//set_file_stat_in_file_stat_temp_head_list(p_file_stat);
 out:	
@@ -1728,11 +1728,11 @@ static inline struct file_stat_base *add_mmap_file_stat_to_list(struct address_s
 
 	spin_lock(&hot_cold_file_global_info.mmap_file_global_lock);
 	/*1:如果两个进程同时访问一个文件，同时执行到这里，需要加锁。第1个进程加锁成功后，分配file_stat并赋值给
-	  mapping->rh_reserved1，第2个进程获取锁后执行到这里mapping->rh_reserved1就会成立
-2:异步内存回收功能禁止了
-3:当small file_stat转到normal file_stat，释放老的small file_stat然后分配新的normal file_stat，此时
-free_old_file_stat 是1，下边的if不成立，忽略mapping->rh_reserved1，进而才不会goto out，而是分配新的file_stat
-*/
+	 *mapping->rh_reserved1，第2个进程获取锁后执行到这里mapping->rh_reserved1就会成立
+	 *2:异步内存回收功能禁止了
+	 *3:当small file_stat转到normal file_stat，释放老的small file_stat然后分配新的normal file_stat，此时
+	 *free_old_file_stat 是1，下边的if不成立，忽略mapping->rh_reserved1，进而才不会goto out，而是分配新的file_stat
+	 */
 	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping) && !free_old_file_stat){
 		//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
 		p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
@@ -1796,8 +1796,6 @@ free_old_file_stat 是1，下边的if不成立，忽略mapping->rh_reserved1，�
 			printk("%s file_stat alloc fail\n",__func__);
 			goto out;
 		}
-		//设置file_stat的in mmap文件状态
-		hot_cold_file_global_info.mmap_file_stat_count++;
 		memset(p_file_stat,0,sizeof(struct file_stat));
 		p_file_stat_base = &p_file_stat->file_stat_base;
 		//设置文件是mmap文件状态，有些mmap文件可能还会被读写，要与cache文件互斥，要么是cache文件要么是mmap文件，不能两者都是 
@@ -1831,6 +1829,8 @@ free_old_file_stat 是1，下边的if不成立，忽略mapping->rh_reserved1，�
 		BUG();
 
 
+	//设置file_stat的in mmap文件状态
+	hot_cold_file_global_info.mmap_file_stat_count++;
 	spin_unlock(&hot_cold_file_global_info.mmap_file_global_lock);
 	if(shrink_page_printk_open)
 		printk("%s file_stat:0x%llx\n",__func__,(u64)p_file_stat_base);
