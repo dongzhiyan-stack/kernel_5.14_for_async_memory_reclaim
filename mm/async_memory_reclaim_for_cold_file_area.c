@@ -1758,6 +1758,8 @@ void get_file_name(char *file_name_path,struct file_stat_base *p_file_stat_base)
 	struct dentry *dentry = NULL;
 	struct inode *inode = NULL;
 
+	/*需要rcu加锁，保证inode在这个宽限期内inode结构体不会被iput()释放掉而非法内存访问*/
+	rcu_read_lock();
 	/*必须 hlist_empty()判断文件inode是否有dentry，没有则返回true。这里通过inode和dentry获取文件名字，必须 inode->i_lock加锁 
 	 *同时 增加inode和dentry的应用计数，否则可能正使用时inode和dentry被其他进程释放了*/
 	if(p_file_stat_base->mapping && p_file_stat_base->mapping->host && !hlist_empty(&p_file_stat_base->mapping->host->i_dentry)){
@@ -1774,10 +1776,11 @@ void get_file_name(char *file_name_path,struct file_stat_base *p_file_stat_base)
 		}
 		spin_unlock(&inode->i_lock);
 	}
+	rcu_read_unlock();
 }
-static int print_one_list_file_stat(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print,char *file_stat_name,struct list_head *file_stat_temp_head,unsigned int *file_stat_one_file_area_count,unsigned int *file_stat_many_file_area_count,unsigned int *file_stat_one_file_area_pages,unsigned int file_stat_in_list_type)
+static int print_one_list_file_stat(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print,char *file_stat_name,struct list_head *file_stat_temp_head,struct list_head *file_stat_delete_list_head,unsigned int *file_stat_one_file_area_count,unsigned int *file_stat_many_file_area_count,unsigned int *file_stat_one_file_area_pages,unsigned int file_stat_in_list_type)
 {
-	struct file_stat *p_file_stat;
+	//struct file_stat *p_file_stat;
 	struct file_stat_base *p_file_stat_base;
 	unsigned int all_pages = 0;
 	char file_name_path[MAX_FILE_NAME_LEN];
@@ -1801,14 +1804,43 @@ static int print_one_list_file_stat(struct hot_cold_file_global *p_hot_cold_file
 	//list_for_each_entry_rcu(p_file_stat,file_stat_temp_head,hot_cold_file_list){
 	list_for_each_entry_rcu(p_file_stat_base,file_stat_temp_head,hot_cold_file_list){//----------------------------从global temp等链表遍历file_stat时，要防止file_stat被iput()并发释放了
 		scan_file_stat_count ++;
+        
+		/*在遍历global 各个file_stat链表上的file_stat、file_stat_small、file_stat_tiny_small等，如果
+		 *这些file_stat被并发iput移动到delete链表，就会遇到以下问题
+		 *1:因file_stat被移动到global delete链表大导致链表头变了，于是上边list_for_each_entry_rcu()循环
+		 *就会因无法遍历到链表头file_stat_temp_head，无法退出而陷入死循环
+		 *2：遍历到的file_stat是global delete链表头，即p_file_stat_base不是有效的file_stat，而是global 
+		 *delete链表头。当上一个p_file_stat_base被移动到global delete链表尾，然后得到p_file_stat_base
+		 *在链表的下一个file_stat时，新的p_file_stat_base就是global delete链表头。
+         *
+		 *要防护以上问题。需要判断每次的p_file_stat_base是不是glboal delete链表头，还要判断有没有
+		 *delete标记，有的话说明本次遍历到的p_file_stat_base被移动到global delete链表头了。于是，
+		 *立即结束遍历
 
-		p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
-		/*异步内存线程打印文件信息时，只打印50个文件，防止刷屏打印*/
-		if(!is_proc_print && scan_file_stat_count >= 50)
+		 *3：还有一种情况是，p_file_stat_base从glboal temp链表移动到了glboal middle链表，此时也要退出
+		 *循环，否则会因链表头遍历而无法退出循环，陷入死循环
+		 */
+
+		/*p_file_stat_base是global delete链表头，立即退出*/
+		if(&p_file_stat_base->hot_cold_file_list == file_stat_delete_list_head){
+			printk("%s p_file_stat_base:0x%llx is global delete list\n",file_stat_name,(u64)p_file_stat_base);
 			break;
+		}
+		/*file_stat被iput()delete了*/
+		if(file_stat_in_delete_base(p_file_stat_base)){
+			printk("%s p_file_stat_base:0x%llx delete\n",file_stat_name,(u64)p_file_stat_base);
+			break;
+		}
 		/* 如果file_stat不在file_stat_in_list_type这个global链表上，说明file_stat被
 		 * 异步内存回收线程移动到其他global 链表了，为陷入死循环必须break*/
-		if(0 == (p_file_stat_base->file_stat_status & (1 << file_stat_in_list_type)))
+		if(0 == (p_file_stat_base->file_stat_status & (1 << file_stat_in_list_type))){
+			printk("%s p_file_stat_base:0x%llx statue:0x%x move another list\n",file_stat_name,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+			break;
+		}
+
+		//p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
+		/*异步内存线程打印文件信息时，只打印50个文件，防止刷屏打印*/
+		if(!is_proc_print && scan_file_stat_count >= 50)
 			break;
 
 		//atomic_inc(&hot_cold_file_global_info.ref_count);
@@ -1859,23 +1891,29 @@ static noinline int hot_cold_file_print_all_file_stat(struct hot_cold_file_globa
 		printk("async_memory_reclaime ko is remove\n");
 		return 0;
 	}
+	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********cache file tiny small\n",&p_hot_cold_file_global->file_stat_tiny_small_file_head,&p_hot_cold_file_global->file_stat_tiny_small_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_tiny_small_file_head_list);
 
-	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********cache file hot\n",&p_hot_cold_file_global->file_stat_hot_head,
-			&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_hot_head_list);
+	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********cache file small\n",&p_hot_cold_file_global->file_stat_small_file_head,&p_hot_cold_file_global->file_stat_small_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_small_file_head_list);
 
-	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********cache file temp\n",&p_hot_cold_file_global->file_stat_temp_head,
-			&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_temp_head_list);
-	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********cache file large\n",&p_hot_cold_file_global->file_stat_large_file_head,
-			&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_large_file_head_list);
-	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********cache file middle\n",&p_hot_cold_file_global->file_stat_middle_file_head,
-			&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_middle_file_head_list);
+	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********cache file hot\n",&p_hot_cold_file_global->file_stat_hot_head,&p_hot_cold_file_global->file_stat_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_hot_head_list);
 
-	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********mmap file temp\n",&p_hot_cold_file_global->mmap_file_stat_temp_head,
-			&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_temp_head_list);
-	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********mmap file large\n",&p_hot_cold_file_global->mmap_file_stat_large_file_head,
-			&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_large_file_head_list);
-	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********mmap file middle\n",&p_hot_cold_file_global->mmap_file_stat_middle_file_head,
-			&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_middle_file_head_list);
+	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********cache file temp\n",&p_hot_cold_file_global->file_stat_temp_head,&p_hot_cold_file_global->file_stat_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_temp_head_list);
+
+	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********cache file large\n",&p_hot_cold_file_global->file_stat_large_file_head,&p_hot_cold_file_global->file_stat_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_large_file_head_list);
+
+	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********cache file middle\n",&p_hot_cold_file_global->file_stat_middle_file_head,&p_hot_cold_file_global->file_stat_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_middle_file_head_list);
+
+
+	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********mmap file tiny small\n",&p_hot_cold_file_global->mmap_file_stat_tiny_small_file_head,&p_hot_cold_file_global->mmap_file_stat_tiny_small_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_tiny_small_file_head_list);
+
+	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********mmap file small\n",&p_hot_cold_file_global->mmap_file_stat_small_file_head,&p_hot_cold_file_global->mmap_file_stat_small_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_small_file_head_list);
+
+
+	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********mmap file temp\n",&p_hot_cold_file_global->mmap_file_stat_temp_head,&p_hot_cold_file_global->mmap_file_stat_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_temp_head_list);
+
+	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********mmap file large\n",&p_hot_cold_file_global->mmap_file_stat_large_file_head,&p_hot_cold_file_global->mmap_file_stat_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_large_file_head_list);
+
+	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********mmap file middle\n",&p_hot_cold_file_global->mmap_file_stat_middle_file_head,&p_hot_cold_file_global->mmap_file_stat_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_middle_file_head_list);
 
 	if(is_proc_print)
 		seq_printf(m,"file_stat_one_file_area_count:%d pages:%d  file_stat_many_file_area_count:%d all_pages:%d\n",file_stat_one_file_area_count,file_stat_one_file_area_pages,file_stat_many_file_area_count,all_pages);
