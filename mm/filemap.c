@@ -3068,11 +3068,12 @@ repeat:
 		if(!p_file_area)
 			goto out;
 
-		panic("%s mapping:0x%llx p_file_area:0x%llx error!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,(u64)mapping,(u64)p_file_area);
 		/*xas_retry()里有xas->xa_node = XAS_RESTART，这个隐藏的很深，这样执行xas_next(&xas)时，if(xas_not_node(node))成立，直接从
 		 *xarray tree按照老的xas->xa_index重新查找，不会再执行xas->xa_index++和xas->xa_offset++而从父节点直接获取下一个索引的成员了*/
 		if (xas_retry(&xas, p_file_area))
 			goto repeat;
+
+		panic("%s mapping:0x%llx p_file_area:0x%llx error!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,(u64)mapping,(u64)p_file_area);
 		if(xa_is_value(p_file_area))
 			goto out;
 	}
@@ -4582,11 +4583,12 @@ static void filemap_get_read_batch_for_file_area(struct address_space *mapping,
 			/*异常情况使xa_node_vaild必须无效*/
 			xa_node_vaild = NULL;
 
-			panic("%s mapping:0x%llx p_file_area:0x%llx error!!!!!!!!!!!!!!!!!!!!!!!!1\n",__func__,(u64)mapping,(u64)p_file_area);
 		    /*xas_retry()里有xas->xa_node = XAS_RESTART，这个隐藏的很深，这样执行xas_next(&xas)时，if(xas_not_node(node))成立，直接从
 		     *xarray tree按照老的xas->xa_index重新查找，不会再执行xas->xa_index++和xas->xa_offset++而从父节点直接获取下一个索引的成员了*/
 		    if (xas_retry(&xas, p_file_area))
 			    continue;
+			
+			panic("%s mapping:0x%llx p_file_area:0x%llx error!!!!!!!!!!!!!!!!!!!!!!!!1\n",__func__,(u64)mapping,(u64)p_file_area);
             if(xa_is_value(p_file_area))
 				break;
 			if (xa_is_sibling(p_file_area))
