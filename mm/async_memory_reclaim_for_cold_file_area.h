@@ -1338,7 +1338,10 @@ static inline void file_stat_delete_protect_unlock(char is_cache_file)
 	else
 		lock_bit = MMAP_FILE_DELETE_PROTECT_BIT;
 
-	clear_bit_unlock(lock_bit,&hot_cold_file_global_info.file_stat_delete_protect);
+	/*为了防护没有加锁就解锁，于是主动触发crash*/
+	//clear_bit_unlock(lock_bit,&hot_cold_file_global_info.file_stat_delete_protect);
+	if(!test_and_clear_bit(lock_bit,&hot_cold_file_global_info.file_stat_delete_protect))
+		BUG();
 }
 static inline void file_stat_delete_protect_test_unlock(char is_cache_file)
 {

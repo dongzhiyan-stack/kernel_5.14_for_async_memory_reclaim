@@ -5817,10 +5817,18 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 		 *这个检测必须放到遍历file_stat最开头，防止跳过*/
 		is_file_stat_mapping_error(p_file_stat_base);
 
-		/*测试cache文件是否能转成mmap文件，是的话转成mmap文件，然后直接continue遍历下一个文件*/
+		/*测试cache文件是否能转成mmap文件，是的话转成mmap文件，然后直接continue遍历下一个文件。但是却
+		 *引入了一个重大的隐藏bug。continue会导致没有执行file_stat_delete_protect_lock(1)，就跳到for
+		 *循环最前边，去遍历下一个file_stat。此时没有加锁，遍历到的file_stat就可能被并发iput()而非法。
+		 *就导致出上边的问题了。于是，在遍历global temp/small/tiny small 链表上的file_stat的for循环里，
+		 *不能出现continue。解决办法是goto next_file_stat分支，获取下一个file_stat.*/
+#if 0		
 		if(cache_file_change_to_mmap_file(p_hot_cold_file_global,p_file_stat_base,file_type))
 			continue;
-
+#else
+		if(cache_file_change_to_mmap_file(p_hot_cold_file_global,p_file_stat_base,file_type))
+			goto next_file_stat;
+#endif		
 		/* tiny small文件的file_area个数如果超过阀值则转换成small或normal文件等。这个操作必须放到get_file_area_from_file_stat_list_common()
 		 * 函数里遍历该file_stat的file_area前边，以保证该文件的in_refault、in_hot、in_free属性的file_area都集中在tiny small->temp链表尾的64
 		 * file_area，后续即便大量新增file_area，都只在tiny small->temp链表头，详情见can_tiny_small_file_change_to_small_normal_file()注释*/
@@ -5842,6 +5850,7 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 
 		scan_file_stat_count ++;
 
+next_file_stat:
 		file_stat_delete_protect_lock(1);
 		if(&p_file_stat_base_temp->hot_cold_file_list == file_stat_temp_head  || file_stat_in_delete_file_base(p_file_stat_base))
 			break;
