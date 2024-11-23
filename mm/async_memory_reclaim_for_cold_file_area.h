@@ -2186,4 +2186,5 @@ extern int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_gl
 extern void file_stat_temp_middle_large_file_change(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,unsigned int file_stat_list_type, unsigned int file_type,char is_cache_file);
 extern int mmap_file_area_cache_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_have_cache_page_head,struct list_head *file_area_free_temp,unsigned int file_type);
 extern int cache_file_area_mmap_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_have_mmap_page_head,unsigned int file_type);
+extern int check_file_stat_is_valid(struct file_stat_base *p_file_stat_base,unsigned int file_stat_list_type);
 #endif

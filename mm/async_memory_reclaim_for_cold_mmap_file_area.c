@@ -3310,7 +3310,7 @@ static noinline int get_file_area_from_mmap_file_stat_list_common(struct hot_col
 
 	//每次都从链表尾开始遍历
 	//list_for_each_entry_safe_reverse(p_file_stat,p_file_stat_temp,file_stat_temp_head,hot_cold_file_list){
-
+#if 0
 	/*如果p_file_stat所处的global temp、middle、large链表错误，触发panic*/
     switch (file_stat_list_type){
 		case F_file_stat_in_file_stat_tiny_small_file_head_list:
@@ -3340,7 +3340,7 @@ static noinline int get_file_area_from_mmap_file_stat_list_common(struct hot_col
 			panic("%s p_file_stat:0x%llx file_stat_list_type:%d error\n",__func__,(u64)p_file_stat_base,file_stat_list_type);
 			break;
 	}
-
+#endif
 
 	//遍历指定数目的file_stat和file_area后，强制结束遍历。包括遍历delete等文件，scan_file_area_count下边遍历file_area时自动增加，这里不加1
 	/*if(scan_file_area_count >= scan_file_area_max){
@@ -3521,6 +3521,8 @@ static noinline int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_
 			break;
 		file_stat_delete_protect_unlock(0);
 
+		/*检测file_stat的状态是否合法，是则crash*/
+        check_file_stat_is_valid(p_file_stat_base,file_stat_list_type);
 		/*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug，这个检测必须放到遍历file_stat最开头，防止跳过*/
 		is_file_stat_mapping_error(p_file_stat_base);
 

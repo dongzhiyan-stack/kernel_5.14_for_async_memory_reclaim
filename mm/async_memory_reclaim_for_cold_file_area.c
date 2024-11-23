@@ -4629,8 +4629,8 @@ static noinline unsigned int cache_file_stat_move_to_mmap_head(struct hot_cold_f
 
 	/*file_stat可能被并发iput释放掉*/
 	if(!file_stat_in_delete_base(p_file_stat_base)){
-		if(FILE_STAT_TINY_SMALL != get_file_stat_type(p_file_stat_base))
-			BUG();
+		//if(FILE_STAT_TINY_SMALL != get_file_stat_type(p_file_stat_base))
+		//	BUG();
 
 		/*p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
 		list_add(&p_file_stat_tiny_small->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_tiny_small_file_head);
@@ -5416,6 +5416,67 @@ void can_small_file_change_to_normal_file(struct hot_cold_file_global *p_hot_col
 
 	}
 }
+static inline int cache_file_change_to_mmap_file(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base)
+{
+	/* 把在global file_stat_temp_head链表但实际是mmap的文件file_stat从global file_stat_temp_head链表剔除，
+	 * 然后添加到global mmap_file_stat_tiny_small_temp_head链表。注意，这里仅仅针对so库、可执行文件等elf文件，这些文件
+	 * 都是先read系统调用读取文件头，被判定为cache文件，然后再mmap映射了。这种文件第一次扫描到，肯定处于global 
+	 * temp链表，则把他们移动到global mmap_file_stat_tiny_small_temp_head链表。有些cache文件读写后，经历内存回收
+	 * 在file_stat->warm、hot、free链表都已经有file_area了，就不再移动到global mmap_file_stat_tiny_small_temp_head链表了。
+	 * 因此引入if(p_file_stat_tiny_small->file_area_count == p_file_stat_tiny_small->file_area_count_in_temp_list)这个判断，因为最初
+	 * 二者肯定相等。当然，也有一种可能，就是过了很长时间，经历file_area内存回收、释放和再分配，二者还是相等。
+	 * 无所谓了，就是把一个file_stat移动到global mmap_file_stat_tiny_small_temp_head而已，反正这个文件也是建立的mmap映射。
+	 * 最后，再注意一点，只有在global temp_list的file_stat才能这样处理。*/
+
+	/*还有一个关键隐藏点，怎么确保这种file_stat一定是global->tiny_small_file链表上，而不是其他global链表上？首先，
+	 *任一个文件的创建时一定添加到global->tiny_small_file链表上，然后异步内存线程执行到该函数时，这个文件file_stat一定
+	 *在global->tiny_small_file链表上，不管这个文件的file_area有多少个。接着,才会执行把该file_stat移动到其他global链表的代码
+	 * 
+	 *为什么要限定只有tiny small file才能从cache file转成mmap file？想想没有这个必要，实际测试有很多normal cache文件实际是mmap
+	 *文件。只要限定file_area都是in_temp的file_area就可以了
+	 */
+	if(mapping_mapped((struct address_space *)p_file_stat_base->mapping) && (p_file_stat_base->file_area_count == p_file_stat_base->file_area_count_in_temp_list)){
+		//scan_move_to_mmap_head_file_stat_count ++;
+		cache_file_stat_move_to_mmap_head(p_hot_cold_file_global,p_file_stat_base);
+		return 1;
+	}
+	return 0;
+}
+int check_file_stat_is_valid(struct file_stat_base *p_file_stat_base,unsigned int file_stat_list_type)
+{
+	/* 到这里， file_stat可能被iput()并发释放file_stat，标记file_stat delete，但是不会清理file_stat in temp_head_list状态。
+	 * 因此这个if不会成立*/
+	switch (file_stat_list_type){
+		case F_file_stat_in_file_stat_tiny_small_file_head_list:
+			/*file_stat此时可能被方法iput()释放delete，但file_stat的delete的标记与file_stat in_temp_list 是共存的，不干扰file_stat in_temp_list的判断*/
+			if(!file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base) || file_stat_in_file_stat_tiny_small_file_head_list_error_base(p_file_stat_base))
+				panic("%s file_stat:0x%llx not int file_stat_tiny_small status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+			break;
+		case F_file_stat_in_file_stat_small_file_head_list:
+			/*file_stat此时可能被方法iput()释放delete，但file_stat的delete的标记与file_stat in_temp_list 是共存的，不干扰file_stat in_temp_list的判断*/
+			if(!file_stat_in_file_stat_small_file_head_list_base(p_file_stat_base) || file_stat_in_file_stat_small_file_head_list_error_base(p_file_stat_base))
+				panic("%s file_stat:0x%llx not int file_stat_small status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+			break;
+		case F_file_stat_in_file_stat_temp_head_list:
+			/*file_stat此时可能被方法iput()释放delete，但file_stat的delete的标记与file_stat in_temp_list 是共存的，不干扰file_stat in_temp_list的判断*/
+			if(!file_stat_in_file_stat_temp_head_list_base(p_file_stat_base) || file_stat_in_file_stat_temp_head_list_error_base(p_file_stat_base))
+				panic("%s file_stat:0x%llx not int file_stat_temp_head status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+			break;
+		case F_file_stat_in_file_stat_middle_file_head_list:
+			if(!file_stat_in_file_stat_middle_file_head_list_base(p_file_stat_base) || file_stat_in_file_stat_middle_file_head_list_error_base(p_file_stat_base))
+				panic("%s file_stat:0x%llx not int file_stat_middle_file_head status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+			break;
+		case F_file_stat_in_file_stat_large_file_head_list:
+			if(!file_stat_in_file_stat_large_file_head_list_base(p_file_stat_base) || file_stat_in_file_stat_large_file_head_list_error_base(p_file_stat_base))
+				panic("%s file_stat:0x%llx not int file_stat_large_file_head status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+			break;
+		default:	
+			panic("%s p_file_stat:0x%llx file_stat_list_type:%d error\n",__func__,(u64)p_file_stat_base,file_stat_list_type);
+			break;
+	}
+	return 0;
+}
 static inline unsigned int get_file_area_from_file_stat_list_common(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,unsigned int scan_file_area_max,unsigned int file_stat_list_type,unsigned int file_type)
 {
 	struct file_stat *p_file_stat = NULL;
@@ -5426,7 +5487,7 @@ static inline unsigned int get_file_area_from_file_stat_list_common(struct hot_c
 	LIST_HEAD(file_area_free_temp);
 
 	unsigned int scan_file_area_count  = 0;
-	unsigned int scan_move_to_mmap_head_file_stat_count  = 0;
+	//unsigned int scan_move_to_mmap_head_file_stat_count  = 0;
 	//unsigned int scan_file_stat_count  = 0;
 	//unsigned int real_scan_file_stat_count  = 0;
 	//unsigned int scan_delete_file_stat_count = 0;
@@ -5466,7 +5527,7 @@ static inline unsigned int get_file_area_from_file_stat_list_common(struct hot_c
 	/* 现在遍历global temp和large_file_temp链表上的file_stat不加global lock了，但是下边需要时刻注意可能
 	 * 唯一可能存在的并发移动file_stat的情况：iput()释放file_stat，标记file_stat delete，并把file_stat移动到
 	 * global delete链表。以下的操作需要特别注意这种情况!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!*/
-
+#if 0
 	/* 到这里， file_stat可能被iput()并发释放file_stat，标记file_stat delete，但是不会清理file_stat in temp_head_list状态。
 	 * 因此这个if不会成立*/
 	switch (file_stat_list_type){
@@ -5518,7 +5579,7 @@ static inline unsigned int get_file_area_from_file_stat_list_common(struct hot_c
 			panic("%s p_file_stat:0x%llx file_stat_list_type:%d error\n",__func__,(u64)p_file_stat_base,file_stat_list_type);
 			break;
 	}
-
+#endif
 	/*一个mmapped文件不可能存在于global global temp和large_file_temp链表*/
 	if(file_stat_in_mmap_file_base(p_file_stat_base)){
 		panic("%s p_file_stat:0x%llx status:0x%x in_mmap_file\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
@@ -5753,9 +5814,15 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 		/*目前的设计在跳出该循环时，必须保持file_stat_delete_protect_lock的lock状态，于是这个判断要放到break后边*/
 		file_stat_delete_protect_unlock(1);
 
+		/*测试file_stat状态有没有问题，有问题直接crash*/
+		check_file_stat_is_valid(p_file_stat_base,file_stat_list_type);
 		/*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug。
 		 *这个检测必须放到遍历file_stat最开头，防止跳过*/
 		is_file_stat_mapping_error(p_file_stat_base);
+
+		/*测试cache文件是否能转成mmap文件，是的话转成mmap文件，然后直接continue遍历下一个文件*/
+		if(cache_file_change_to_mmap_file(p_hot_cold_file_global,p_file_stat_base))
+			continue;
 
 		/* tiny small文件的file_area个数如果超过阀值则转换成small或normal文件等。这个操作必须放到get_file_area_from_file_stat_list_common()
 		 * 函数里遍历该file_stat的file_area前边，以保证该文件的in_refault、in_hot、in_free属性的file_area都集中在tiny small->temp链表尾的64
