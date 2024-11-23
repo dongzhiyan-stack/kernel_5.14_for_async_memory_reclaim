@@ -785,6 +785,7 @@ static inline void check_mapcount_file_area_and_file_stat(struct hot_cold_file_g
 		//file_stat->temp 链表上的file_area个数减1
 		p_file_stat_base->file_area_count_in_temp_list --;
 		spin_unlock(&p_file_stat_base->file_stat_lock);
+		return;
 	}
 
 	p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
