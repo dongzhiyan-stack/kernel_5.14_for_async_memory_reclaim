@@ -101,7 +101,11 @@ static void i_file_stat_callback(struct rcu_head *head)
 /*在判定一个file_area长时间没人访问后，执行该函数delete file_area。必须考虑此时有进程正好要并发访问这个file_area*/
 int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base * p_file_stat_base,struct file_area *p_file_area)
 {
+#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY	
+	XA_STATE(xas, &((struct address_space *)(p_file_stat_base->mapping))->i_pages, -1);
+#else	
 	XA_STATE(xas, &((struct address_space *)(p_file_stat_base->mapping))->i_pages, p_file_area->start_index >> PAGE_COUNT_IN_AREA_SHIFT);
+#endif
 	void *old_file_area;
 
 	/*在释放file_area时，可能正有进程执行hot_file_update_file_status()遍历file_area_tree树中p_file_area指向的file_area结构，需要加锁*/
@@ -133,11 +137,24 @@ int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 		xas_unlock_irq(&xas);
 		return 1;
 	}
+#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
+	/*p_file_area->pages[0/1]的bit63必须是file_area的索引，非0。而p_file_area->pages[2/3]必须是0，否则crash*/
+	if(!folio_is_file_area_index(p_file_area->pages[0]) || !folio_is_file_area_index(p_file_area->pages[1]) || p_file_area->pages[2] || p_file_area->pages[3]){
+		for (int i = 0;i < PAGE_COUNT_IN_AREA;i ++)
+			printk("pages[%d]:0x%llx\n",i,(u64)(p_file_area->pages[i]));
+
+		panic("%s file_stat:0x%llx file_area:0x%llx pages[] error\n",__func__,(u64)p_file_stat_base,(u64)p_file_area);
+	}
+	/*file_stat tiny模式，为了节省内存把file_area->start_index成员删掉了。但是在file_area的page全释放后，
+	 *会把file_area的索引(file_area->start_index >> PAGE_COUNT_IN_AREA_SHIFT)保存到p_file_area->pages[0/1]里.
+	 *于是现在从p_file_area->pages[0/1]获取file_area的索引*/
+	xas.xa_index = get_file_area_start_index(p_file_area);
+#endif	
 	/*从xarray tree剔除。注意，xas_store不仅只是把保存file_area指针的xarray tree的父节点xa_node的槽位设置NULL。
 	 *还有一个隐藏重要作用，如果父节点node没有成员了，还是向上逐级释放父节点xa_node，直至xarray tree全被释放*/
 	old_file_area = xas_store(&xas, NULL);
 	if((NULL == old_file_area))
-		BUG();
+		panic("%s file_stat:0x%llx file_area:0x%llx find folio error:%ld\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,xas.xa_index);
 
 	if (xas_error(&xas)){
 		printk("%s xas_error:%d  !!!!!!!!!!!!!!\n",__func__,xas_error(&xas));
@@ -2065,10 +2082,14 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 		//得到file_area对应的page
 		for(i = 0;i < PAGE_COUNT_IN_AREA;i ++){
 			folio = p_file_area->pages[i];
-			if(!folio){
+			if(!folio || folio_is_file_area_index(folio)){
 				if(shrink_page_printk_open1)
 					printk("%s file_area:0x%llx status:0x%x folio NULL\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 
+				/*如果一个file_area的page全都释放了，则file_stat->pages[0/1]就保存file_area的索引。然后第一个page又被访问了，
+				 *然后这个file_area被使用。等这个file_area再次内存回收，到这里时，file_area->pages[1]就是file_area_index*/
+				if(folio_is_file_area_index(folio))
+					printk(KERN_ERR"%s file_area:0x%llx status:0x%x folio_is_file_area_index!!!!!!!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 				continue;
 			}
 			page = &folio->page;

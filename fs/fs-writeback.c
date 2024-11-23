@@ -431,7 +431,10 @@ static bool inode_do_switch_wbs_for_file_area(struct inode *inode,
 		 *dirty mark的file_area，再统计file_area有多少个有dirty mark的page，效果一样。mark_page_count是有dirty mark的page有效性判断*/
 		mark_page_count = 0;
 		for(i = 0;i < PAGE_COUNT_IN_AREA;i ++){
-			folio = p_file_area->pages[i];
+			//folio = p_file_area->pages[i];
+			folio = rcu_dereference(p_file_area->pages[i]);
+			/*如果folio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
+			folio_is_file_area_index_and_clear_NULL(folio);
 			if (folio && folio_test_dirty(folio)) {
 				nr = folio_nr_pages(folio);
 				wb_stat_mod(old_wb, WB_RECLAIMABLE, -nr);
@@ -461,7 +464,10 @@ static bool inode_do_switch_wbs_for_file_area(struct inode *inode,
 		}
 		mark_page_count = 0;
 		for(i = 0;i < PAGE_COUNT_IN_AREA;i ++){
-			folio = p_file_area->pages[i];
+			//folio = p_file_area->pages[i];
+			folio = rcu_dereference(p_file_area->pages[i]);
+			/*如果folio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
+			folio_is_file_area_index_and_clear_NULL(folio);
 			if(folio && folio_test_writeback(folio)){
 				nr = folio_nr_pages(folio);
 				/*这个异常判断用两个panic替代*/

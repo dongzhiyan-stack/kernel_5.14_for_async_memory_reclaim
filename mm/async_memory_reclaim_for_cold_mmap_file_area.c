@@ -885,9 +885,14 @@ static noinline unsigned int check_one_file_area_cold_page_and_clear(struct hot_
 	for(i = 0;i < PAGE_COUNT_IN_AREA;i ++){
 		//page = xa_load(&mapping->i_pages, p_file_area->start_index + i);
 		folio = p_file_area->pages[i];
+		if(folio_is_file_area_index(folio)){
+			printk(KERN_ERR"%s file_area:0x%llx status:0x%x folio_is_file_area_index!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+			continue;
+		}
+			
 		page = &folio->page;
 		/*这里判断并清理 映射page的页表页目录pte的access bit，是否有必要对page lock_page加锁呢?需要加锁*/
-		if (page /*&& !xa_is_value(page)*/) {
+		if (page/*&& !xa_is_value(page)*/) {
 			/*对page上锁，上锁失败就休眠，这里回收mmap的文件页的异步内存回收线程，这里没有加锁且对性能没有要求，可以休眠
 			 *到底用lock_page还是trylock_page？如果trylock_page失败的话，说明这个page最近被访问了，那肯定不是冷page，就不用执行
 			 *下边的page_referenced检测page的 pte了，浪费性能。??????????????????????????????????????????????????
@@ -895,8 +900,13 @@ static noinline unsigned int check_one_file_area_cold_page_and_clear(struct hot_
 			 *这个page然后lock_pagea。后者page并不是被其他进程被访问而lock了！因此只能用lock_page了，然后再
 			 *page_referenced判断page pte，因为这个page可能被其他进程内存回收而lock_page，并不是被访问了lock_page
 			 */
+#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY 	
+			if(shrink_page_printk_open)
+				printk("2:%s page:0x%llx index:%ld %lld_%d\n",__func__,(u64)page,page->index,get_file_area_start_index(p_file_area) << PAGE_COUNT_IN_AREA_SHIFT,i);
+#else
 			if(shrink_page_printk_open)
 				printk("2:%s page:0x%llx index:%ld %ld_%d\n",__func__,(u64)page,page->index,p_file_area->start_index,i);
+#endif			
 			lock_page(page);
 			//if(trylock_page(page))------不要删
 			{
@@ -1270,10 +1280,12 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 			/*存在一种情况，file_area的page都是非mmap的，普通文件页!!!!!!!!!!!!!!!!!!!*/
 			for(i = 0;i < PAGE_COUNT_IN_AREA;i ++){
 				folio = p_file_area->pages[i];
-				if(!folio){
+				if(!folio || folio_is_file_area_index(folio)){
 					if(shrink_page_printk_open1)
 						printk("%s file_area:0x%llx status:0x%x folio NULL\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 
+					if(folio_is_file_area_index(folio))
+						printk(KERN_ERR"%s file_area:0x%llx status:0x%x folio_is_file_area_index!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 					continue;
 				}
 
@@ -2623,8 +2635,13 @@ static noinline unsigned int check_file_area_cold_page_and_clear(struct hot_cold
 
 		/*遍历file_stat->file_area_temp，查找冷的file_area*/
 		cold_page_count_last = cold_page_count;
+#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY 		
+		if(shrink_page_printk_open)
+			printk("2:%s file_stat:0x%llx file_area:0x%llx index:%lld file_area_count_in_temp_list:%d\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,get_file_area_start_index(p_file_area) << PAGE_COUNT_IN_AREA_SHIFT,/*p_file_stat_base->scan_file_area_count_temp_list,*/p_file_stat_base->file_area_count_in_temp_list);
+#else
 		if(shrink_page_printk_open)
 			printk("2:%s file_stat:0x%llx file_area:0x%llx index:%ld file_area_count_in_temp_list:%d\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->start_index,/*p_file_stat_base->scan_file_area_count_temp_list,*/p_file_stat_base->file_area_count_in_temp_list);
+#endif
 
 		//这个错误赋值会影响到file_stat->access_count，导致误判为热file_area。这点很重要，这点不要删除
 		//p_file_area->file_area_access_age = p_hot_cold_file_global->global_age;

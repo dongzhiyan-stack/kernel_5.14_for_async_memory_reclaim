@@ -2168,7 +2168,10 @@ find_page_from_file_area:
 
 		/*file_area里的4个page都是dirty页吗，那可不一定，必须检测是否有脏页mark的page，才能在file_area里设置towrite mark*/
 		if(is_file_area_page_mark_bit_set(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY)){
-			page = p_file_area->pages[page_offset_in_file_area];
+			//page = p_file_area->pages[page_offset_in_file_area];
+			page = rcu_dereference(p_file_area->pages[page_offset_in_file_area]);
+			/*如果folio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
+			folio_is_file_area_index_and_clear_NULL(page);
 			if(!page || !PageDirty(page)){
 				panic("%s mapping:0x%llx p_file_area:0x%llx page:0x%llx not dirty\n",__func__,(u64)mapping,(u64)p_file_area,(u64)page);
 			}

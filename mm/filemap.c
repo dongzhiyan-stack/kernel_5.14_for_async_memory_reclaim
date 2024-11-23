@@ -262,6 +262,14 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
 	if(file_area_have_page(p_file_area))
 		return;
 
+#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
+	/*file_stat tiny模式，为了节省内存把file_area->start_index成员删掉了。但是在file_area的page全释放后，
+	 *会把file_area的索引(file_area->start_index >> PAGE_COUNT_IN_AREA_SHIFT)保存到p_file_area->pages[0/1]里.
+	 *将来cold_file_area_delete将是从p_file_area->pages[0/1]获取file_area的索引*/
+	p_file_area->pages[0] = (struct folio *)(xas.xa_index >> 32);
+	p_file_area->pages[1] = (struct folio *)(xas.xa_index & ((1UL << 32) - 1));
+#endif	
+
 #ifdef ASYNC_MEMORY_RECLAIM_DEBUG	
 	/*如果待删除的page所属file_area的父节点是cache node，则清理掉cache node。还必须把p_file_stat->xa_node_cache_base_index成
 	 * 64位最大数。确保 find_file_area_from_xarray_cache_node()里的if((index >= p_file_stat->xa_node_cache_base_index) 一定不
@@ -504,12 +512,15 @@ static void page_cache_delete_batch_for_file_area(struct address_space *mapping,
 find_page_from_file_area:
 		//folio = p_file_area->pages[page_offset_in_file_area];
 		folio = rcu_dereference(p_file_area->pages[page_offset_in_file_area]);
+		/*如果fiolio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
+		folio_is_file_area_index_and_clear_NULL(folio);
 
 		/*page_cache_delete_batch()函数能进到这里folio一定不是NULL，但是现在无法保证，需要额外判定。但不能break，而是要去查找
 		 *file_area里的下一个page。因为 xas_for_each()、xas_find()等函数现在从xarray tree查找的是file_area，不是page。只有
 		 *找到的file_area是NULL，才能break结束查找。错了，原page_cache_delete_batch()函数for循环退出条件就有folio是NULL.
 		 *又错了，xas_for_each(&xas, folio, ULONG_MAX)里如果找到NULL page就一直向后查找，不会终止循环。直到要查找的page索引
-		 *大于max才会终止循环*/
+		 *大于max才会终止循环。file_area精简后，可能file_area的一个folio被释放了，变成了file_area的索引，现在连续释放该
+		 *file_area的所有page，是可能遇到folio是file_area索引的*/
 		if(!folio){
 			goto next_page;
 			//break
@@ -587,8 +598,20 @@ find_page_from_file_area:
 		 步内存回收线程把file_area从xarray tree剔除 或者 文件iput释放结构时mapping_exiting(mapping)成立，执行到该函数，
 		 才能把file_area从xarray tree剔除
         */
-		if(!file_area_have_page(p_file_area) && mapping_exiting(mapping))
-			xas_store(&xas, NULL);
+		//if(!file_area_have_page(p_file_area) && mapping_exiting(mapping))
+		//	xas_store(&xas, NULL);
+		if(!file_area_have_page(p_file_area)){
+			if(mapping_exiting(mapping))
+				xas_store(&xas, NULL);
+
+#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
+			/*file_stat tiny模式，为了节省内存把file_area->start_index成员删掉了。但是在file_area的page全释放后，
+			 *会把file_area的索引(file_area->start_index >> PAGE_COUNT_IN_AREA_SHIFT)保存到p_file_area->pages[0/1]里.
+			 *将来cold_file_area_delete将是从p_file_area->pages[0/1]获取file_area的索引*/
+			p_file_area->pages[0] = (struct folio *)(xas.xa_index >> 32);
+			p_file_area->pages[1] = (struct folio *)(xas.xa_index & ((1UL << 32) - 1));
+#endif	
+		}
 
 		/*是调试的文件，打印调试信息*/
 		if(mapping->rh_reserved3){
@@ -1136,7 +1159,10 @@ bool filemap_range_has_writeback_for_file_area(struct address_space *mapping,
 		p_file_area = entry_to_file_area(p_file_area);
 
 find_page_from_file_area:
-		page = (struct page *)p_file_area->pages[page_offset_in_file_area];
+		//page = (struct page *)p_file_area->pages[page_offset_in_file_area];
+		page = (struct page *)rcu_dereference(p_file_area->pages[page_offset_in_file_area]);
+		/*如果page是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
+		folio_is_file_area_index_and_clear_NULL(page);
 		/*page_cache_delete_batch()函数能进到这里folio一定不是NULL，但是现在无法保证，需要额外判定。但不能break，而是要去查找
 		 *file_area里的下一个page。因为 xas_for_each()、xas_find()等函数现在从xarray tree查找的是file_area，不是page。只有
 		 *找到的page是NULL，才能break结束查找*/
@@ -1411,7 +1437,8 @@ void replace_page_cache_page_for_file_area(struct page *old, struct page *new)
 	if(old != (struct page *)rcu_dereference(p_file_area->pages[page_offset_in_file_area])){
 		panic("%s mapping:0x%llx old:0x%llx != p_file_area->pages:0x%llx\n",__func__,(u64)mapping,(u64)old,(u64)p_file_area->pages[page_offset_in_file_area]);
 	}
-	p_file_area->pages[page_offset_in_file_area] = fnew;
+	//p_file_area->pages[page_offset_in_file_area] = fnew;
+	rcu_assign_pointer(p_file_area->pages[page_offset_in_file_area],fnew);	
 	FILE_AREA_PRINT1("%s mapping:0x%llx p_file_area:0x%llx old:0x%llx fnew:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)old,(u64)fnew,page_offset_in_file_area);
 
 	old->mapping = NULL;
@@ -1491,6 +1518,7 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 	//struct file_stat *p_file_stat;
 	struct file_stat_base *p_file_stat_base;
 	struct file_area *p_file_area;
+	struct folio *folio_temp;
 	
 	//令page索引与上0x3得到它在file_area的pages[]数组的下标
 	unsigned int page_offset_in_file_area = index & PAGE_COUNT_IN_AREA_MASK;
@@ -1556,6 +1584,7 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 		//这里边有执行xas_load()，感觉浪费性能吧!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 		unsigned int order = xa_get_order(xas.xa, xas.xa_index);
 		void *entry, *old = NULL;
+		folio_temp = NULL;
 
 		if (order > folio_order(folio)){
 			panic("%s order:%d folio_order:%d error !!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,order,folio_order(folio));
@@ -1591,9 +1620,13 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 				//    goto ;
 				p_file_area = entry_to_file_area(entry);
 
+				/*如果p_file_area->pages[0/1]保存的folio是NULL，或者是folio_is_file_area_index(folio)，都要分配新的page。
+				 *否则才说明是有效的page指针，直接goto unlock，不用再分配新的。如果正好file_area的索引是0保存在p_file_area->pages[0/1]，
+				 *此时if也不成立，也要分配新的page。只有不是NULL且不是file_area索引时才说明是有效的folio指针，此时才会goto unlock，不用再分配新的page*/
+				folio_temp = rcu_dereference(p_file_area->pages[page_offset_in_file_area]);
 				//page已经添加到file_area了
 				//if(NULL != p_file_area->pages[page_offset_in_file_area]){
-				if(NULL != rcu_dereference(p_file_area->pages[page_offset_in_file_area])){
+				if(NULL != folio_temp && !folio_is_file_area_index(folio_temp)){
 					xas_set_err(&xas, -EEXIST);
 					goto unlock;
 				}
@@ -1634,8 +1667,11 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 find_file_area:
 		set_file_area_page_bit(p_file_area,page_offset_in_file_area);
 		FILE_AREA_PRINT1("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx index:%ld page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,index,page_offset_in_file_area);
+        
 
-		if(NULL != p_file_area->pages[page_offset_in_file_area])
+		/*不是NULL并且不是file_area的索引时，才触发crash*/
+		folio_temp = rcu_dereference(p_file_area->pages[page_offset_in_file_area]);
+		if(NULL != folio_temp && !folio_is_file_area_index(folio_temp))
 			panic("%s p_file_area->pages:0x%llx != NULL error folio:0x%llx\n",__func__,(u64)p_file_area->pages[page_offset_in_file_area],(u64)folio);
 
 		/*这里跟delete file_area page的两个函数配合，在set/clear file_area->file_area_state和向file_area->pages[]保存page/设置NULL
@@ -2682,6 +2718,7 @@ pgoff_t page_cache_next_miss_for_file_area(struct address_space *mapping,
 	struct file_area *p_file_area;
 	struct file_stat_base *p_file_stat_base;
 	unsigned long folio_index_from_xa_index = 0;
+	struct folio *folio;
     
 	/*该函数没有rcu_read_lock，但是调用者里已经执行了rcu_read_lock，这点需要注意!!!!!!!!!!!!!!*/
 
@@ -2724,8 +2761,13 @@ find_page_from_file_area:
 		//if ((xas.xa_index + page_offset_in_file_area)  == 0)
 		if (folio_index_from_xa_index  == 0)
 			break;
+		
+		folio = rcu_dereference(p_file_area->pages[page_offset_in_file_area]);
+		/*如果folio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
+		folio_is_file_area_index_and_clear_NULL(folio);
 		//page是NULL则直接break，这个跟page_cache_next_miss函数原有的if (!entry)break 同理，即遇到第一个NULL page则break结束查找
-		if(p_file_area->pages[page_offset_in_file_area] == NULL)
+		//if(p_file_area->pages[page_offset_in_file_area] == NULL)
+		if(!folio)
 			break;
 
 		/*检测查找到的page是否正确，不是则crash*/
@@ -2821,6 +2863,7 @@ pgoff_t page_cache_prev_miss_for_file_area(struct address_space *mapping,
 	struct file_area *p_file_area;
 	struct file_stat_base *p_file_stat_base;
 	unsigned long folio_index_from_xa_index = 0 ;
+	struct folio *folio;
 
 	//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
 	p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
@@ -2860,8 +2903,13 @@ find_page_from_file_area:
 		//if ((xas.xa_index + page_offset_in_file_area)  == ULONG_MAX)
 		if (folio_index_from_xa_index == ULONG_MAX)
 			break;
+
+		folio = rcu_dereference(p_file_area->pages[page_offset_in_file_area]);
+		/*如果folio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
+		folio_is_file_area_index_and_clear_NULL(folio);
 		//page是NULL则直接break，这个跟page_cache_prev_miss函数原有的if (!entry)break 同理，即遇到第一个NULL page则break结束查找
-		if(p_file_area->pages[page_offset_in_file_area] == NULL)
+		//if(p_file_area->pages[page_offset_in_file_area] == NULL)
+		if(!folio)
 			break;
 		
 		/*检测查找到的page是否正确，不是则crash*/
@@ -2991,6 +3039,8 @@ static void *mapping_get_entry_for_file_area(struct address_space *mapping, pgof
 		if(p_file_area){
 			//令page索引与上0x3得到它在file_area的pages[]数组的下标
 			folio = p_file_area->pages[page_offset_in_file_area];
+			/*如果folio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
+			folio_is_file_area_index_and_clear_NULL(folio);
 			if(folio && folio->index == index){
 				xarray_tree_node_cache_hit ++;
 				goto find_folio;
@@ -3034,10 +3084,13 @@ repeat:
 #endif
 
 	p_file_area = entry_to_file_area(p_file_area);
-	folio = p_file_area->pages[page_offset_in_file_area];
+	//folio = p_file_area->pages[page_offset_in_file_area];
+	folio = rcu_dereference(p_file_area->pages[page_offset_in_file_area]);
+	/*如果folio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
+	folio_is_file_area_index_and_clear_NULL(folio);
 
 	//if (!folio || xa_is_value(folio))
-	if (!folio /*|| xa_is_value(p_file_area)*/)//xa_is_value()只是看bit0是否是1，其他bit位不用管
+	if (!folio /*|| xa_is_value(folio)*/)//xa_is_value()只是看bit0是否是1，其他bit位不用管
 		goto out;
 
 #ifdef ASYNC_MEMORY_RECLAIM_DEBUG
@@ -3115,6 +3168,8 @@ void *get_folio_from_file_area_for_file_area(struct address_space *mapping,pgoff
 		}
 		p_file_area = entry_to_file_area(p_file_area);
 		folio = p_file_area->pages[index & PAGE_COUNT_IN_AREA_MASK];
+		/*如果folio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
+		folio_is_file_area_index_and_clear_NULL(folio);
 	}
 out:
 	rcu_read_unlock();
@@ -3371,7 +3426,19 @@ retry:
 	 *truncate_inode_pages_range->find_lock_entries调用到该函数时，遇到没有page的file_area，强制把file_area从xarray tree剔除了*/
 	if(!file_area_have_page(*p_file_area) && mapping_exiting(mapping)){
 		/*为了不干扰原有的xas，重新定义一个xas_del*/
+#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
+		XA_STATE(xas_del, &mapping->i_pages, get_file_area_start_index(*p_file_area));
+
+		/*p_file_area->pages[0/1]的bit63必须是file_area的索引，非0。而p_file_area->pages[2/3]必须是0，否则crash*/
+		if(!folio_is_file_area_index((*p_file_area)->pages[0]) || !folio_is_file_area_index((*p_file_area)->pages[1]) || (*p_file_area)->pages[2] || (*p_file_area)->pages[3]){
+			for (int i = 0;i < PAGE_COUNT_IN_AREA;i ++)
+				printk("pages[%d]:0x%llx\n",i,(u64)((*p_file_area)->pages[i]));
+
+			panic("%s file_area:0x%llx pages[] error\n",__func__,(u64)p_file_area);
+		}
+#else		
 		XA_STATE(xas_del, &mapping->i_pages, (*p_file_area)->start_index >> PAGE_COUNT_IN_AREA_SHIFT);
+#endif		
 		/*需要用文件xarray tree的lock加锁，因为xas_store()操作必须要xarray tree加锁*/
 		xas_lock_irq(&xas_del);
 		xas_store(&xas_del, NULL);
@@ -3402,7 +3469,10 @@ find_page_from_file_area:
 		return NULL;
 	}
 
-	folio = (*p_file_area)->pages[*page_offset_in_file_area];
+	//folio = (*p_file_area)->pages[*page_offset_in_file_area];
+	folio = rcu_dereference((*p_file_area)->pages[*page_offset_in_file_area]);
+	/*如果fiolio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
+	folio_is_file_area_index_and_clear_NULL(folio);
 	FILE_AREA_PRINT("%s %s %d p_file_area:0x%llx file_area_state:0x%x folio:0x%llx xas.xa_index:%ld folio->index:%ld\n",__func__,current->comm,current->pid,(u64)*p_file_area,(*p_file_area)->file_area_state,(u64)folio,xas->xa_index,folio != NULL ?folio->index:-1);
 
 	/*注意，原本是xas_find()函数里找到max索引的page时，返回NULL。还有一种情况，如果page索引不是4对齐，file_area的索引正好等于max，
@@ -3995,7 +4065,10 @@ unsigned find_get_pages_contig_for_file_area(struct address_space *mapping, pgof
 		p_file_area = entry_to_file_area(p_file_area);
 
 find_page_from_file_area:
-		folio = p_file_area->pages[page_offset_in_file_area];
+		//folio = p_file_area->pages[page_offset_in_file_area];
+		folio = rcu_dereference(p_file_area->pages[page_offset_in_file_area]);
+		/*如果fiolio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
+		folio_is_file_area_index_and_clear_NULL(folio);
 		/*这个跟filemap_get_read_batch()里for (folio = xas_load(&xas); folio; folio = xas_next(&xas))判断出folio是NULL则结束循环是一个效果*/
 		if(!folio)
 			break;
@@ -4544,7 +4617,10 @@ static void filemap_get_read_batch_for_file_area(struct address_space *mapping,
 #endif		
 
 find_page_from_file_area:
-		folio = p_file_area->pages[page_offset_in_file_area];
+		//folio = p_file_area->pages[page_offset_in_file_area];
+		folio = rcu_dereference(p_file_area->pages[page_offset_in_file_area]);
+		/*如果fiolio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
+		folio_is_file_area_index_and_clear_NULL(folio);
 		/*这个跟filemap_get_read_batch()里for (folio = xas_load(&xas); folio; folio = xas_next(&xas))判断出folio是NULL则结束循环是一个效果*/
 		if(!folio)
 			break;
@@ -5818,7 +5894,10 @@ find_page_from_file_area:
 			return NULL;
 		}
 
-		folio = p_file_area->pages[page_offset_in_file_area_temp];
+		//folio = p_file_area->pages[page_offset_in_file_area_temp];
+		folio = rcu_dereference(p_file_area->pages[page_offset_in_file_area_temp]);
+		/*如果fiolio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
+		folio_is_file_area_index_and_clear_NULL(folio);
 		FILE_AREA_PRINT("3:%s %s %d p_file_area:0x%llx file_area_state:0x%x folio:0x%llx xas.xa_index:%ld page_offset_in_file_area_temp:%d folio->index:%ld\n",__func__,current->comm,current->pid,(u64)p_file_area,p_file_area->file_area_state,(u64)folio,xas->xa_index,page_offset_in_file_area_temp,folio != NULL ?folio->index:-1);
 
 		if(!folio)

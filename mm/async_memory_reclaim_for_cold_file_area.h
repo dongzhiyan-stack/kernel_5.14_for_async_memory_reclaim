@@ -4,6 +4,7 @@
 
 //#define ASYNC_MEMORY_RECLAIM_IN_KERNEL ------在pagemap.h定义过了
 //#define ASYNC_MEMORY_RECLAIM_DEBUG
+#define ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
 
 #define CACHE_FILE_DELETE_PROTECT_BIT 0
 #define MMAP_FILE_DELETE_PROTECT_BIT 1
@@ -383,15 +384,17 @@ struct file_area
 		unsigned int file_area_access_age;
 	};
 	//该file_area里的某个page最近一次被回收的时间点，单位秒
-	unsigned int shrink_time;
+	//unsigned int shrink_time;
 	union{
 		//file_area通过file_area_list添加file_stat的各种链表
 		struct list_head file_area_list;
 		//rcu_head和list_head都是16个字节
 		struct rcu_head		i_rcu;
 	};
+#ifndef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
 	//该file_area代表的N个连续page的起始page索引
 	pgoff_t start_index;
+#endif	
 	struct folio __rcu *pages[PAGE_COUNT_IN_AREA];
 };
 struct hot_cold_file_area_tree_node
@@ -1073,13 +1076,27 @@ extern int open_file_area_printk_important;
 			printk(fmt,##__VA_ARGS__); \
 	}while(0);
 
+#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
+
 #define CHECK_FOLIO_FROM_FILE_AREA_VALID(xas,folio,p_file_area,page_offset_in_file_area,folio_index_from_xa_index) \
-    if((folio)->index != ((p_file_area)->start_index + page_offset_in_file_area) || (folio)->index != folio_index_from_xa_index)\
-        panic("%s xas:0x%llx file_area:0x%llx folio:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)xas,(u64)p_file_area,(u64)folio,page_offset_in_file_area);
+	if((folio)->index != folio_index_from_xa_index)\
+panic("%s xas:0x%llx file_area:0x%llx folio:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)xas,(u64)p_file_area,(u64)folio,page_offset_in_file_area);
 
 #define CHECK_FOLIO_FROM_FILE_AREA_VALID_MARK(xas,folio,folio_from_file_area,p_file_area,page_offset_in_file_area,folio_index_from_xa_index) \
-    if(folio->index != ((p_file_area)->start_index + page_offset_in_file_area) || folio->index != folio_index_from_xa_index || folio != folio_from_file_area)\
-        panic("%s xas:0x%llx file_area:0x%llx folio:0x%llx folio_from_file_area:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)xas,(u64)p_file_area,(u64)folio,(u64)folio_from_file_area,page_offset_in_file_area);
+	if(folio->index != folio_index_from_xa_index || folio != folio_from_file_area)\
+panic("%s xas:0x%llx file_area:0x%llx folio:0x%llx folio_from_file_area:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)xas,(u64)p_file_area,(u64)folio,(u64)folio_from_file_area,page_offset_in_file_area);
+
+#else
+
+#define CHECK_FOLIO_FROM_FILE_AREA_VALID(xas,folio,p_file_area,page_offset_in_file_area,folio_index_from_xa_index) \
+	if((folio)->index != ((p_file_area)->start_index + page_offset_in_file_area) || (folio)->index != folio_index_from_xa_index)\
+panic("%s xas:0x%llx file_area:0x%llx folio:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)xas,(u64)p_file_area,(u64)folio,page_offset_in_file_area);
+
+#define CHECK_FOLIO_FROM_FILE_AREA_VALID_MARK(xas,folio,folio_from_file_area,p_file_area,page_offset_in_file_area,folio_index_from_xa_index) \
+	if(folio->index != ((p_file_area)->start_index + page_offset_in_file_area) || folio->index != folio_index_from_xa_index || folio != folio_from_file_area)\
+panic("%s xas:0x%llx file_area:0x%llx folio:0x%llx folio_from_file_area:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)xas,(u64)p_file_area,(u64)folio,(u64)folio_from_file_area,page_offset_in_file_area);
+
+#endif
 
 static inline struct file_area *entry_to_file_area(void * file_area_entry)
 {
@@ -1272,6 +1289,25 @@ static inline void is_cold_file_area_reclaim_support_fs(struct address_space *ma
 /*****************************************************************************************************************************************************/
 extern int shrink_page_printk_open1;
 extern int shrink_page_printk_open;
+
+#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY 
+/*folio非0，但不是有效的指针，即bit63是0，说明保存在file_area->folio[]中的是file_area的索引，不是有效的page指针*/
+#define folio_is_file_area_index(folio) (((u64)folio & (1UL << 63)) == 0)
+
+/*如果fiolio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
+#define folio_is_file_area_index_and_clear_NULL(folio) \
+{ \
+	if(folio_is_file_area_index(folio))\
+		folio = NULL; \
+}
+
+/*p_file_area)->pages[]中保存的file_area的索引file_area->start_index >> PAGE_COUNT_IN_AREA_SHIFT后的，不不用再左移PAGE_COUNT_IN_AREA_SHIFT后的*/
+#define get_file_area_start_index(p_file_area) (((u64)((p_file_area)->pages[0]) << 32) + (u64)((p_file_area)->pages[1]))
+
+#else
+#define folio_is_file_area_index(folio) 0
+#define folio_is_file_area_index(folio) {}
+#endif
 
 static inline void file_stat_delete_protect_lock(char is_cache_file)
 {
@@ -1828,8 +1864,10 @@ static inline struct file_area *file_area_alloc_and_init(unsigned int area_index
 	 * 的file_area一定聚聚在file_stat_tiny_small->temp链表尾，将来tiny small转换成small文件或者normal文件，
 	 * 只用从file_stat_tiny_small->temp链表尾就能获取到in_refault、in_free、in_hot的file_area，然后移动到新的file_stat的对应链表*/
 	list_add(&p_file_area->file_area_list,&p_file_stat_base->file_area_temp);
+#ifndef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY	
 	//保存该file_area对应的起始page索引，一个file_area默认包含8个索引挨着依次增大page，start_index保存其中第一个page的索引
 	p_file_area->start_index = area_index_for_page << PAGE_COUNT_IN_AREA_SHIFT;//area_index_for_page * PAGE_COUNT_IN_AREA;
+#endif	
 	p_file_stat_base->file_area_count ++;//文件file_stat的file_area个数加1
 	set_file_area_in_temp_list(p_file_area);//新分配的file_area必须设置in_temp_list链表
 
