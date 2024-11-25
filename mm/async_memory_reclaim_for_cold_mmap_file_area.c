@@ -1338,7 +1338,7 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 				if(file_area_list && file_area_in_mapcount_list(p_file_area))
 					list_move(&p_file_area->file_area_list,file_area_list);
 				else
-					printk("%s %d file_area:0x%llx status:%d changed\n",__func__,__LINE__,(u64)p_file_area,p_file_area->file_area_state);
+					printk("%s %d file_area:0x%llx status:%d changed mapcount\n",__func__,__LINE__,(u64)p_file_area,p_file_area->file_area_state);
 			}
 			break;
 		case (1 << F_file_area_in_hot_list):
@@ -1358,7 +1358,7 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 				if(file_area_list && file_area_in_hot_list(p_file_area))
 					list_move(&p_file_area->file_area_list,file_area_list);
 				else
-					printk("%s %d file_area:0x%llx status:%d changed\n",__func__,__LINE__,(u64)p_file_area,p_file_area->file_area_state);
+					printk("%s %d file_area:0x%llx status:%d changed hot\n",__func__,__LINE__,(u64)p_file_area,p_file_area->file_area_state);
 			}
 			//file_area在MMAP_FILE_AREA_HOT_TO_TEMP_AGE_DX个周期内没有被访问，则降级到temp链表
 			else if(p_hot_cold_file_global->global_age - p_file_area->file_area_age > p_hot_cold_file_global->mmap_file_area_hot_to_temp_age_dx){
@@ -1419,7 +1419,7 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 				if(file_area_list && file_area_in_refault_list(p_file_area))
 					list_move(&p_file_area->file_area_list,file_area_list);
 				else
-					printk("%s %d file_area:0x%llx status:%d changed\n",__func__,__LINE__,(u64)p_file_area,p_file_area->file_area_state);
+					printk("%s %d file_area:0x%llx status:%d changed refault\n",__func__,__LINE__,(u64)p_file_area,p_file_area->file_area_state);
 			}
 			//file_area在MMAP_FILE_AREA_REFAULT_TO_TEMP_AGE_DX个周期内没有被访问，则降级到temp链表
 			else if(p_hot_cold_file_global->global_age - p_file_area->file_area_age > p_hot_cold_file_global->mmap_file_area_refault_to_temp_age_dx){
@@ -1464,11 +1464,25 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 			 *file_stat->file_area_refault链表，如果过了很长时间被访问了，则把file_area移动到file_stat->file_area_temp链表*/
 		case (1 << F_file_area_in_free_list):
 
-			if(!file_area_in_free_list(p_file_area) || file_area_in_free_list_error(p_file_area))
+			//if(!file_area_in_free_list(p_file_area) || file_area_in_free_list_error(p_file_area))
+			if(!file_area_in_free_list(p_file_area) || file_area_in_temp_list(p_file_area) || file_area_in_warm_list(p_file_area) || file_area_in_mapcount_list(p_file_area))
 				panic("%s file_stat:0x%llx file_area:0x%llx status:%d not in file_area_free\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
+
+			/*mmap file的file_area存在不是mmap的情况，还是cache 的file_area，in_temp属性的file_area，在内存回收前，清理in_temp且设置in_free属性一瞬间，
+			 *就可能file_area在update()函数里被并发设置in_hot属性。具体见file_stat_other_list_file_area_solve_common函数*/
+			if(file_area_in_hot_list(p_file_area)){
+				clear_file_area_in_hot_list(p_file_area);
+				set_file_area_in_refault_list(p_file_area);
+				printk("%s file_stat:0x%llx file_area:0x%llx status:%d find hot in_free_list\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
+			}
 
 			//file_area被遍历到时记录当时的global_age，不管此时file_area的page是否被访问pte置位了
 			p_file_area->file_area_access_age = p_hot_cold_file_global->global_age;
+			
+			if(file_area_in_refault_list(p_file_area) || unlikely(file_area_access_count_get(p_file_area) > 0
+						|| file_area_have_page(p_file_area))){
+				goto file_area_direct_refault;
+			}
 
 			//检测file_area的page最近是否被访问了
 			ret = check_one_file_area_cold_page_and_clear(p_hot_cold_file_global,p_file_stat_base,p_file_area,NULL,NULL,FILE_STAT_OTHER_FILE_AREA,NULL,file_type);
@@ -1500,7 +1514,7 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 					if(file_area_list && file_area_in_free_list(p_file_area))
 						list_move(&p_file_area->file_area_list,file_area_list);
 					else
-						printk("%s %d file_area:0x%llx status:%d changed\n",__func__,__LINE__,(u64)p_file_area,p_file_area->file_area_state);	
+						printk("%s %d file_area:0x%llx status:%d changed free\n",__func__,__LINE__,(u64)p_file_area,p_file_area->file_area_state);	
 				}
 			}else{
 #if 0	
@@ -1533,6 +1547,7 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 				}
 				p_file_area->shrink_time = 0;
 #endif
+file_area_direct_refault:
 				/*现在只要file_stat->free链表上的file_area被访问，不管过了多长时间，都判定为refault file_area*/
 				clear_file_area_in_free_list(p_file_area);
 				set_file_area_in_refault_list(p_file_area);
@@ -1627,6 +1642,12 @@ static noinline int reverse_other_file_area_list_small_file(struct hot_cold_file
 			break;
 		//获取file_area的状态，可能是 hot、free、refault、mapcount 这几种
 		file_area_type = get_file_area_list_status(p_file_area);
+
+		/*mmap file的file_area可能非mmap的，存在cache file_area。于是该file_area可能在update()函数被并发设置in_free的in_refault
+		 *属性，遇到这种情况按照in_free的file_area处理*/
+		if(file_area_type == (1 << F_file_area_in_free_list | 1 << F_file_area_in_refault_list))
+			file_area_type = 1 << F_file_area_in_free_list;
+
 		reverse_other_file_area_list_common(p_hot_cold_file_global,&p_file_stat_small->file_stat_base,p_file_area,file_area_type,FILE_STAT_SMALL,&file_area_list);
 
 		//在把file_area移动到其他链表后，file_area_list_head链表可能是空的，没有file_area了，就结束遍历。其实这个判断list_for_each_entry_safe_reverse也有
@@ -2540,7 +2561,7 @@ static noinline unsigned int check_file_area_cold_page_and_clear(struct hot_cold
 	struct page *page_buf[BUF_PAGE_COUNT];
 	int cold_page_count = 0,cold_page_count_last;
 	int ret = 0,file_stat_scan_status = 0;
-	struct file_area *p_file_area,*p_file_area_temp;
+	struct file_area *p_file_area,*p_file_area_temp = NULL;
 	char delete_file_area_last = 0;
 	unsigned int reclaimed_pages = 0;
 	LIST_HEAD(file_area_temp_head);
@@ -2603,21 +2624,6 @@ static noinline unsigned int check_file_area_cold_page_and_clear(struct hot_cold
 			scan_file_area_count_file_move_from_cache ++;
 		}
 
-		/*tiny small文件的所有类型的file_area都在file_stat->temp链表，因此要单独处理hot、refault、free属性的file_area*/
-		if(FILE_STAT_TINY_SMALL == file_type && !file_area_in_temp_list(p_file_area)){
-			/*tiny small所有种类的file_area都在file_stat->temp链表，遇到hot和refault的file_area，只需要检测它是否长时间没访问，
-			 *然后降级到temp的file_area。遇到free的file_area如果长时间没访问则要释放掉file_area结构。get_file_area_list_status()
-			 是获取该file_area的状态，是free还是hot还是refault状态*/
-
-			file_area_type = get_file_area_list_status(p_file_area);
-			reverse_other_file_area_list_common(p_hot_cold_file_global,p_file_stat_base,p_file_area,file_area_type,FILE_STAT_TINY_SMALL,NULL);
-			/*直接处理file_stat->temp链表上的下一个file_ara，tiny small文件的所有file_area都在file_stat->temp链表，不用担心p_file_area被移动到其他file_stat->hot等链表*/
-			goto next_file_area;
-		}
-
-		if(!file_area_in_temp_list(p_file_area) || file_area_in_temp_list_error(p_file_area))
-			panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x not in file_area_temp\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
-
 		/*查找file_area在file_stat->file_area_temp链表上一个file_area。如果p_file_area不是链表头的file_area，直接list_prev_entry
 		 * 找到上一个file_area。如果p_file_stat是链表头的file_area，那要跳过链表过，取出链表尾的file_area*/
 		if(!list_is_first(&p_file_area->file_area_list,&p_file_stat_base->file_area_temp)){
@@ -2633,6 +2639,62 @@ static noinline unsigned int check_file_area_cold_page_and_clear(struct hot_cold
 
 			p_file_area_temp = list_last_entry(&p_file_stat_base->file_area_temp,struct file_area,file_area_list);
 		}
+
+		/*tiny small文件的所有类型的file_area都在file_stat->temp链表，因此要单独处理hot、refault、free属性的file_area。
+		 *同时具有temp和hot属性的file_area也要处理，因为mmap文件的存在cache file_area，这种file_area会在update函数里设置hot属性。
+		 *这种file_area要清理掉temp属性*/
+		if(FILE_STAT_TINY_SMALL == file_type && (!file_area_in_temp_list(p_file_area) || file_area_in_hot_list(p_file_area))){
+           
+			if(file_area_in_temp_list(p_file_area) && file_area_in_hot_list(p_file_area)){
+				clear_file_area_in_temp_list(p_file_area); 
+				p_file_stat_base->file_area_count_in_temp_list --;
+			}
+
+			/*tiny small所有种类的file_area都在file_stat->temp链表，遇到hot和refault的file_area，只需要检测它是否长时间没访问，
+			 *然后降级到temp的file_area。遇到free的file_area如果长时间没访问则要释放掉file_area结构。get_file_area_list_status()
+			 是获取该file_area的状态，是free还是hot还是refault状态*/
+
+			file_area_type = get_file_area_list_status(p_file_area);
+
+			/*对于同时有in_free和in_refault属性的file_area(in_free的file_area被访问而在update函数又设置了in_refault)，
+			 *要清理掉in_free属性，否则file_stat_other_list_file_area_solve_common()会因同时具备两种属性而crash。现在
+			 *修改了，强制赋值1 << file_area_type in_free，没有了in_free，这是为了让该file_area走common函数的in_free分支处理，严谨*/
+			if(file_area_in_free_list(p_file_area) && file_area_in_refault_list(p_file_area)){
+				/*reverse_other_file_area_list_common()函数里走in_free分支，发现file_area有in_free属性，会主动清理in_free属性，这里就不清理了*/
+				//clear_file_area_in_free_list(p_file_area);
+				file_area_type = 1 << F_file_area_in_free_list;
+			}
+			reverse_other_file_area_list_common(p_hot_cold_file_global,p_file_stat_base,p_file_area,file_area_type,FILE_STAT_TINY_SMALL,NULL);
+			/*直接处理file_stat->temp链表上的下一个file_ara，tiny small文件的所有file_area都在file_stat->temp链表，不用担心p_file_area被移动到其他file_stat->hot等链表*/
+			goto next_file_area;
+		}
+
+		/*实际测试表明，这里的file_area同时具有temp和hot属性，显然是mmap文件的cache file_area*/
+		if(file_area_in_hot_list(p_file_area)){
+			printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x in temp and hot\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
+
+			spin_lock(&p_file_stat_base->file_stat_lock);
+			clear_file_area_in_temp_list(p_file_area);
+			/*热file_area肯定来自file_stat->temp链表，因此file_area移动到file_area->hot链表后要减1*/
+			if(FILE_STAT_NORMAL == file_type){
+				p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
+				p_file_stat_base->file_area_count_in_temp_list --;
+				list_move(&p_file_area->file_area_list,&p_file_stat->file_area_hot);
+			}else if(FILE_STAT_SMALL == file_type){
+				p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
+				p_file_stat_base->file_area_count_in_temp_list --;
+				list_move(&p_file_area->file_area_list,&p_file_stat_small->file_area_other);
+			}else
+				BUG();
+
+			spin_unlock(&p_file_stat_base->file_stat_lock);
+
+
+			goto next_file_area;
+		}
+		
+		if(!file_area_in_temp_list(p_file_area) || file_area_in_temp_list_error(p_file_area))
+			panic("1:%s file_stat:0x%llx file_area:0x%llx status:0x%x not in file_area_temp\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
 
 		/*遍历file_stat->file_area_temp，查找冷的file_area*/
 		cold_page_count_last = cold_page_count;
@@ -2720,7 +2782,7 @@ static noinline unsigned int check_file_area_cold_page_and_clear(struct hot_cold
 			 *mapcount file_area而移动到了file_stat->mapcount链表，则此时就不能再把file_area再移动到其他链表，否则file_area
 			 就会处于两种链表，状态就大错特错了*/
 			if(!file_area_in_temp_list(p_file_area) || file_area_in_temp_list_error(p_file_area))
-				panic("%s file_area:0x%llx status:%d not in file_area_temp\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+				panic("2:%s file_area:0x%llx status:%d not in file_area_temp\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 
 			/*二者不相等，说明file_area是冷的，并且它的page的pte本次检测也没被访问，这种情况才回收这个file_area的page。
 			 *并且，如果当前p_file_area被被判定是热的或者mapcount file_area，*/
@@ -2765,8 +2827,8 @@ static noinline unsigned int check_file_area_cold_page_and_clear(struct hot_cold
 			        p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
 				    list_move(&p_file_area->file_area_list,&p_file_stat_small->file_area_other);
 					p_file_stat_small = NULL;
-				}else
-					BUG();
+				}/*else
+					BUG();--------tiny small的in_temp属性的file_area也会参与内存回收，这样会执行到这里，不能crash*/
 
 				spin_unlock(&p_file_stat_base->file_stat_lock);
 
@@ -2795,7 +2857,7 @@ static noinline unsigned int check_file_area_cold_page_and_clear(struct hot_cold
 			}
 		}else if(ret > 0){
 			if(!file_area_in_temp_list(p_file_area) || file_area_in_temp_list_error(p_file_area))
-				panic("%s file_area:0x%llx status:%d not in file_area_temp\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+				panic("3:%s file_area:0x%llx status:%d not in file_area_temp\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 
 			/*如果file_area的page被访问了，则把file_area移动到链表头*/
 			spin_lock(&p_file_stat_base->file_stat_lock);
@@ -3308,6 +3370,7 @@ static noinline int get_file_area_from_mmap_file_stat_list_common(struct hot_col
 
 	/*file_stat和file_type不匹配则主动crash*/
 	is_file_stat_match_error(p_file_stat_base,file_type);
+	p_file_stat_base->recent_traverse_age = p_hot_cold_file_global->global_age;
 
 	//每次都从链表尾开始遍历
 	//list_for_each_entry_safe_reverse(p_file_stat,p_file_stat_temp,file_stat_temp_head,hot_cold_file_list){
@@ -3523,7 +3586,7 @@ static noinline int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_
 		file_stat_delete_protect_unlock(0);
 
 		/*检测file_stat的状态是否合法，是则crash*/
-        check_file_stat_is_valid(p_file_stat_base,file_stat_list_type);
+        check_file_stat_is_valid(p_file_stat_base,file_stat_list_type,0);
 		/*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug，这个检测必须放到遍历file_stat最开头，防止跳过*/
 		is_file_stat_mapping_error(p_file_stat_base);
 
