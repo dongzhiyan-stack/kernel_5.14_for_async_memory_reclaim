@@ -2069,6 +2069,7 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 	/*file_area里的page至少一个page发现是mmap的，则该file_area移动到file_area_have_mmap_page_head，后续回收mmap的文件页*/
 	int find_file_area_have_mmap_page;
 	unsigned int find_mmap_page_count_from_cache_file = 0;
+	char print_once = 1;
 
 	char file_name_path[MAX_FILE_NAME_LEN];
 	memset(file_name_path,0,sizeof(&file_name_path));
@@ -2129,8 +2130,11 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 
 				/*如果一个file_area的page全都释放了，则file_stat->pages[0/1]就保存file_area的索引。然后第一个page又被访问了，
 				 *然后这个file_area被使用。等这个file_area再次内存回收，到这里时，file_area->pages[1]就是file_area_index*/
-				if(folio_is_file_area_index(folio))
+				if(folio_is_file_area_index(folio) && print_once){
+					print_once = 0;
 					printk(KERN_ERR"%s file_area:0x%llx status:0x%x folio_is_file_area_index!!!!!!!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+				}
+
 				continue;
 			}
 			page = &folio->page;
@@ -3122,34 +3126,23 @@ static noinline void file_stat_has_zero_file_area_manage(struct hot_cold_file_gl
 		file_stat_delete_protect_unlock(1);
 		file_stat_delete_lock = 0;
 
+		/*现在normal、small、tiny_small的zero file_area的file_stat都是in_zero_file_area_list状态，是否有必要区分开分成3种呢?????????????*/
+		if(!file_stat_in_zero_file_area_list_base(p_file_stat_base) || file_stat_in_zero_file_area_list_error_base(p_file_stat_base))
+			panic("%s file_stat:0x%llx not in_zero_file_area_list status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+		/*file_stat和file_type不匹配则主动crash*/
+		//is_file_stat_match_error(p_file_stat_base,file_type);
+
+		/*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug。
+		 *这个检测必须放到遍历file_stat最开头，防止跳过*/
+		is_file_stat_mapping_error(p_file_stat_base);
+
 		/* 遍历global zero链表上的file_stat时，正好被iput()了。iput()只是标记delete，并不会把file_stat移动到global delete链表。
 		 * 于是这里遍历到global zero链表上的file_stat时，必须移动到global delete链表*/
 		if(file_stat_in_delete_base(p_file_stat_base)){
-			printk("%s file_stat:0x%llx delete status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+			printk("%s file_stat:0x%llx delete status:0x%x file_type:%d\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_type);
 			move_file_stat_to_global_delete_list(p_hot_cold_file_global,p_file_stat_base,file_type);
 			goto next_file_stat;
-		}
-
-		/*file_stat和file_type不匹配则主动crash*/
-		is_file_stat_match_error(p_file_stat_base,file_type);
-		switch (file_type){
-			case FILE_STAT_TINY_SMALL:
-				if(!file_stat_in_zero_file_area_list_base(p_file_stat_base) || !file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base))
-					panic("%s file_stat:0x%llx not in_zero_file_area_list status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
-
-				break;
-			case FILE_STAT_SMALL:
-				if(!file_stat_in_zero_file_area_list_base(p_file_stat_base) || !file_stat_in_file_stat_small_file_head_list_base(p_file_stat_base))
-					panic("%s file_stat:0x%llx not in_zero_file_area_list status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
-
-				break;
-			case FILE_STAT_NORMAL:
-				if(!file_stat_in_zero_file_area_list_base(p_file_stat_base) || !get_file_stat_normal_type_all(p_file_stat_base))
-					panic("%s file_stat:0x%llx not in_zero_file_area_list status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
-
-				break;
-			default:
-				panic("%s file_stat:0x%llx status:0x%x file_type:%d error\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_type);
 		}
 
 		if(scan_file_stat_count++ > scan_file_stat_max)
@@ -3206,18 +3199,20 @@ file_stat_access:
 						list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_small_file_head);
 						break;
 					case FILE_STAT_NORMAL:
-						//file_stat_type = is_file_stat_file_type(p_hot_cold_file_global,p_file_stat);
-						file_stat_type = get_file_stat_normal_type(p_file_stat_base);
+						/*当mormal file_stat移动到zero链表后，就会清理掉file_stat的in_temp、middle、large等属性，
+						 *于是当这些file_stat再移动回global temp、middle、large链表时，要根据file_area个数决定移动到哪个链表*/
+						file_stat_type = is_file_stat_file_type(p_hot_cold_file_global,p_file_stat_base);
+						//file_stat_type = get_file_stat_normal_type(p_file_stat_base);
 						if(TEMP_FILE == file_stat_type){
 							/*file_stat移动到global zero链表时，不再清理file_stat的in_temp状态，故这里不再清理*/
-							//set_file_stat_in_file_stat_temp_head_list(p_file_stat);
+							set_file_stat_in_file_stat_temp_head_list_base(p_file_stat_base);
 							list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_temp_head);
 						}else if(MIDDLE_FILE == file_stat_type){
-							//set_file_stat_in_file_stat_middle_file_head_list(p_file_stat);
+							set_file_stat_in_file_stat_middle_file_head_list_base(p_file_stat_base);
 							list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_middle_file_head);
 						}
 						else if(LARGE_FILE == file_stat_type){
-							//set_file_stat_in_file_stat_large_file_head_list(p_file_stat);
+							set_file_stat_in_file_stat_large_file_head_list_base(p_file_stat_base);
 							p_hot_cold_file_global->file_stat_large_count ++;
 							list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_large_file_head);
 						}else
@@ -3257,6 +3252,16 @@ next_file_stat:
 				BUG();
 		}
 	}
+
+	spin_lock(&p_hot_cold_file_global->global_lock);
+	/*本次遍历过的file_stat移动到链表头，让其他file_stat也得到遍历的机会*/
+	if(&p_file_stat_base->hot_cold_file_list != file_stat_zero_list_head  && !file_stat_in_delete_base(p_file_stat_base)){
+		/*将链表尾已经遍历过的file_stat移动到链表头，下次从链表尾遍历的才是新的未遍历过的file_stat。这个过程必须加锁*/
+		if(can_file_stat_move_to_list_head(file_stat_zero_list_head,p_file_stat_base,F_file_stat_in_zero_file_area_list,1))
+			list_move_enhance(file_stat_zero_list_head,&p_file_stat_base->hot_cold_file_list);
+	}
+	spin_unlock(&p_hot_cold_file_global->global_lock);
+
 	p_hot_cold_file_global->hot_cold_file_shrink_counter.del_zero_file_area_file_stat_count += del_file_stat_count;
 	p_hot_cold_file_global->hot_cold_file_shrink_counter.scan_zero_file_area_file_stat_count = scan_file_stat_count;
 }
@@ -4631,7 +4636,7 @@ static noinline int hot_file_stat_solve(struct hot_cold_file_global *p_hot_cold_
 	spin_lock(&p_hot_cold_file_global->global_lock);
 	/*list_for_each_entry()机制保证，即便遍历的链表空返回的链表也是指向链表头，故p_file_stat_base不可能是NULL*/
 	if(/*p_file_stat_base && */(&p_file_stat_base->hot_cold_file_list != &p_hot_cold_file_global->file_stat_hot_head) && !file_stat_in_delete_base(p_file_stat_base)){
-		if(can_file_stat_move_to_list_head(p_file_stat_base,F_file_stat_in_file_stat_hot_head_list))
+		if(can_file_stat_move_to_list_head(&p_hot_cold_file_global->file_stat_hot_head,p_file_stat_base,F_file_stat_in_file_stat_hot_head_list,1))
 			list_move_enhance(&p_hot_cold_file_global->file_stat_hot_head,&p_file_stat_base->hot_cold_file_list);
 	}
 	spin_unlock(&p_hot_cold_file_global->global_lock);
@@ -4999,7 +5004,7 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 		/*p_file_stat不能是链表头，并且不能是被iput()并发标记delete并移动到global delete链表*/
 		if(&p_file_stat->hot_cold_file_list != file_stat_temp_head  && !file_stat_in_delete(p_file_stat)){
 			/*将链表尾已经遍历过的file_stat移动到链表头，下次从链表尾遍历的才是新的未遍历过的file_stat。这个过程必须加锁*/
-		    if(can_file_stat_move_to_list_head(p_file_stat,file_stat_in_list_type))
+		    if(can_file_stat_move_to_list_head(file_stat_temp_head,p_file_stat,file_stat_in_list_type,1))
 			    list_move_enhance(file_stat_temp_head,&p_file_stat->hot_cold_file_list);
 		}
 
@@ -5682,25 +5687,25 @@ static inline unsigned int get_file_area_from_file_stat_list_common(struct hot_c
 			 *iput()释放了，执行到__destroy_inode_handler_post()函数时，无法判断file_stat是tiny small、small、normal 文件!
 			 *于是现在不在file_stat原有的状态了*/
 			switch (file_stat_list_type){
+				//如果该文件没有file_area了，则把对应file_stat移动到hot_cold_file_global->zero链表
 				case F_file_stat_in_file_stat_tiny_small_file_head_list:
-					//clear_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
-					//如果该文件没有file_area了，则把对应file_stat移动到hot_cold_file_global->zero链表
+					clear_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
 					list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_tiny_small_zero_file_area_head);
 					break;
 				case F_file_stat_in_file_stat_small_file_head_list:
-					//clear_file_stat_in_file_stat_small_file_head_list_base(p_file_stat_base);
+					clear_file_stat_in_file_stat_small_file_head_list_base(p_file_stat_base);
 					list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_small_zero_file_area_head);
 					break;
 				case F_file_stat_in_file_stat_temp_head_list:
-					//clear_file_stat_in_file_stat_temp_head_list_base(p_file_stat_base);
+					clear_file_stat_in_file_stat_temp_head_list_base(p_file_stat_base);
 					list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_zero_file_area_head);
 					break;
 				case F_file_stat_in_file_stat_middle_file_head_list:
-					//clear_file_stat_in_file_stat_middle_file_head_list_base(p_file_stat_base);
+					clear_file_stat_in_file_stat_middle_file_head_list_base(p_file_stat_base);
 					list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_zero_file_area_head);
 					break;
 				case F_file_stat_in_file_stat_large_file_head_list:
-					//clear_file_stat_in_file_stat_middle_file_head_list_base(p_file_stat_base);
+					clear_file_stat_in_file_stat_middle_file_head_list_base(p_file_stat_base);
 					list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_zero_file_area_head);
 					break;
 				default:
@@ -5984,7 +5989,7 @@ next_file_stat:
 		/*p_file_stat不能是链表头，并且不能是被iput()并发标记delete并移动到global delete链表*/
 		if(&p_file_stat_base->hot_cold_file_list != file_stat_temp_head  && !file_stat_in_delete_base(p_file_stat_base)){
 			/*将链表尾已经遍历过的file_stat移动到链表头，下次从链表尾遍历的才是新的未遍历过的file_stat。这个过程必须加锁*/
-		    if(can_file_stat_move_to_list_head(p_file_stat_base,file_stat_list_type))
+		    if(can_file_stat_move_to_list_head(file_stat_temp_head,p_file_stat_base,file_stat_list_type,1))
 			    list_move_enhance(file_stat_temp_head,&p_file_stat_base->hot_cold_file_list);
 		}
 

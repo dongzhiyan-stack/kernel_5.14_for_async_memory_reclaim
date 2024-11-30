@@ -865,6 +865,7 @@ static noinline unsigned int check_one_file_area_cold_page_and_clear(struct hot_
 	int file_area_is_warm = 0;
 	/*file_area里的page至少一个page发现是cache page的，则该file_area移动到file_area_have_cache_page_head，后续回收cache的文件页*/
 	int find_file_area_have_cache_page = 0;
+	char print_once = 1;
 
 	unsigned int find_cache_page_count_from_mmap_file = 0;
 
@@ -887,7 +888,10 @@ static noinline unsigned int check_one_file_area_cold_page_and_clear(struct hot_
 		//page = xa_load(&mapping->i_pages, p_file_area->start_index + i);
 		folio = p_file_area->pages[i];
 		if(folio_is_file_area_index(folio)){
-			printk(KERN_ERR"%s file_area:0x%llx status:0x%x folio_is_file_area_index!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+			if(print_once){
+				print_once = 0;
+				printk(KERN_ERR"%s file_area:0x%llx status:0x%x folio_is_file_area_index!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+			}
 			continue;
 		}
 			
@@ -1263,6 +1267,7 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 	unsigned int free_file_area_count = 0;
 	struct file_stat *p_file_stat = NULL;
 	//struct file_stat_small *p_file_stat_small = NULL;
+	char print_once = 1;
     
 	
 	/*file_stat和file_type不匹配则主动crash*/
@@ -1285,8 +1290,10 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 					if(shrink_page_printk_open1)
 						printk("%s file_area:0x%llx status:0x%x folio NULL\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 
-					if(folio_is_file_area_index(folio))
+					if(folio_is_file_area_index(folio) && print_once){
+						print_once = 0;
 						printk(KERN_ERR"%s file_area:0x%llx status:0x%x folio_is_file_area_index!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+					}
 					continue;
 				}
 
@@ -1332,13 +1339,15 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 				//spin_unlock(&p_file_stat->file_stat_lock);
 
 			}
-			else{	
+			else{
 				/*否则file_area移动到file_area_list临时链表。但要防止前边file_area被移动到其他file_stat的链表了，此时就不能再把该file_area
 				 *移动到file_area_list临时链表，否则该函数最后会把file_area再移动到老的file_stat链表，file_area的状态和所处链表就错乱了，会crash*/
-				if(file_area_list && file_area_in_mapcount_list(p_file_area))
-					list_move(&p_file_area->file_area_list,file_area_list);
-				else
-					printk("%s %d file_area:0x%llx status:%d changed mapcount\n",__func__,__LINE__,(u64)p_file_area,p_file_area->file_area_state);
+				if(file_area_list){
+				    if(file_area_in_mapcount_list(p_file_area))
+					    list_move(&p_file_area->file_area_list,file_area_list);
+				    else
+					    printk("%s %d file_area:0x%llx status:%d changed mapcount\n",__func__,__LINE__,(u64)p_file_area,p_file_area->file_area_state);
+				}
 			}
 			break;
 		case (1 << F_file_area_in_hot_list):
@@ -1350,15 +1359,19 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 
 			//检测file_area的page最近是否被访问了
 			ret = check_one_file_area_cold_page_and_clear(p_hot_cold_file_global,p_file_stat_base,p_file_area,NULL,NULL,FILE_STAT_OTHER_FILE_AREA,NULL,file_type);
-			//file_area的page被访问了，依然停留在hot链表
-			if(ret > 0){				
-				/*否则file_area移动到file_area_list临时链表。但要防止前边check_one_file_area_cold_page_and_clear()函数file_area被
-				 *移动到其他file_stat的链表了，此时就不能再把该file_area移动到file_area_list临时链表，
-				 否则该函数最后会把file_area再移动到老的file_stat链表，file_area的状态和所处链表就错乱了，会crash*/
-				if(file_area_list && file_area_in_hot_list(p_file_area))
-					list_move(&p_file_area->file_area_list,file_area_list);
-				else
-					printk("%s %d file_area:0x%llx status:%d changed hot\n",__func__,__LINE__,(u64)p_file_area,p_file_area->file_area_state);
+			/*file_area的page被访问了，依然停留在hot链表*/
+			if(ret > 0){
+				/**
+				 * 否则file_area移动到file_area_list临时链表。但要防止前边check_one_file_area_cold_page_and_clear()函数file_area被
+				 * 移动到其他file_stat的链表了，此时就不能再把该file_area移动到file_area_list临时链表，
+				 * 否则该函数最后会把file_area再移动到老的file_stat链表，file_area的状态和所处链表就错乱了，会crash
+				 */
+				if(file_area_list){
+					if(file_area_in_hot_list(p_file_area))
+						list_move(&p_file_area->file_area_list,file_area_list);
+					else
+						printk("%s %d file_area:0x%llx status:%d changed hot\n",__func__,__LINE__,(u64)p_file_area,p_file_area->file_area_state);
+				}
 			}
 			//file_area在MMAP_FILE_AREA_HOT_TO_TEMP_AGE_DX个周期内没有被访问，则降级到temp链表
 			else if(p_hot_cold_file_global->global_age - p_file_area->file_area_age > p_hot_cold_file_global->mmap_file_area_hot_to_temp_age_dx){
@@ -1416,10 +1429,12 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 				/*否则file_area移动到file_area_list临时链表。但要防止前边check_one_file_area_cold_page_and_clear()函数file_area被
 				 *移动到其他file_stat的链表了，此时就不能再把该file_area移动到file_area_list临时链表，
 				 否则该函数最后会把file_area再移动到老的file_stat链表，file_area的状态和所处链表就错乱了，会crash*/
-				if(file_area_list && file_area_in_refault_list(p_file_area))
-					list_move(&p_file_area->file_area_list,file_area_list);
-				else
-					printk("%s %d file_area:0x%llx status:%d changed refault\n",__func__,__LINE__,(u64)p_file_area,p_file_area->file_area_state);
+				if(file_area_list){
+					if(file_area_in_refault_list(p_file_area))
+						list_move(&p_file_area->file_area_list,file_area_list);
+					else
+						printk("%s %d file_area:0x%llx status:%d changed refault\n",__func__,__LINE__,(u64)p_file_area,p_file_area->file_area_state);
+				}
 			}
 			//file_area在MMAP_FILE_AREA_REFAULT_TO_TEMP_AGE_DX个周期内没有被访问，则降级到temp链表
 			else if(p_hot_cold_file_global->global_age - p_file_area->file_area_age > p_hot_cold_file_global->mmap_file_area_refault_to_temp_age_dx){
@@ -1511,10 +1526,12 @@ int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_
 					/*否则file_area移动到file_area_list临时链表。但要防止前边check_one_file_area_cold_page_and_clear()函数file_area被
 					 *移动到其他file_stat的链表了，此时就不能再把该file_area移动到file_area_list临时链表，
 					 否则该函数最后会把file_area再移动到老的file_stat链表，file_area的状态和所处链表就错乱了，会crash*/
-					if(file_area_list && file_area_in_free_list(p_file_area))
-						list_move(&p_file_area->file_area_list,file_area_list);
-					else
-						printk("%s %d file_area:0x%llx status:%d changed free\n",__func__,__LINE__,(u64)p_file_area,p_file_area->file_area_state);	
+					if(file_area_list){
+						if(file_area_in_free_list(p_file_area))
+							list_move(&p_file_area->file_area_list,file_area_list);
+						else
+							printk("%s %d file_area:0x%llx status:%d changed free\n",__func__,__LINE__,(u64)p_file_area,p_file_area->file_area_state);
+					}
 				}
 			}else{
 #if 0	
@@ -3559,7 +3576,7 @@ err:
 	return scan_file_area_count;
 }
 
-static noinline int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_global *p_hot_cold_file_global,unsigned int scan_file_area_max,unsigned int scan_file_stat_max,struct list_head *file_stat_temp_head,unsigned int file_stat_list_type,unsigned int file_type)//file_stat_temp_head链表来自 global temp、middle、large file 链表
+static noinline int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_global *p_hot_cold_file_global,unsigned int scan_file_area_max,unsigned int scan_file_stat_max,struct list_head *file_stat_temp_head,unsigned int file_stat_in_list_type,unsigned int file_type)//file_stat_temp_head链表来自 global temp、middle、large file 链表
 {
 	//struct file_stat *p_file_stat = NULL;
 	struct file_stat_base *p_file_stat_base = NULL,*p_file_stat_base_temp;
@@ -3568,8 +3585,6 @@ static noinline int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_
 	//unsigned int free_pages = 0;
 	int ret = 0;
 	LIST_HEAD(file_stat_list);
-	/*这个跟file_stat_list_type有区别，这个是真实标记file_stat处于哪个global 链表*/
-	unsigned int file_stat_in_list_type = 0;
 
 
 	if(list_empty(file_stat_temp_head))
@@ -3586,7 +3601,7 @@ static noinline int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_
 		file_stat_delete_protect_unlock(0);
 
 		/*检测file_stat的状态是否合法，是则crash*/
-        check_file_stat_is_valid(p_file_stat_base,file_stat_list_type,0);
+        check_file_stat_is_valid(p_file_stat_base,file_stat_in_list_type,0);
 		/*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug，这个检测必须放到遍历file_stat最开头，防止跳过*/
 		is_file_stat_mapping_error(p_file_stat_base);
 
@@ -3604,13 +3619,13 @@ static noinline int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_
 			struct file_stat_small *p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
 			can_small_file_change_to_normal_file(p_hot_cold_file_global,p_file_stat_small,0);
 		}else{
-			scan_file_area_count += get_file_area_from_mmap_file_stat_list_common(p_hot_cold_file_global,p_file_stat_base,scan_file_area_max,file_stat_list_type,file_type);
+			scan_file_area_count += get_file_area_from_mmap_file_stat_list_common(p_hot_cold_file_global,p_file_stat_base,scan_file_area_max,file_stat_in_list_type,file_type);
 		}
 
 		scan_file_stat_count ++;
 
 		file_stat_delete_protect_lock(0);
-		if(&p_file_stat_base_temp->hot_cold_file_list == file_stat_temp_head  || file_stat_in_delete_file_base(p_file_stat_base))
+		if(&p_file_stat_base_temp->hot_cold_file_list == file_stat_temp_head  || file_stat_in_delete_file_base(p_file_stat_base_temp))
 			break;
 	}
 	file_stat_delete_protect_test_unlock(0);
@@ -3626,7 +3641,7 @@ static noinline int get_file_area_from_mmap_file_stat_list(struct hot_cold_file_
 	/*p_file_stat不能是链表头，并且不能是被iput()并发标记delete并移动到global delete链表。详情见见get_file_area_from_file_stat_list()函数*/
 	if(&p_file_stat_base->hot_cold_file_list != file_stat_temp_head  && !file_stat_in_delete_base(p_file_stat_base)){
 		/*把本次遍历过的file_stat移动到file_stat_temp_head链表头，保证下次你从file_stat_temp_head链表尾遍历的file_stat是最新的没有遍历过的，此时必须加锁*/
-		if(can_file_stat_move_to_list_head(p_file_stat_base,file_stat_in_list_type))
+		if(can_file_stat_move_to_list_head(file_stat_temp_head,p_file_stat_base,file_stat_in_list_type,0))
 			list_move_enhance(file_stat_temp_head,&p_file_stat_base->hot_cold_file_list);
 	}
 #endif	
@@ -4227,7 +4242,7 @@ static noinline int scan_mmap_mapcount_file_stat(struct hot_cold_file_global *p_
 	 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!*/
 	spin_lock(&p_hot_cold_file_global->mmap_file_global_lock);
 	if(&p_file_stat_base->hot_cold_file_list != &p_hot_cold_file_global->mmap_file_stat_mapcount_head && !file_stat_in_delete_base(p_file_stat_base)){
-	    if(can_file_stat_move_to_list_head_base(p_file_stat_base,F_file_stat_in_mapcount_file_area_list))
+	    if(can_file_stat_move_to_list_head(&p_hot_cold_file_global->mmap_file_stat_mapcount_head,p_file_stat_base,F_file_stat_in_mapcount_file_area_list,0))
 		    list_move_enhance(&p_hot_cold_file_global->mmap_file_stat_mapcount_head,&p_file_stat_base->hot_cold_file_list);
 	}
 	spin_unlock(&p_hot_cold_file_global->mmap_file_global_lock);
@@ -4320,7 +4335,7 @@ static noinline int scan_mmap_hot_file_stat(struct hot_cold_file_global *p_hot_c
 	 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!*/
 	spin_lock(&p_hot_cold_file_global->mmap_file_global_lock);
 	if(&p_file_stat_base->hot_cold_file_list != &p_hot_cold_file_global->mmap_file_stat_hot_head && !file_stat_in_delete_base(p_file_stat_base)){
-	    if(can_file_stat_move_to_list_head(p_file_stat_base,F_file_stat_in_file_stat_hot_head_list))
+	    if(can_file_stat_move_to_list_head(&p_hot_cold_file_global->mmap_file_stat_hot_head,p_file_stat_base,F_file_stat_in_file_stat_hot_head_list,0))
 		    list_move_enhance(&p_hot_cold_file_global->mmap_file_stat_hot_head,&p_file_stat_base->hot_cold_file_list);
 	}
 	spin_unlock(&p_hot_cold_file_global->mmap_file_global_lock);
