@@ -1720,6 +1720,62 @@ static const struct proc_ops open_print_fops = {
 	.proc_release	= single_release,
 	.proc_write		= open_print_write,
 };
+//get_file_stat_all_file_area_info
+static int get_file_stat_all_file_area_info_show(struct seq_file *m, void *v)
+{
+	struct file_stat_base *p_file_stat_base;
+
+	rcu_read_lock();
+	if(!file_stat_in_delete_base(hot_cold_file_global_info.print_file_stat)){
+
+	}
+	rcu_read_unlock();
+
+	seq_printf(m, "%d\n", shrink_page_printk_open1);
+	return 0;
+}
+static int get_file_stat_all_file_area_info_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, get_file_stat_all_file_area_info_show, NULL);
+}
+static ssize_t get_file_stat_all_file_area_info_write(struct file *file,
+		const char __user *buffer, size_t count, loff_t *ppos)
+{
+	char *file_path;
+	struct file *file;
+	struct file_stat_base *p_file_stat_base;
+
+	file_path = kmalloc(count + 1,GFP_KERNEL | __GFP_ZERO);
+	if (copy_from_user(file_path, buffer, count))
+		return -EFAULT;
+
+	file = filp_open(file_path,O_RDONLY);
+	if (IS_ERR(file)){
+		printk("file_open fail:%s\n",file_path);
+		goto close;
+	}
+	inode = file_inode(file);
+	p_file_stat_base = (struct file_stat_base *)inode->i_mapping->rh_reserved1;
+
+	/*是支持的file_area的文件系统的文件*/
+	if((u64)p_file_stat_base > SUPPORT_FILE_AREA_INIT_OR_DELETE){
+	    /*如果这个file_stat被异步内存回收线程释放了怎么办？在cold_file_stat_delete函数标记一下*/ 
+		hot_cold_file_global_info.print_file_stat = p_file_stat_base;
+	}
+
+close:	
+	filp_close(file, NULL);
+
+	return count;
+}
+static const struct proc_ops get_file_stat_all_file_area_info_fops = {
+	.proc_open		= get_file_stat_all_file_area_info_open,
+	.proc_read		= seq_read,
+	.proc_lseek     = seq_lseek,
+	.proc_release	= single_release,
+	.proc_write		= get_file_stat_all_file_area_info_write,
+};
+
 //enable_disable_async_memory_reclaim
 static int enable_disable_async_memory_reclaim_show(struct seq_file *m, void *v)
 {
@@ -1914,6 +1970,10 @@ static noinline int hot_cold_file_print_all_file_stat(struct hot_cold_file_globa
 	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********mmap file large\n",&p_hot_cold_file_global->mmap_file_stat_large_file_head,&p_hot_cold_file_global->mmap_file_stat_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_large_file_head_list);
 
 	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********mmap file middle\n",&p_hot_cold_file_global->mmap_file_stat_middle_file_head,&p_hot_cold_file_global->mmap_file_stat_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_middle_file_head_list);
+
+	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********mmap file hot\n",&p_hot_cold_file_global->mmap_file_stat_hot_head,&p_hot_cold_file_global->mmap_file_stat_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_hot_head_list);
+
+	all_pages += print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********mmap file mapcount\n",&p_hot_cold_file_global->mmap_file_stat_mapcount_head,&p_hot_cold_file_global->mmap_file_stat_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_mapcount_file_area_list);
 
 	if(is_proc_print)
 		seq_printf(m,"file_stat_one_file_area_count:%d pages:%d  file_stat_many_file_area_count:%d all_pages:%d\n",file_stat_one_file_area_count,file_stat_one_file_area_pages,file_stat_many_file_area_count,all_pages);
@@ -3977,8 +4037,16 @@ static noinline unsigned int file_stat_small_other_list_file_area_solve(struct h
 		 *此时这些file_area这里肯定不会移动到其他file_stat链表，因此不用再做can_file_area_move_to_list_head判断。
 		 *并且这个链表上的file_area有各种属性，没办法用can_file_area_move_to_list_head()判断这个file_area的属性
 		 *是否变了，但是要判断p_file_area此时是不是指向链表头!!!!!!!!!!!!!，
-		 *不过list_move_enhance()已经有判断了!!!!!!!!!!!!*/
-		//if(can_file_area_move_to_list_head(p_file_area,file_area_list_head,file_area_type_for_bit))
+		 *不过list_move_enhance()已经有判断了!!!!!!!!!!!!
+		 *
+         *有大问题，如果file_stat_small->otehr链表上hot、refault的file_area因长时间不访问，移动到了file_stat_small->temp链表，
+		 *此时list_move_enhance()就是把file_stat_small->temp链表的file_area移动到file_stat_small->otehr链表。按照之前的经验，
+		 *会破坏file_stat_small->otehr链表头，甚至出现file_stat_small->otehr链表头和file_stat_small->temp链表头相互指向
+         */
+
+		/*small_file_stat->other链表上只有hot、free、refault属性的file_area才能移动到small_file_stat->other链表头*/
+		file_area_type = (1 << F_file_area_in_hot_list) | (1 << F_file_area_in_free_list) | (1 << F_file_area_in_refault_list);
+		if(can_file_area_move_to_list_head_for_small_file_other(p_file_area,file_area_list_head,file_area_type))
 			list_move_enhance(file_area_list_head,&p_file_area->file_area_list);
 	}
 
@@ -4222,7 +4290,9 @@ static inline int file_stat_temp_list_file_area_solve(struct hot_cold_file_globa
 			spin_lock(&p_file_stat_base->file_stat_lock);
 			/*如果是tiny small文件，则当该文件file_area个数超过64，则禁止把tiny_small_file_stat->temp链表上的hot和refault属性的file_area
 			 *移动到链表头。否则将来该文件转成small文件时，这些hot和refault file_area将无法移动到small_file_stat->other链表，而是停留在
-			 *small_file_stat->temp链表，于是，将来遍历到small_file_stat->temp链表有hot和refault属性的file_area，则会crash*/
+			 *small_file_stat->temp链表，于是，将来遍历到small_file_stat->temp链表有hot和refault属性的file_area，则会crash。
+			 *仔细想想，如果p_file_area此时是tiny small的refault/hot/free属性的file_area，根本就执行不了list_move_enhance()把遍历过的
+			 *file_area移动到链表头，因为限定了只有F_file_area_in_temp_list属性的file_area才可以*/
 			if(FILE_STAT_TINY_SMALL != file_type || (FILE_STAT_TINY_SMALL == file_type && p_file_stat_base->file_area_count <= SMALL_FILE_AREA_COUNT_LEVEL)){
 				if(can_file_area_move_to_list_head(p_file_area,&p_file_stat_base->file_area_temp,F_file_area_in_temp_list))
 					list_move_enhance(&p_file_stat_base->file_area_temp,&p_file_area->file_area_list);

@@ -2028,42 +2028,133 @@ static void inline list_move_enhance(struct list_head *head,struct list_head *fi
 	}
 }
 /*测试file_area是否真的在file_area_in_list_type这个file_stat的链表(file_stat->temp、hot、refault、warm、mapcount链表)，不在则不能把p_file_area从链表尾的file_area移动到链表头*/
-static int inline can_file_area_move_to_list_head(struct file_area *p_file_area,struct list_head *file_area_list_head,unsigned int file_area_in_list_type)
+static int inline can_file_area_move_to_list_head(struct file_area *p_file_area,struct list_head *file_area_list_head,unsigned int file_area_in_list_type_bit)
 {
+#if 0	
 	/*file_area不能是链表头*/
 	if(&p_file_area->file_area_list == file_area_list_head)
 		return 0;
 	/*如果file_area不在file_area_in_list_type这个file_stat的链表上，测试失败*/
-    if(0 == (p_file_area->file_area_state & (1 << file_area_in_list_type)))
+    if(0 == (p_file_area->file_area_state & (1 << file_area_in_list_type_bit)))
 		return 0;
     /*如果file_area检测到在其他file_stat链表上，测试失败*/
-	if(p_file_area->file_area_state & (~(1 << file_area_in_list_type) & FILE_AREA_LIST_MASK))
+	if(p_file_area->file_area_state & (~(1 << file_area_in_list_type_bit) & FILE_AREA_LIST_MASK))
 		return 0;
+#endif
+	unsigned int file_area_in_list_type = 1 << file_area_in_list_type_bit;
+	//p_file_area在链表的后一个file_area
+	struct file_area *p_file_area_next = list_next_entry(p_file_area, file_area_list);
+	//p_file_area在链表的前一个file_area
+	struct file_area *p_file_area_prev = list_prev_entry(p_file_area, file_area_list);
 
-	printk("can_file_area_move_to_list_head file_area:0x%llx\n",(u64)p_file_area);
+	/*file_area不能是链表头*/
+	if(&p_file_area->file_area_list == file_area_list_head)
+		return 0;
+	//file_area在链表的前一个file_area不是链表头，这个判断其实可以不用加，在list_move_enhance()函数就有判断
+	/*if(&p_file_area_prev->file_area_list == file_area_list_head)
+	  return 0;*/
+
+	//file_area在链表的后一个file_area可能是链表头
+	/*if(&p_file_area_next->file_area_list == file_area_list_head)
+	  return 0;*/
+
+	/* 如果file_area不在file_area_in_list_type这个file_stat的链表上，测试失败
+	 * 如果file_area检测到在其他file_stat链表上，测试失败
+	 * */
+	if(0 == (p_file_area->file_area_state & file_area_in_list_type) ||  p_file_area->file_area_state & (~(file_area_in_list_type) & FILE_AREA_LIST_MASK)){ 
+		printk("%ps->can_file_area_move file_area_list_head:0x%llx file_area:0x%llx state:0x%x file_area_in_list_type:0x%x p_file_area_error\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area,p_file_area->file_area_state,file_area_in_list_type);
+		return 0;
+	}
+
+	/*同样检测前一个file_area是否合法*/
+	if(&p_file_area_prev->file_area_list != file_area_list_head){
+		if(0 == (p_file_area_prev->file_area_state & file_area_in_list_type) ||  p_file_area_prev->file_area_state & (~(file_area_in_list_type) & FILE_AREA_LIST_MASK)){
+			printk("%ps->can_file_area_move file_area_list_head:0x%llx file_area:0x%llx p_file_area_prev:0x%llx state:0x%x file_area_in_list_type:0x%x p_file_area_prev error\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area,(u64)p_file_area_prev,p_file_area_prev->file_area_state,file_area_in_list_type);
+			return 0;
+		}
+	}
+
+	/*同样检测后一个file_area是否合法，但它可能是链表头，要过滤掉*/
+	if(&p_file_area_next->file_area_list != file_area_list_head){
+		if(0 == (p_file_area_next->file_area_state & file_area_in_list_type) ||  p_file_area_next->file_area_state & (~(file_area_in_list_type) & FILE_AREA_LIST_MASK)){
+			printk("%ps->can_file_area_move file_area_list_head:0x%llx file_area:0x%llx p_file_area_next:0x%llx state:0x%x file_area_in_list_type:0x%x p_file_area_next error\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area,(u64)p_file_area_next,p_file_area_next->file_area_state,file_area_in_list_type);
+			return 0;
+		}
+	}
+
+	if(shrink_page_printk_open1)
+		printk("%ps->can_file_area_move file_area_list_head:0x%llx file_area:0x%llx\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area);
+
 	return 1;
 }
+static int inline can_file_area_move_to_list_head_for_small_file_other(struct file_area *p_file_area,struct list_head *file_area_list_head,unsigned int file_area_in_list_type)
+{
+	//p_file_area在链表的后一个file_area
+	struct file_area *p_file_area_next = list_next_entry(p_file_area, file_area_list);
+	//p_file_area在链表的前一个file_area
+	struct file_area *p_file_area_prev = list_prev_entry(p_file_area, file_area_list);
+
+	/*file_area不能是链表头*/
+	if(&p_file_area->file_area_list == file_area_list_head)
+		return 0;
+	//file_area在链表的前一个file_area不是链表头，这个判断其实可以不用加，在list_move_enhance()函数就有判断
+	/*if(&p_file_area_prev->file_area_list == file_area_list_head)
+	  return 0;*/
+
+	//file_area在链表的后一个file_area可能是链表头
+	/*if(&p_file_area_next->file_area_list == file_area_list_head)
+	  return 0;*/
+
+	/* 如果file_area不在file_area_in_list_type这个file_stat的链表上，测试失败
+	 * 如果file_area检测到在其他file_stat链表上，测试失败
+	 * */
+	if(0 == (p_file_area->file_area_state & file_area_in_list_type) ||  p_file_area->file_area_state & (~(file_area_in_list_type) & FILE_AREA_LIST_MASK)){ 
+		printk("%ps->can_file_area_move other_list file_area_list_head:0x%llx file_area:0x%llx state:0x%x file_area_in_list_type:0x%x p_file_area_error\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area,p_file_area->file_area_state,file_area_in_list_type);
+		return 0;
+	}
+
+	/*同样检测前一个file_area是否合法*/
+	if(&p_file_area_prev->file_area_list != file_area_list_head){
+		if(0 == (p_file_area_prev->file_area_state & file_area_in_list_type) ||  p_file_area_prev->file_area_state & (~(file_area_in_list_type) & FILE_AREA_LIST_MASK)){
+			printk("%ps->can_file_area_move other_list file_area_list_head:0x%llx file_area:0x%llx p_file_area_prev:0x%llx state:0x%x file_area_in_list_type:0x%x p_file_area_prev error\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area,(u64)p_file_area_prev,p_file_area_prev->file_area_state,file_area_in_list_type);
+			return 0;
+		}
+	}
+
+	/*同样检测后一个file_area是否合法，但它可能是链表头，要过滤掉*/
+	if(&p_file_area_next->file_area_list != file_area_list_head){
+		if(0 == (p_file_area_next->file_area_state & file_area_in_list_type) ||  p_file_area_next->file_area_state & (~(file_area_in_list_type) & FILE_AREA_LIST_MASK)){
+			printk("%ps->can_file_area_move other_list file_area_list_head:0x%llx file_area:0x%llx p_file_area_next:0x%llx state:0x%x file_area_in_list_type:0x%x p_file_area_next error\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area,(u64)p_file_area_next,p_file_area_next->file_area_state,file_area_in_list_type);
+			return 0;
+		}
+	}
+
+	if(shrink_page_printk_open1)
+		printk("%ps->can_file_area_move other_list file_area_list_head:0x%llx file_area:0x%llx\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area);
+	return 1;
+}
+
 static int inline can_file_stat_move_to_list_head_for_one(struct file_stat_base *p_file_stat_base,unsigned int file_stat_in_list_type,char is_cache_file)
 {
 	if(is_cache_file && !file_stat_in_cache_file_base(p_file_stat_base)){
-		printk("%ps->can_file_stat_move one file_stat:0x%llx status:0x%x  file_stat_in_list_type:%d mmap file not move to cache file head\n",__builtin_return_address(0),(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_in_list_type);
+		printk("%ps->can_file_stat_move one file_stat:0x%llx status:0x%x  file_stat_in_list_type_bit:%d mmap file not move to cache file head\n",__builtin_return_address(0),(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_in_list_type);
 		return 1;
 	}
 	else if(!is_cache_file && !file_stat_in_mmap_file_base(p_file_stat_base)){
-		printk("%ps->can_file_stat_move one file_stat:0x%llx status:0x%x file_stat_in_list_type:%d cache file not move to  mmap file head\n",__builtin_return_address(0),(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_in_list_type);
+		printk("%ps->can_file_stat_move one file_stat:0x%llx status:0x%x file_stat_in_list_type_bit:%d cache file not move to  mmap file head\n",__builtin_return_address(0),(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_in_list_type);
 		return 1;
 	}
 
 	/*if成立说明file_stat有异常属性，被标记delete了或者从cache文件转成mmap文件而被list_del了等等*/
 	if(file_stat_status_invalid_check(p_file_stat_base->file_stat_status)){
-		printk("%ps->can_file_stat_move one file_stat:0x%llx status:0x%x file_stat_in_list_type:%d file_stat_status_invalid_check error\n",__builtin_return_address(0),(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_in_list_type);
+		printk("%ps->can_file_stat_move one file_stat:0x%llx status:0x%x file_stat_in_list_type_bit:%d file_stat_status_invalid_check error\n",__builtin_return_address(0),(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_in_list_type);
 		return 1;
 	}
 
 	/*1:如果file_stat不在file_stat_in_list_type这个global链表上，测试失败
 	 *2:如果file_stat检测到在file_stat_in_list_type除外的其他global链表上，测试失败*/
 	if(0 == (p_file_stat_base->file_stat_status & (1 << file_stat_in_list_type))  ||  p_file_stat_base->file_stat_status & (~(1 << file_stat_in_list_type) & FILE_STAT_LIST_MASK)){
-		printk("%ps->can_file_stat_move one file_stat:0x%llx status:0x%x file_stat_in_list_type:%d file_stat_type error\n",__builtin_return_address(0),(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_in_list_type);
+		printk("%ps->can_file_stat_move one file_stat:0x%llx status:0x%x file_stat_in_list_type_bit:%d file_stat_type error\n",__builtin_return_address(0),(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_in_list_type);
 		return 1;
 	}
 
@@ -2077,28 +2168,32 @@ static int inline can_file_stat_move_to_list_head(struct list_head *file_stat_te
 
 	/*如果file_stat在链表前后没有成员，失败。如果file_stat_base已经从链表删除，事变*/
 	if(list_empty(&p_file_stat_base->hot_cold_file_list) || p_file_stat_base->hot_cold_file_list.next == LIST_POISON1 || p_file_stat_base->hot_cold_file_list.prev == LIST_POISON2){
-		printk("%ps->can_file_stat_move file_stat:0x%llx  is_cache_file:%d file_stat_in_list_type:%d error!!!!!!!!!!!!!!\n",__builtin_return_address(0),(u64)p_file_stat_base,is_cache_file,file_stat_in_list_type);
+		printk("%ps->can_file_stat_move file_stat:0x%llx  is_cache_file:%d file_stat_in_list_type_bit:%d error!!!!!!!!!!!!!!\n",__builtin_return_address(0),(u64)p_file_stat_base,is_cache_file,file_stat_in_list_type);
 		return 0;
 	}
 
 	/*检测p_file_stat_base是否合法*/
 	if(can_file_stat_move_to_list_head_for_one(p_file_stat_base,file_stat_in_list_type,is_cache_file)){
-		printk("%ps->can_file_stat_move file_stat:0x%llx status:0x%x is_cache_file:%d file_stat_in_list_type:%d error\n",__builtin_return_address(0),(u64)p_file_stat_base,p_file_stat_base->file_stat_status,is_cache_file,file_stat_in_list_type);
+		printk("%ps->can_file_stat_move file_stat:0x%llx status:0x%x is_cache_file:%d file_stat_in_list_type_bit:%d error\n",__builtin_return_address(0),(u64)p_file_stat_base,p_file_stat_base->file_stat_status,is_cache_file,file_stat_in_list_type);
 		return 0;
 	}
 
 	/*检测p_file_stat_base在链表的下一个成员是否合法。如果它是链表头，就不检测了*/
 	if(file_stat_temp_head != &p_file_stat_base_next->hot_cold_file_list){
 		if(can_file_stat_move_to_list_head_for_one(p_file_stat_base_next,file_stat_in_list_type,is_cache_file)){
-			printk("%ps->can_file_stat_move file_stat:0x%llx file_stat_next:0x%llx status:0x%x is_cache_file:%d file_stat_in_list_type:%d error!!!\n",__builtin_return_address(0),(u64)p_file_stat_base,(u64)p_file_stat_base_next,p_file_stat_base_next->file_stat_status,is_cache_file,file_stat_in_list_type);
+			printk("%ps->can_file_stat_move file_stat:0x%llx file_stat_next:0x%llx status:0x%x is_cache_file:%d file_stat_in_list_type_bit:%d error!!!\n",__builtin_return_address(0),(u64)p_file_stat_base,(u64)p_file_stat_base_next,p_file_stat_base_next->file_stat_status,is_cache_file,file_stat_in_list_type);
 			return 0;
 		}
 	}
 
-	/*检测p_file_stat_base在链表的上一个成员是否合法。它不可能是链表头，如果链表只有一个成员，prev是链表头但上边的if就会跳过*/
-	if(can_file_stat_move_to_list_head_for_one(p_file_stat_base_prev,file_stat_in_list_type,is_cache_file)){
-		printk("%ps->can_file_stat_move file_stat:0x%llx file_stat_prev:0x%llx status:0x%x is_cache_file:%d file_stat_in_list_type:%d error!!!\n",__builtin_return_address(0),(u64)p_file_stat_base,(u64)p_file_stat_base_prev,p_file_stat_base_prev->file_stat_status,is_cache_file,file_stat_in_list_type);
-		return 0;
+	/*检测p_file_stat_base在链表的上一个成员是否合法。它不可能是链表头，如果链表只有一个成员，prev是链表头但上边的if就会跳过。
+	 *错了，还有一种情况，链表头有很多成员，p_file_stat_base是第一个成员，此时p_file_stat_base_prev就是链表头，因此还是要判断
+	 *p_file_stat_base_prev是否是链表头*/
+	if(file_stat_temp_head != &p_file_stat_base_prev->hot_cold_file_list){
+		if(can_file_stat_move_to_list_head_for_one(p_file_stat_base_prev,file_stat_in_list_type,is_cache_file)){
+			printk("%ps->can_file_stat_move file_stat:0x%llx file_stat_prev:0x%llx status:0x%x is_cache_file:%d file_stat_in_list_type_bit:%d error!!!\n",__builtin_return_address(0),(u64)p_file_stat_base,(u64)p_file_stat_base_prev,p_file_stat_base_prev->file_stat_status,is_cache_file,file_stat_in_list_type);
+			return 0;
+		}
 	}
 
 	if(shrink_page_printk_open1)

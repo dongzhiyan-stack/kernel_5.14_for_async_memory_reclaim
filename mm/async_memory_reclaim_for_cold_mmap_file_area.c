@@ -1672,7 +1672,7 @@ static noinline int reverse_other_file_area_list_small_file(struct hot_cold_file
 			break;
 		}
 	}
-	//如果file_area_list临时链表上有file_area，则要移动到 file_area_list_head链表头，最近遍历过的file_area移动到链表头
+	//如果file_area_list临时链表上有file_area，则要移动到 file_area_list_head链表头，最近遍历过的file_area移动到链表头。下次循环才能遍历到新的file_area，避免一直遍历同样的file_area
 	if(!list_empty(&file_area_list)){
 		list_splice(&file_area_list,file_area_list_head);
 	}
