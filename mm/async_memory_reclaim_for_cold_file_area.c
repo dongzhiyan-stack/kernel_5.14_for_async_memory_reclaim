@@ -49,6 +49,9 @@
 #include <linux/mm_inline.h>
 #include <linux/proc_fs.h>
 #include <linux/xarray.h>
+#include <linux/fs.h>
+#include <linux/fs_struct.h>
+#include <linux/kernel_read_file.h>
 
 #include "async_memory_reclaim_for_cold_file_area.h"
 
@@ -330,12 +333,13 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 		 **/
 		//p_file_stat_base_del->mapping->rh_reserved1 = 0;
 		p_file_stat_base_del->mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;/*原来赋值0，现在赋值1，原理一样*/
-		barrier();
+		smp_wmb();
 		p_file_stat_base_del->mapping = NULL;
 	}
 	//spin_unlock(&p_file_stat_base_del->file_stat_lock);
 	//unlock_file_stat(p_file_stat_base_del);
 	xa_unlock_irq(xarray_i_pages);
+
 
 	/*到这里，一定可以确保file_stat跟mapping没关系了，因为mapping->rh_reserved1是0，但不能保证不被其他进程在filemap_get_read_batch()
 	 *或mapping_get_entry()在mapping->rh_reserved1是0前已经并发访问了file_stat，现在还在使用，好在他们访问file_stat前都rcu_read_lock了，
@@ -364,6 +368,8 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 			smp_wmb();
 			/*下边的call_rcu()有smp_mb()，保证set_file_stat_in_delete()后有内存屏障*/
 			set_file_stat_in_delete_base(p_file_stat_base_del);
+			/*这个内存屏障解释见print_file_stat_all_file_area_info_write()*/
+			smp_mb();
 			/* 从global的链表中剔除该file_stat，这个过程需要加锁，因为同时其他进程会执行hot_file_update_file_status()
 			 * 向global的链表添加新的文件file_stat*/
 			list_del_rcu(&p_file_stat_base_del->hot_cold_file_list);
@@ -386,6 +392,7 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 			/*在这个加个内存屏障，保证前后代码隔离开。即file_stat有delete标记后，inode->i_mapping->rh_reserved1一定是0，p_file_stat->mapping一定是NULL*/
 			smp_wmb();
 			set_file_stat_in_delete_base(p_file_stat_base_del);
+			smp_mb();
 			//从global的链表中剔除该file_stat，这个过程需要加锁，因为同时其他进程会执行hot_file_update_file_status()向global的链表添加新的文件file_stat
 			list_del_rcu(&p_file_stat_base_del->hot_cold_file_list);
 			file_stat_del = 1;
@@ -404,6 +411,15 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 	}
 
 err:
+	
+	/* 在释放file_stat时，标记print_file_stat为NULL，这个赋值必须放到标记file_stat in_delete后边。
+	 * 作用是，保证print_file_stat_all_file_area_info()看到file_stat有in_delete标记后，就不能再把
+	 * file_stat赋值给print_file_stat了。否则访问print_file_stat就是无效的内存了*/
+	if(p_file_stat_base_del == hot_cold_file_global_info.print_file_stat){
+	    hot_cold_file_global_info.print_file_stat = NULL;
+		printk("%s p_file_stat:0x%llx status:0x%x print_file_stat delete!!!\n",__func__,(u64)p_file_stat_base_del,p_file_stat_base_del->file_stat_status);
+	}
+
 	/* rcu延迟释放file_stat结构。call_rcu()里有smp_mb()内存屏障。但如果mapping->rh_reserved1是0了，说明上边
 	 * 没有执行list_del_rcu(&p_file_stat_del->hot_cold_file_list)，那这里不能执行call_rcu()*/
 	if(mapping->rh_reserved1){
@@ -1720,60 +1736,424 @@ static const struct proc_ops open_print_fops = {
 	.proc_release	= single_release,
 	.proc_write		= open_print_write,
 };
-//get_file_stat_all_file_area_info
-static int get_file_stat_all_file_area_info_show(struct seq_file *m, void *v)
+//print_file_stat_all_file_area_info
+static int print_file_stat_one_file_area_info(struct seq_file *m,struct list_head *file_area_list_head,unsigned int file_area_type,char *file_area_list_name,char is_proc_print)
 {
-	struct file_stat_base *p_file_stat_base;
+	struct file_area *p_file_area = NULL;
+	struct file_area *p_file_area_last = NULL;
+	
+	unsigned int file_area_count = 0;
+	unsigned int file_area_all = 0;
 
-	rcu_read_lock();
-	if(!file_stat_in_delete_base(hot_cold_file_global_info.print_file_stat)){
 
+	if(is_proc_print)
+		seq_printf(m, "%s\n",file_area_list_name);
+	else
+		printk("%s\n",file_area_list_name);
+
+	if(list_empty(file_area_list_head))
+		return 0;
+
+	p_file_area_last = list_last_entry(file_area_list_head,struct file_area,file_area_list);
+
+	if(is_proc_print)
+		seq_printf(m, "tail p_file_area:0x%llx status:0x%x age:%d\n",(u64)p_file_area_last,p_file_area_last->file_area_state,p_file_area_last->file_area_age);
+	else
+		printk("tail p_file_area:0x%llx status:0x%x age:%d\n",(u64)p_file_area_last,p_file_area_last->file_area_state,p_file_area_last->file_area_age);
+
+	/* 执行该函数时，已经执行了rcu_read_lock()，故不用担心遍历到的p_file_area被异步内存回收线程释放了。
+	 * 但是，如果该p_file_area被异步内存回收线程移动到其他file_stat->temp、hot、refault等链表了。
+	 * 那这个函数就会因p_file_area被移动到了其他链表头，而导致下边的遍历陷入死循环。目前的解决办法
+	 * 是：检测file_area的状态是否变了，变了的话就跳出循环。需要注意，一个file_area会具备多种状态。
+	 * 比如file_stat->temp链表上的file_area同时有in_temp和in_hot属性，file_stat->free链表上的file_area
+	 * 同时具备in_free和in_refault属性。还需要一点，比如遍历file_area->temp链表上的p_file_area时，
+	 * 被移动到了file_stat->hot链表头，则下边的循环，下边的循环下次遍历到的p_file_area将是
+	 * file_stat->hot链表头，而file_stat->hot链表头又敲好所有file_area都被释放了，那下边循环
+	 * 每次遍历得到的p_file_area都是file_stat->hot链表头，又要陷入死循环。还有，如果file_stat->temp
+	 * 链表上的file_area参与内存，会移动到file_area_free临时链表，情况很复杂。没有好办法，感觉
+	 * 需要该函数标记file_stat的in_print标记，然后禁止该file_stat的file_area跨链表移动???????????*/
+	list_for_each_entry_reverse(p_file_area,file_area_list_head,file_area_list){
+		/*遍历file_stat_small->other链表上的file_area，同时具备refault、hot、free、mapcount属性，有一个都成立*/
+		//if(get_file_area_list_status(p_file_area) != file_area_type)
+		if((get_file_area_list_status(p_file_area) & file_area_type) == 0){
+			if(is_proc_print)
+				seq_printf(m,"%s invalid file_area:0x%llx state:0x%x!!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+			else
+				printk("%s invalid file_area:0x%llx state:0x%x!!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+
+			break;
+		}
+
+		if(p_file_area->file_area_age > hot_cold_file_global_info.global_age){
+			if(is_proc_print)
+				seq_printf(m,"2:%s invalid file_area:0x%llx state:0x%x!!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+			else
+				printk("2:%s invalid file_area:0x%llx state:0x%x!!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+
+			break;
+		}
+
+		file_area_count ++;
+
+		if((p_file_area->file_area_age - p_file_area_last->file_area_age > 1) || (p_file_area_last->file_area_age - p_file_area->file_area_age > 1)){
+			if(is_proc_print)
+				seq_printf(m, "-->  p_file_area:0x%llx status:0x%x age:%d file_area_count:%d\n",(u64)p_file_area,p_file_area->file_area_state,p_file_area->file_area_age,file_area_count);
+			else
+				printk("-->  p_file_area:0x%llx status:0x%x age:%d file_area_count:%d\n",(u64)p_file_area,p_file_area->file_area_state,p_file_area->file_area_age,file_area_count);
+
+			file_area_count = 0;
+			p_file_area_last = p_file_area;
+		}
+		file_area_all ++;
 	}
-	rcu_read_unlock();
 
-	seq_printf(m, "%d\n", shrink_page_printk_open1);
+	if(is_proc_print)
+		seq_printf(m, "file_area_count:%d\n",file_area_all);
+	else
+		printk("file_area_count:%d\n",file_area_all);
+
 	return 0;
 }
-static int get_file_stat_all_file_area_info_open(struct inode *inode, struct file *file)
+/*****打印该文件所有的file_area信息**********/
+static int print_file_stat_all_file_area_info(struct seq_file *m,char is_proc_print)
 {
-	return single_open(file, get_file_stat_all_file_area_info_show, NULL);
+	struct file_stat_base *p_file_stat_base;
+	unsigned int file_stat_type;
+	int ret = 0;
+
+	/* 取出file_stat并打印该文件的所有file_area。但是有两个并发场景需要注意，
+	 * 1:该文件inode被并发iput()释放了，要防止
+	 * 2:该file_stat被异步内存回收线程并发cold_file_stat_delete()释放了，标记hot_cold_file_global_info.print_file_stat为NULL*/
+
+	/*rcu加锁保证这个宽限期内，这个file_stat结构体不能cold_file_stat_delete()异步释放了，否则这里再使用它就是访问非法内存!!!!!!!!!!!!!!!!!!!*/
+	rcu_read_lock();
+	smp_rmb();
+	p_file_stat_base = hot_cold_file_global_info.print_file_stat;//这个赋值留着，有警示作用
+
+	/* 不能使用p_file_stat_base判断该file_stat是否被异步内存回收线程cold_file_stat_delete()里标记NULL。
+	 * 存在极端情况，这里"p_file_stat_base = hot_cold_file_global_info.print_file_stat"赋值后，异步内存
+	 * 回收线程cold_file_stat_delete()里立即标记hot_cold_file_global_info.print_file_stat为NULL。因此
+	 * 必须判断hot_cold_file_global_info.print_file_stat这个源头。  还有一点，这里rcu加锁后，再smp_rmb()，
+	 * 有两种情况。 1:hot_cold_file_global_info.print_file_stat不是NULL，if成立，正常打印file_stat的
+	 * file_area。如果打印file_stat的file_area过程，该file_stat被异步内存回收线程并发cold_file_stat_delete()
+	 * 标记NULL，也没事，因为此时rcu宽限期，不会真正释放掉file_stat结构体，只是call_rcu()将结构体添加到
+	 * 待释放的rcu链表。 2:异步内存回收先执行，cold_file_stat_delete()里标记
+	 * hot_cold_file_global_info.print_file_stat为NULL。这里if不成立，就不会再使用该file_stat了。*/
+	//if(!p_file_stat_base){
+	if(!hot_cold_file_global_info.print_file_stat){
+		if(is_proc_print)
+			seq_printf(m, "invalid file_stat\n");
+		else				
+			printk("invalid file_stat\n");
+
+		goto err;
+	}
+	p_file_stat_base = hot_cold_file_global_info.print_file_stat;
+
+	if(file_stat_in_replaced_file_base(p_file_stat_base) || file_stat_in_delete_base(p_file_stat_base)){
+		if(is_proc_print)
+			seq_printf(m, "invalid file_stat:0x%llx 0x%x has replace or delete!!!\n",(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+		else
+			printk("invalid file_stat:0x%llx 0x%x has replace or delete!!!\n",(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+		ret = EINVAL;
+		goto err;
+	}
+
+	if((u64)p_file_stat_base != p_file_stat_base->mapping->rh_reserved1){
+		if(is_proc_print)
+			seq_printf(m, "invalid file_stat:0x%llx 0x%lx\n",(u64)p_file_stat_base,p_file_stat_base->mapping->rh_reserved1);
+		else
+			printk("invalid file_stat:0x%llx 0x%lx\n",(u64)p_file_stat_base,p_file_stat_base->mapping->rh_reserved1);
+
+		ret = EINVAL;
+		goto err;
+	}
+
+	file_stat_type = get_file_stat_type(p_file_stat_base);
+	print_file_stat_one_file_area_info(m,&p_file_stat_base->file_area_temp,1 << F_file_area_in_temp_list,"temp list",1);
+
+	if(FILE_STAT_SMALL == file_stat_type){
+		unsigned int file_area_type = (1 << F_file_area_in_hot_list) | (1 << F_file_area_in_refault_list)| (1 << F_file_area_in_mapcount_list) | (1 << F_file_area_in_free_list);
+		struct file_stat_small *p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
+
+		print_file_stat_one_file_area_info(m,&p_file_stat_small->file_area_other,file_area_type,"other list",1);
+	}else if(FILE_STAT_NORMAL == file_stat_type){
+		struct file_stat *p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
+
+		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_warm,1 << F_file_area_in_warm_list,"warm list",1);
+
+		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_hot,1 << F_file_area_in_hot_list,"hot list",1);
+		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_refault,1 << F_file_area_in_refault_list,"refault list",1);
+		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_mapcount,1 << F_file_area_in_mapcount_list,"mapcount list",1);
+
+		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_free,1 << F_file_area_in_free_list,"free list",1);
+	}
+
+err:
+	rcu_read_unlock();
+	return ret;
 }
-static ssize_t get_file_stat_all_file_area_info_write(struct file *file,
+static int print_file_stat_all_file_area_info_show(struct seq_file *m, void *v)
+{
+	return print_file_stat_all_file_area_info(m,1);
+}
+static int print_file_stat_all_file_area_info_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, print_file_stat_all_file_area_info_show, NULL);
+}
+static ssize_t print_file_stat_all_file_area_info_write(struct file *file,
 		const char __user *buffer, size_t count, loff_t *ppos)
 {
-	char *file_path;
-	struct file *file;
+	char *file_path = NULL;
+	struct file *file_temp;
+	struct inode *inode;
 	struct file_stat_base *p_file_stat_base;
+	int ret = 0;
+	//struct path root;
 
 	file_path = kmalloc(count + 1,GFP_KERNEL | __GFP_ZERO);
-	if (copy_from_user(file_path, buffer, count))
+	if(!file_path)
+		goto err;
+
+	if (copy_from_user(file_path, buffer, count)){
+		kfree(file_path);
 		return -EFAULT;
-
-	file = filp_open(file_path,O_RDONLY);
-	if (IS_ERR(file)){
-		printk("file_open fail:%s\n",file_path);
-		goto close;
 	}
-	inode = file_inode(file);
-	p_file_stat_base = (struct file_stat_base *)inode->i_mapping->rh_reserved1;
+	printk("%s\n",file_path);
+	/*如果文件名字最后一个字符数换行符，下边open文件会失败，返回错误，此时必须形如echo -n /root/test.c 传递文件名字，禁止bash在文件名字末尾插入换行符*/
+	if(file_path[count - 1] == '\n'){
+        kfree(file_path);
+		return -EINVAL;
+	}
+		
+	/*防止下边使用该文件时，inode被iput()并发释放了。不用，filp_open()成功后，会dget()令dentry引用计数加1，
+	 *之后除非file_close，否则无法释放dentry和inode。但是，还有一个并发场景，异步内存回收线程
+	 *cold_file_stat_delete()因为该file_stat一个file_area都没就，于是释放掉该file_stat结构，这种情况
+	 *完全存在的。这样的话，下边执行if(file_stat_in_delete_base(p_file_stat_base))，就可能该file_stat
+	 *被异步内存回收线程并发cold_file_stat_delete()释放了而访问无效内存。因此，必须加rcu_read_lock()
+	 *保证这个宽限期内file_stat结构体无法被释放掉
+     *
+	 *又遇到新的问题了，还有一个隐藏bug。就是tiny small file转成small或normal，small转成normal文件时，
+	 *老的file_stat会被直接异步rcu del。如果这个file_stat正好之前被赋值给了
+	 *hot_cold_file_global_info.print_file_stat，则需要及时把hot_cold_file_global_info.print_file_stat
+	 *清NULL。否则再使用这个file_stat就是非法内存访问。因此，当前函数也要判断file_stat是否在函数
+	 *old_file_stat_change_to_new()老的file_stat转成新的file_stat时，老的file_stat是否是
+	 *hot_cold_file_global_info.print_file_stat。
+     */
+	rcu_read_lock();
+	/*根据传入的文件路径查找该文件，得到inode，再得到file_stat*/
+#if 1
+	file_temp = filp_open(file_path,O_RDONLY,0);
+#else
+	task_lock(&init_task);
+	get_fs_root(init_task.fs, &root);
+	task_unlock(&init_task);
 
-	/*是支持的file_area的文件系统的文件*/
+	file_temp = file_open_root(&root, file_path, O_RDONLY, 0);
+	path_put(&root);
+#endif
+	if (IS_ERR(file_temp)){
+		printk("file_open fail:%s %lld\n",file_path,(s64)file_temp);
+		goto err;
+	}
+	inode = file_inode(file_temp);
+	p_file_stat_base = (struct file_stat_base *)(inode->i_mapping->rh_reserved1);
+
+	/*如果该文件file_stat被异步内存回收线程并发cold_file_stat_delete()释放了，则smp_rmb()查看p_file_stat_base此时就是SUPPORT_FILE_AREA_INIT_OR_DELETE，下边的if不成立*/
+	smp_rmb();
+	/*是支持的file_area的文件系统的文件，并且该文件并没有被异步内存回收线程并发cold_file_stat_delete()释放赋值SUPPORT_FILE_AREA_INIT_OR_DELETE*/
 	if((u64)p_file_stat_base > SUPPORT_FILE_AREA_INIT_OR_DELETE){
-	    /*如果这个file_stat被异步内存回收线程释放了怎么办？在cold_file_stat_delete函数标记一下*/ 
-		hot_cold_file_global_info.print_file_stat = p_file_stat_base;
+		/* 此时这个file_stat被异步内存回收线程并发cold_file_stat_delete()释放了，将来使用时要注意。
+		 * 存在一个极端并发场景，这里对print_file_stat赋值还没生效，异步内存回收线程里cold_file_stat_delete()
+		 * 看到的print_file_stat还是null，然后把这个file_stat给释放了。将来打印时，却使用print_file_stat
+		 * 保存的这个file_stat，打印file_area信息。但实际这个file_stat已经是无效的内存了，不能再访问。这个
+		 * 并发问题很棘手!!!!!!!!!!!!!!!!!必须要确保这里先对print_file_stat赋值file_sat，然后再有异步内存
+		 * 回收线程识别到print_file_stat非NULL，然后赋值NULL。最终想到的解决办法是：
+		 *
+		 * 该函数把file_stat赋值给print_file_stat
+		 * if(!file_stat_in_delete_base(p_file_stat_base)){
+		 *     hot_cold_file_global_info.print_file_stat = p_file_stat_base;
+		 *     smp_mb();//读+写内存屏障
+		 *     if(file_stat_in_delete_base(p_file_stat_base)){
+		 *        hot_cold_file_global_info.print_file_stat = NULL; 
+		 *     }
+		 * }
+		 *
+		 * 异步内存回收的执行cold_file_stat_delete()释放该file_stat而标记print_file_stat为NULL
+		 * cold_file_stat_delete()
+		 * {
+		 *     set_file_stat_in_delete_base(p_file_stat_base);
+		 *     smp_mb();//读+写内存屏障
+		 *     if(p_file_stat_base == hot_cold_file_global_info.print_file_stat)
+		 *     {
+		 *         hot_cold_file_global_info.print_file_stat = NULL;
+		 *     }
+		 *     //异步释放file_stat
+	     *	   call_rcu(&p_file_stat_base_del->i_rcu, i_file_stat_callback);
+		 * }
+		 * 
+		 * 这两个函数谁前执行完，同步都没有问题。主要看几个极端的例子
+		 * 1:当前函数正执行"hot_cold_file_global_info.print_file_stat = p_file_stat_base"，
+		 * cold_file_stat_delete()函数正执行"smp_mb()"和"if(p_file_stat_base == hot_cold_file_global_info.print_file_stat)"
+		 * 此时，当前函数执行到if(file_stat_in_delete_base(p_file_stat_base))时，一定感知到file_stat的in_delete
+		 * 状态。因为cold_file_stat_delete()函数此时一定执行过了"set_file_stat_in_delete_base(p_file_stat_base)"
+		 * 和"smp_mb()"，已经保证把file_stat的in_delete状态同步给了执行当前函数的cpu。
+		 *
+		 * 2:当前函数正执行"smp_mb()",还没执行完，当前cpu产生了中断，卡在中断里一段时间，内存屏障没有生效。
+		 * cold_file_stat_delete()函数正执行"set_file_stat_in_delete_base(p_file_stat_base)"。然后执行
+		 * "if(p_file_stat_base == hot_cold_file_global_info.print_file_stat)"时，执行当前函数的cpu的"smp_mb()"
+		 * 执行完成了。但是cold_file_stat_delete()函数的cpu并没有感知到hot_cold_file_global_info.print_file_stat是
+		 * p_file_stat_base，"if(p_file_stat_base == hot_cold_file_global_info.print_file_stat)"不成立。但是
+		 * cold_file_stat_delete()已经执行过了"set_file_stat_in_delete_base(p_file_stat_base)"和"smp_mb()"。
+		 * 而当前函数执行过"smp_mb()"，一定能感知到file_stat的in_delete状态。故
+		 * "if(file_stat_in_delete_base(p_file_stat_base))"成立
+		 *
+		 * 3：两个函数都在执行"smp_mb()"，如果当前函数先执行完，则cold_file_stat_delete() 执行完"smp_mb"后，
+		 * 一定能感知到hot_cold_file_global_info.print_file_stat是p_file_stat_base，故
+		 * "if(p_file_stat_base == hot_cold_file_global_info.print_file_stat)"成立。如果cold_file_stat_delete()
+		 * 先执行完"smp_mb()"，则当前函数执行完"smp_mb"后，一定能感知到file_stat的in_delete状态，故
+		 * "if(file_stat_in_delete_base(p_file_stat_base))"成立。
+		 *
+		 *  这个并发案例算是目前为止最抽象的无锁编程并发案例，通过把两个并发的函数的关键步骤写下来，一步步
+		 *  推演，终于得到了好的解决方案。
+		 *
+		 *  无语了，上边的方案有问题了，如果该p_file_stat_base被异步内存回收线程并发释放，该p_file_stat_base
+		 *  的内存就是无效内存了!!!!!!!!!!!而这片内存要是被别的进程分配成了新的file_stat，则这里的
+		 *  file_stat_in_delete_base(p_file_stat_base)就是无效的判断了，因为这片内存时别的进程分配
+		 *  的新的file_stat了。要想解决这个问题，必须保证执行到这里时，
+		 *  1:p_file_stat_base不能被异步内存回收线程真正释放掉。
+		 *  2:或者p_file_stat_base被异步内存回收线程真正释放掉了，这里要立即感知到，就不再使用这个
+		 *  p_file_stat_base了。怎么感知到？有办法，在异步内存回收线程执行cold_file_stat_delete()，会先把
+		 *  mapping->rh_reserved1标记SUPPORT_FILE_AREA_INIT_OR_DELETE。并且，执行到这里时，是可能保证该
+		 *  文件inode和mapping一定不会被iput()被释放。只是无法保证该文件file_stat会因一个file_area都没有
+		 *  而被异步内存回收线程执行cold_file_stat_delete()释放而已。
+		 *
+		 *  于是新的方案来了，核心还是借助rcu，在原有方案做小的改动即可
+		 *
+		 *
+		 * rcu_read_lock();
+		 * smp_rmb();
+	     * p_file_stat_base = (struct file_stat_base *)(inode->i_mapping->rh_reserved1);
+		 *
+		 * if((u64)p_file_stat_base > SUPPORT_FILE_AREA_INIT_OR_DELETE)
+		 * {
+		 *     该函数把file_stat赋值给print_file_stat
+		 *     if(!file_stat_in_delete_base(p_file_stat_base)){
+		 *         hot_cold_file_global_info.print_file_stat = p_file_stat_base;
+		 *         smp_mb();//读+写内存屏障
+		 *         if(file_stat_in_delete_base(p_file_stat_base)){
+		 *            hot_cold_file_global_info.print_file_stat = NULL; 
+		 *         }
+		 *     }
+		 * }
+		 * rcu_read_unlock();
+		 *
+		 * 异步内存回收的执行cold_file_stat_delete()释放该file_stat而标记print_file_stat为NULL
+		 * cold_file_stat_delete()
+		 * {
+		 *     //标记mapping->rh_reserved1的delete标记
+		 *     p_file_stat_base_del->mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;
+		 *	   smp_wmb();
+		 *
+		 *     set_file_stat_in_delete_base(p_file_stat_base);
+		 *     smp_mb();//读+写内存屏障
+		 *     if(p_file_stat_base == hot_cold_file_global_info.print_file_stat)
+		 *     {
+		 *         hot_cold_file_global_info.print_file_stat = NULL;
+		 *     }
+		 *     //异步释放file_stat
+	     *	   call_rcu(&p_file_stat_base_del->i_rcu, i_file_stat_callback);
+		 * }
+         * 只要当前函数执行了rcu_read_lock，那异步内存回收线就无法再释放掉这个p_file_stat_base。
+		 * 极端并发场景是，当前函数执行到rcu_read_lock(),但还没有执行完成。异步内存回收线程正
+		 * 执行 cold_file_stat_delete()里的"p_file_stat_base_del->mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE",
+		 * 如果当前函数先执行完rcu_read_lock，那异步内存回收线就无法再释放掉这个p_file_stat_base了，
+		 * 当前函数可以放心使用它。如果"p_file_stat_base_del->mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE"
+		 * 先执行完，但还没有执行后边的"smp_wmb()"，赋值没有对其他cpu生效。当前函数先执行完了rcu_read_lock，
+		 * 依然跟前边一样，可以放心使用p_file_stat_base，不用担心被释放。但是异步内存回收线程一旦先执行了"smp_wmb"，
+		 * 然后当前函数执行"smp_rmb"后，就一定能立即感知到inode->i_mapping->rh_reserved1是SUPPORT_FILE_AREA_INIT_OR_DELETE了，
+		 * 这是smp_wmb+smp_rmb绝对保证的。然后当期函数就不会再使用这个p_file_stat_base了
+		 *
+		 * */ 
+
+		 /* 如果file_stat_base被异步内存回收线程在old_file_stat_change_to_new()小文件转成大文件时被并发释放了，
+		  * 因此要放防护这种并发，遇到要逃过。这个并发的处理跟file_stat_base被异步内存回收线程cold_file_stat_delete
+		  * 释放file_stat的并发处理是完全一致的。这里再简单总结下：old_file_stat_change_to_new()的顺序是
+		  * old_file_stat_change_to_new()
+		  * {
+		  *     set_file_stat_in_replaced_file_base(p_file_stat_base);
+		  *     smp_mb();
+		  *     if(p_file_stat_base == hot_cold_file_global_info.print_file_stat)
+		  *     {
+		  *         hot_cold_file_global_info.print_file_stat = NULL;
+		  *     }
+		  *     //异步释放file_stat
+	      *	    call_rcu(&p_file_stat_base_del->i_rcu, i_file_stat_callback);
+          *
+		  * }
+		  *
+		  * 当前函数的并发处理是
+		  * rcu_read_lock();//有了rcu，就可以保证这个宽限期内，old_file_stat_change_to_new()无法真正释放掉file_stat结构
+		  * smp_rmb();
+		  * if(!file_stat_in_replaced_file_base(p_file_stat_base))
+		  * {
+		  *     hot_cold_file_global_info.print_file_stat = p_file_stat_base;
+		  *     smp_mb();
+		  *     if(file_stat_in_replaced_file_base(p_file_stat_base)){
+		  *         hot_cold_file_global_info.print_file_stat = NULL;
+		  *     }
+		  * }
+		  * rcu_read_unlock()
+		  *
+		  * 主要就是极端并发场景的处理，如果是下边"hot_cold_file_global_info.print_file_stat = p_file_stat_base
+		  * "赋值后，异步内存回收线程才old_file_stat_change_to_new()里刚标记file_stat in_replace，但是这里马上
+		  * 检测到file_stat_in_replaced_file_base(p_file_stat_base)，就会清理NULL。更详细的看上边的file_stat的delete的分析*/
+		 
+		 if(!file_stat_in_delete_base(p_file_stat_base) && !file_stat_in_replaced_file_base(p_file_stat_base)){
+			 hot_cold_file_global_info.print_file_stat = p_file_stat_base;
+			 smp_mb();
+			 if(file_stat_in_delete_base(p_file_stat_base) || file_stat_in_replaced_file_base(p_file_stat_base)){
+				 hot_cold_file_global_info.print_file_stat = NULL;
+			 }
+
+			 if(file_stat_in_test_base(p_file_stat_base)){
+				 /*清理文件in test模式*/
+				 clear_file_stat_in_test_base(p_file_stat_base);
+				 printk("file_stat:0x%llx clear_in_test\n",(u64)p_file_stat_base);
+			 }
+			 else{
+				 /*设置文件in test模式*/
+				 set_file_stat_in_test_base(p_file_stat_base);
+				 printk("file_stat:0x%llx set_in_test\n",(u64)p_file_stat_base);
+			 }
+		 }else{
+			 printk("invalid file_stat:0x%llx 0x%x has replace or delete!!!!!!!!\n",(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+			 ret = -ENOENT;
+			 goto close;
+		 }
 	}
 
 close:	
-	filp_close(file, NULL);
+	//filp_close(file_temp, NULL);
+	fput(file_temp);
+err:
+	rcu_read_unlock();
+
+	if(file_path)	
+		kfree(file_path);
+
+	if(ret)
+		return ret;
 
 	return count;
 }
-static const struct proc_ops get_file_stat_all_file_area_info_fops = {
-	.proc_open		= get_file_stat_all_file_area_info_open,
+static const struct proc_ops print_file_stat_all_file_area_info_fops = {
+	.proc_open		= print_file_stat_all_file_area_info_open,
 	.proc_read		= seq_read,
 	.proc_lseek     = seq_lseek,
 	.proc_release	= single_release,
-	.proc_write		= get_file_stat_all_file_area_info_write,
+	.proc_write		= print_file_stat_all_file_area_info_write,
 };
 
 //enable_disable_async_memory_reclaim
@@ -2091,6 +2471,13 @@ int hot_cold_file_proc_init(struct hot_cold_file_global *p_hot_cold_file_global)
 		printk("proc_create enable_disable_async_memory_reclaim fail\n");
 		return -1;
 	}
+
+	p = proc_create("print_file_stat_all_file_area_info", S_IRUGO | S_IWUSR, hot_cold_file_proc_root,&print_file_stat_all_file_area_info_fops);
+	if (!p){
+		printk("print_file_stat_all_file_area_info fail\n");
+		return -1;
+	}
+
 	return 0;
 }
 int hot_cold_file_proc_exit(struct hot_cold_file_global *p_hot_cold_file_global)
@@ -2108,6 +2495,8 @@ int hot_cold_file_proc_exit(struct hot_cold_file_global *p_hot_cold_file_global)
 	remove_proc_entry("async_memory_reclaime_info",p_hot_cold_file_global->hot_cold_file_proc_root);
 	remove_proc_entry("async_drop_caches",p_hot_cold_file_global->hot_cold_file_proc_root);
 	remove_proc_entry("enable_disable_async_memory_reclaim",p_hot_cold_file_global->hot_cold_file_proc_root);
+	
+	remove_proc_entry("print_file_stat_all_file_area_info",p_hot_cold_file_global->hot_cold_file_proc_root);
 
 	remove_proc_entry("async_memory_reclaime",NULL);
 	return 0;
@@ -4044,7 +4433,9 @@ static noinline unsigned int file_stat_small_other_list_file_area_solve(struct h
 		 *会破坏file_stat_small->otehr链表头，甚至出现file_stat_small->otehr链表头和file_stat_small->temp链表头相互指向
          */
 
-		/*small_file_stat->other链表上只有hot、free、refault属性的file_area才能移动到small_file_stat->other链表头*/
+		/* small_file_stat->other链表上只有hot、free、refault属性的file_area才能移动到small_file_stat->other链表头。
+		 * 由于file_stat_small->other链表上有hot、free、refault等多种属性的file_area，因此这里不能设置要判定p_file_area
+		 * 有这些属性时，都要把本次遍历过的file_area移动到链表头*/
 		file_area_type = (1 << F_file_area_in_hot_list) | (1 << F_file_area_in_free_list) | (1 << F_file_area_in_refault_list);
 		if(can_file_area_move_to_list_head_for_small_file_other(p_file_area,file_area_list_head,file_area_type))
 			list_move_enhance(file_area_list_head,&p_file_area->file_area_list);
@@ -4102,6 +4493,9 @@ static inline int file_stat_temp_list_file_area_solve(struct hot_cold_file_globa
 		  continue;
 	    }
 		else*/
+
+		if(file_stat_in_test_base(p_file_stat_base))
+			printk("%s:1 file_stat:0x%llx file_area:0x%llx status:0x%x age:%d global_age:%d traverse\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,p_file_area->file_area_age,p_hot_cold_file_global->global_age);
 
 		/*tiny small文件的所有类型的file_area都在file_stat->temp链表，因此要单独处理hot、refault、free属性的file_area。
 		 *重点注意，一个有in_temp属性的file_area，还同时可能有in_refault、in_hot属性，这是现在的规则，在update函数中设置.
@@ -4211,6 +4605,10 @@ static inline int file_stat_temp_list_file_area_solve(struct hot_cold_file_globa
 		if(file_area_age_dx > p_hot_cold_file_global->file_area_temp_to_warm_age_dx){
 			/*file_area经过FILE_AREA_TEMP_TO_COLD_AGE_DX个周期还没有被访问，则被判定是冷file_area，然后就释放该file_area的page*/
 			if(file_area_age_dx > p_hot_cold_file_global->file_area_temp_to_cold_age_dx){
+				
+				if(file_stat_in_test_base(p_file_stat_base))
+					printk("%s:2_1 file_stat:0x%llx file_area:0x%llx status:0x%x age:%d temp -> free\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,p_file_area->file_area_age);
+
 				/*有ahead标记的file_area，即便长时间没访问也不处理，而是仅仅清理file_area的ahead标记且跳过，等到下次遍历到该file_area再处理*/
 				if(file_area_in_ahead(p_file_area)){
 					clear_file_area_in_ahead(p_file_area);
@@ -4254,6 +4652,9 @@ static inline int file_stat_temp_list_file_area_solve(struct hot_cold_file_globa
 				spin_unlock(&p_file_stat_base->file_stat_lock);
 
 				scan_cold_file_area_count ++;
+
+				if(file_stat_in_test_base(p_file_stat_base))
+					printk("%s:2_2 file_stat:0x%llx file_area:0x%llx status:0x%x age:%d temp -> free\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,p_file_area->file_area_age);
 			}
 			/*温file_area移动到p_file_stat->file_area_warm链表。从file_stat->temp移动file_area到file_stat->warm链表，必须要加锁*/
 			else if(FILE_STAT_NORMAL == file_type){
@@ -4266,6 +4667,9 @@ static inline int file_stat_temp_list_file_area_solve(struct hot_cold_file_globa
 				list_move(&p_file_area->file_area_list,&p_file_stat->file_area_warm);
 				spin_unlock(&p_file_stat_base->file_stat_lock);
 				temp_to_warm_file_area_count ++;
+				
+				if(file_stat_in_test_base(p_file_stat_base))
+					printk("%s:3 file_stat:0x%llx file_area:0x%llx status:0x%x age:%d temp -> warm\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,p_file_area->file_area_age);
 			}
 		}
 	}
@@ -4340,6 +4744,9 @@ static noinline unsigned int file_stat_warm_list_file_area_solve(struct hot_cold
 		if(++ scan_file_area_count > scan_file_area_max)
 			break;
 
+		if(file_stat_in_test_base(p_file_stat_base))
+			printk("%s:1 file_stat:0x%llx file_area:0x%llx status:0x%x age:%d global_age:%d\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,p_file_area->file_area_age,p_hot_cold_file_global->global_age);
+
 		file_area_age_dx = p_hot_cold_file_global->global_age - p_file_area->file_area_age;
 		/*有热file_area标记*/
 		if(file_area_in_hot_list(p_file_area)){
@@ -4352,6 +4759,9 @@ static noinline unsigned int file_stat_warm_list_file_area_solve(struct hot_cold
 			clear_file_area_in_warm_list(p_file_area);
 			list_move(&p_file_area->file_area_list,&p_file_stat->file_area_hot);
 			warm_to_hot_file_area_count ++;
+
+			if(file_stat_in_test_base(p_file_stat_base))
+				printk("%s:2 file_stat:0x%llx file_area:0x%llx status:0x%x age:%d warm -> hot\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,p_file_area->file_area_age);
 			//spin_unlock(&p_file_stat->file_stat_lock);
 			continue;
 		}
@@ -4375,9 +4785,16 @@ static noinline unsigned int file_stat_warm_list_file_area_solve(struct hot_cold
 			p_file_stat_base->file_area_count_in_temp_list ++;
 			//spin_unlock(&p_file_stat->file_stat_lock);
 			warm_to_temp_file_area_count ++;
+			
+			if(file_stat_in_test_base(p_file_stat_base))
+				printk("%s:3 file_stat:0x%llx file_area:0x%llx status:0x%x age:%d warm -> temp\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,p_file_area->file_area_age);
 		}
 		/*否则file_stat->warm链表上长时间没访问的file_area移动的file_area移动到file_area_free_temp链表，参与内存回收，移动过程不用加锁*/
 		else if(file_area_age_dx > p_hot_cold_file_global->file_area_temp_to_cold_age_dx){
+			
+			if(file_stat_in_test_base(p_file_stat_base))
+				printk("%s:4 file_stat:0x%llx file_area:0x%llx status:0x%x age:%d warm -> free\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,p_file_area->file_area_age);
+
 			/*有ahead标记的file_area，即便长时间没访问也不处理，而是仅仅清理file_area的ahead标记且跳过，等到下次遍历到该file_area再处理*/
 			if(file_area_in_ahead(p_file_area)){
 				clear_file_area_in_ahead(p_file_area);
@@ -4403,6 +4820,9 @@ static noinline unsigned int file_stat_warm_list_file_area_solve(struct hot_cold
 			clear_file_area_in_warm_list(p_file_area);
 			set_file_area_in_free_list(p_file_area);
 			list_move(&p_file_area->file_area_list,file_area_free_temp);
+			
+			if(file_stat_in_test_base(p_file_stat_base))
+				printk("%s:5 file_stat:0x%llx file_area:0x%llx status:0x%x age:%d warm -> free\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,p_file_area->file_area_age);
 		}
 	}
 
@@ -4819,7 +5239,7 @@ static noinline unsigned int free_page_from_file_area(struct hot_cold_file_globa
 		list_splice(&file_area_have_mmap_page_head,file_area_free_temp);
 	}
 
-	if(shrink_page_printk_open1)
+	if(shrink_page_printk_open1 || file_stat_in_test_base(p_file_stat_base))
 		printk("1:%s %s %d p_hot_cold_file_global:0x%llx p_file_stat:0x%llx status:0x%x free_pages:%d\n",__func__,current->comm,current->pid,(u64)p_hot_cold_file_global,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,free_pages);
 
 	/*注意，file_stat->file_area_free_temp 和 file_stat->file_area_free 各有用处。file_area_free_temp保存每次扫描释放的
@@ -5298,6 +5718,14 @@ static inline void old_file_stat_change_to_new(struct file_stat_base *p_file_sta
 
 	spin_unlock(&p_file_stat_base_new->file_stat_lock);
 	spin_unlock(&p_file_stat_base_old->file_stat_lock);
+
+	/*如果file_stat是print_file_stat，则file_stat马上要rcu del了，则必须把print_file_stat清NULL，
+	 *保证将来不再使用这个马上要释放的file_stat*/
+	smp_mb();
+	if(p_file_stat_base_old == hot_cold_file_global_info.print_file_stat){
+		hot_cold_file_global_info.print_file_stat = NULL; 
+		printk("%s file_stat:0x%llx status:0x%x is print_file_stat!!!\n",__func__,(u64)p_file_stat_base_old,p_file_stat_base_old->file_stat_status);
+	}
 }
 /*tiny_small的file_area个数如果超过阀值则转换成small或普通文件。这里有个隐藏很深的问题，
  *   本身tiny small文件超过64个file_area就要转换成small文件，超过640个就要转换成普通文件。但是，如果tiny small

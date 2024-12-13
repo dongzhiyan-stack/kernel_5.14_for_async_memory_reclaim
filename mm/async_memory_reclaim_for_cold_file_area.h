@@ -708,6 +708,8 @@ struct hot_cold_file_global
 	unsigned long update_file_area_move_to_head_count;
 	
 	unsigned long file_stat_delete_protect;
+
+	struct file_stat_base *print_file_stat;
 };
 
 
@@ -806,6 +808,7 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	F_file_stat_in_cache_file,//cache文件，sysctl读写产生pagecache。有些cache文件可能还会被mmap映射，要与mmap文件互斥
 	F_file_stat_in_mmap_file,//mmap文件，有些mmap文件可能也会被sysctl读写产生pagecache，要与cache文件互斥
 	F_file_stat_in_from_cache_file,//mmap文件是从cache文件的global temp链表移动过来的
+	F_file_stat_in_test,
 	F_file_stat_invalid_start_index,
 
 	F_file_stat_in_delete_file,//标识该file_stat被移动到了global delete链表	
@@ -949,6 +952,7 @@ FILE_STATUS(replaced_file)
 	TEST_FILE_STATUS_ERROR_BASE(name)
 
 FILE_STATUS_BASE(delete)
+FILE_STATUS_BASE(test)
 FILE_STATUS_BASE(delete_file)
 FILE_STATUS_BASE(cache_file)
 FILE_STATUS_BASE(mmap_file)
