@@ -890,7 +890,8 @@ static noinline unsigned int check_one_file_area_cold_page_and_clear(struct hot_
 		if(folio_is_file_area_index(folio)){
 			if(print_once){
 				print_once = 0;
-				printk(KERN_ERR"%s file_area:0x%llx status:0x%x folio_is_file_area_index!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+				if(shrink_page_printk_open_important)
+				    printk(KERN_ERR"%s file_area:0x%llx status:0x%x folio_is_file_area_index!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 			}
 			continue;
 		}

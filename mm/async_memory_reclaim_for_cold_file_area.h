@@ -1303,6 +1303,7 @@ static inline void is_cold_file_area_reclaim_support_fs(struct address_space *ma
 /*****************************************************************************************************************************************************/
 extern int shrink_page_printk_open1;
 extern int shrink_page_printk_open;
+extern int shrink_page_printk_open_important;
 
 #ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY 
 /*folio非0，但不是有效的指针，即bit63是0，说明保存在file_area->folio[]中的是file_area的索引，不是有效的page指针*/
@@ -1569,6 +1570,15 @@ static inline long get_file_stat_type(struct file_stat_base *file_stat_base)
  *  最后，还有一个很重要的地方，如果 is_file_stat_mapping_error()里使用 p_file_stat_base->mapping->rh_reserved1是，
  *  该文件inode被iput()并发释放了，p_file_stat_base->mapping就是无效内存访问了。要防护这种情况，于是is_file_stat_mapping_error()
  *  里还要加上rcu_read_lock()
+ *
+ *  过了几个星期，突然再看这个并发方案，突然有个疑问。如果file_stat被iput()提前释放了，set_file_stat in delete，
+ *  p_file_stat_base->mapping->rh_reserved1赋值0。之后inode和mapping就是无效内存了。然后异步内存回收线程执行
+ *  is_file_stat_mapping_error()用到if(p_file_stat_base != p_file_stat_base->mapping->rh_reserved1)，
+ *  p_file_stat_base->mapping->rh_reserved1岂不是无效内存访问？没关系，又不向这个内存写数据，只是读。
+ *  此时p_file_stat_base->mapping->rh_reserved1是0，is_file_stat_mapping_error()中
+ *  if(p_file_stat_base != p_file_stat_base->mapping->rh_reserved1)就不成立了，然后
+ *  if(file_stat_in_delete_base(p_file_stat_base))也成立。如果这个文件inode又被新的进程分配了，则
+ *  inode->mapping->rh_reserved1就会指向新的file_stat，上边的分析也成立
  *
  * 1:rcu_read_lock()防止inode被iput()释放了，导致 p_file_stat_base->mapping->rh_reserved1无效内存访问。
  * 2:rcu_read_lock()加printk打印会导致休眠吧，这点要控制
@@ -1846,6 +1856,8 @@ static inline struct file_stat_base *add_mmap_file_stat_to_list(struct address_s
 		BUG();
 
 
+	/*新分配的file_stat的recent_access_age赋值global age，否则就是0，可能会被识别为冷文件而迅速释放掉*/
+	p_file_stat_base->recent_access_age = hot_cold_file_global_info.global_age;
 	//设置file_stat的in mmap文件状态
 	hot_cold_file_global_info.mmap_file_stat_count++;
 	spin_unlock(&hot_cold_file_global_info.mmap_file_global_lock);
@@ -1894,6 +1906,8 @@ static inline struct file_area *file_area_alloc_and_init(unsigned int area_index
 out:
 	spin_unlock(&p_file_stat_base->file_stat_lock);
 
+	/*新分配的file_area，不管有没有访问都赋值当前global_age，否则就是0，可能会被识别为冷file_area而迅速释放掉*/
+	p_file_area->file_area_age = hot_cold_file_global_info.global_age; 
 	return p_file_area;
 }
 /*令inode引用计数减1，如果inode引用计数是0则释放inode结构*/
@@ -2026,7 +2040,9 @@ static void inline list_move_enhance(struct list_head *head,struct list_head *fi
 
 			old_head->prev = tail;
 			new_tail->next = head;
-			printk("%ps->list_move_enhance() head:0x%llx ok\n",__builtin_return_address(0),(u64)head);
+
+			if(shrink_page_printk_open_important)
+			    printk("%ps->list_move_enhance() head:0x%llx ok\n",__builtin_return_address(0),(u64)head);
 		}else
 			printk("%ps->list_move_enhance() head:0x%llx first:0x%llx head->next:0x%llx %d fail\n",__builtin_return_address(0),(u64)head,(u64)first,(u64)head->next,list_is_last(tail,head));
 	}

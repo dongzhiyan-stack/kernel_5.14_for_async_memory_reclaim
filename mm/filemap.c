@@ -5007,7 +5007,7 @@ retry:
 		return -EINTR;
 
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
-	if(filp->f_path.dentry && !mapping->rh_reserved3){
+	if(0 && filp->f_path.dentry && !mapping->rh_reserved3){
 		struct dentry *dentry,*parent;
 		dentry = filp->f_path.dentry;
 		parent = dentry->d_parent;
