@@ -87,6 +87,10 @@ static void change_memory_reclaim_age_dx(struct hot_cold_file_global *p_hot_cold
 static void i_file_area_callback(struct rcu_head *head)
 {
 	struct file_area *p_file_area = container_of(head, struct file_area, i_rcu);
+	/*要释放的file_area如果page bit位还存在，则触发crash。正常肯定得是0*/
+	if(file_area_have_page(p_file_area))
+		panic("%s file_area:0x%llx file_area_state:0x%x has page error!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+
 	kmem_cache_free(hot_cold_file_global_info.file_area_cachep,p_file_area);
 }
 static void i_file_stat_callback(struct rcu_head *head)
@@ -103,7 +107,7 @@ static void i_file_stat_callback(struct rcu_head *head)
 }
 
 /*在判定一个file_area长时间没人访问后，执行该函数delete file_area。必须考虑此时有进程正好要并发访问这个file_area*/
-int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base * p_file_stat_base,struct file_area *p_file_area)
+static inline int cold_file_area_delete_lock(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base * p_file_stat_base,struct file_area *p_file_area)
 {
 #ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY	
 	XA_STATE(xas, &((struct address_space *)(p_file_stat_base->mapping))->i_pages, -1);
@@ -177,6 +181,8 @@ int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 	p_file_stat_base->file_area_count --;
 	list_del_rcu(&p_file_area->file_area_list);
 	spin_unlock(&p_file_stat_base->file_stat_lock);
+	/*要释放的file_area清理掉in_free标记，表示该file_area要被释放了*/
+	clear_file_area_in_free_list(p_file_area);
 
 	/*rcu延迟释放file_area结构*/
 	call_rcu(&p_file_area->i_rcu, i_file_area_callback);
@@ -184,6 +190,19 @@ int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 	if(shrink_page_printk_open1)
 		FILE_AREA_PRINT("%s file_area:0x%llx delete !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area);
 
+	return 0;
+}
+int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area)
+{
+	/* 释放file_area，要对xarray tree对应槽位赋值NULL，因此必须保证inode不能被并发释放，要加锁。但是不能返回-1，因为
+	 * 返回-1是说明该file_area在释放时又分配page了，要设置该file_area in_refault。如果该文件inode被释放了，会在iput()
+	 * 把file_stat移动到global detele链表处理，更不能返回-1导致设置file_area in_refault，其实设置了好像也没事!!!!!!!*/
+	if(0 == file_inode_lock(p_file_stat_base))
+		return 0;
+
+	cold_file_area_delete_lock(p_hot_cold_file_global,p_file_stat_base,p_file_area);
+
+	file_inode_unlock(p_file_stat_base);
 	return 0;
 }
 EXPORT_SYMBOL(cold_file_area_delete);
@@ -226,6 +245,9 @@ int cold_file_area_delete_quick(struct hot_cold_file_global *p_hot_cold_file_glo
 	p_file_stat_base->file_area_count --;
 	list_del_rcu(&p_file_area->file_area_list);
 	//spin_unlock(&p_file_stat->file_stat_lock);
+
+	/*要释放的file_area清理掉in_free标记，表示该file_area要被释放了*/
+	clear_file_area_in_free_list(p_file_area);
 
 	/*隐藏重点!!!!!!!!!!!，此时可能有进程正通过proc查询该文件的file_stat、file_area、page统计信息，正在用他们。因此也不能
 	 *kmem_cache_free()直接释放该数据结构，也必须得通过rcu延迟释放，并且，这些通过proc查询的进程，必须得先rcu_read_lock，
@@ -728,7 +750,15 @@ err:
 }
 void disable_mapping_file_area(struct inode *inode)
 {
-	__destroy_inode_handler_post(inode);
+	/*如果inode->i_mapping->rh_reserved1大于1，说明是正常的支持file_area读写的文件系统的文件inode，则执行__destroy_inode_handler_post()
+	 *处理inode->i_mapping。否则inode->i_mapping->rh_reserved1是1，说明是支持file_area读写的文件系统的目录inode，或者是文件inode，
+	 *但是没有读写分配page，inode->i_mapping->rh_reserved1保持1。这种情况直接else分支，令inode->i_mapping->rh_reserved1清0即可。注意，
+	 *这种inode绝对不能执行__destroy_inode_handler_post()，因为这种inode没有分配file_stat，不能设置file_stat in delete，强制执行
+	 *会crash的*/
+	if(IS_SUPPORT_FILE_AREA_READ_WRITE(inode->i_mapping))
+		__destroy_inode_handler_post(inode);
+	else
+		inode->i_mapping->rh_reserved1 = 0;
 }
 EXPORT_SYMBOL(disable_mapping_file_area);
 
@@ -946,7 +976,7 @@ static int inline is_file_area_hot(struct file_area *p_file_area)
  * file_stat->hot、refault、warm链表上file_area被多次访问，只是设置file_area的ahead标记，不会再把file_area移动到
  * 各自的链表头。还是为了减少性能损耗！简单说，file_area被多次访问只是设置ahead标记，而不是移动到各自file_stat链表头
  * */
-void hot_file_update_file_status(struct address_space *mapping,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,int access_count,int read_or_write)
+void hot_file_update_file_status(struct address_space *mapping,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,int access_count,int read_or_write,unsigned long index)
 {
 	//检测file_area被访问的次数，判断是否有必要移动到file_stat->hot、refault、temp等链表头
 	int file_area_move_list_head = is_file_area_move_list_head(p_file_area);
@@ -956,6 +986,13 @@ void hot_file_update_file_status(struct address_space *mapping,struct file_stat_
 
 	if(!enable_update_file_area_age)
 		return;
+
+	if(p_file_stat_base->mapping->rh_reserved2){
+        printk("%s %d inode:0x%llx mapped:%d index:%ld %d\n",current->comm,current->pid,(u64)p_file_stat_base->mapping->host,mapping_mapped(mapping),index,read_or_write);
+	}
+	if(p_file_stat_base->mapping->rh_reserved3 && read_or_write){
+		dump_stack();
+	}
 
 	//file_area_in_update_count ++;
 	/*hot_cold_file_global_info.global_age更新了，把最新的global age更新到本次访问的file_area->file_area_age。并对
@@ -2267,7 +2304,7 @@ void get_file_name(char *file_name_path,struct file_stat_base *p_file_stat_base)
 	rcu_read_lock();
 	/*必须 hlist_empty()判断文件inode是否有dentry，没有则返回true。这里通过inode和dentry获取文件名字，必须 inode->i_lock加锁 
 	 *同时 增加inode和dentry的应用计数，否则可能正使用时inode和dentry被其他进程释放了*/
-	if(p_file_stat_base->mapping && p_file_stat_base->mapping->host && !hlist_empty(&p_file_stat_base->mapping->host->i_dentry)){
+	if(p_file_stat_base->mapping && p_file_stat_base->mapping->host/* && !hlist_empty(&p_file_stat_base->mapping->host->i_dentry)*/){
 		inode = p_file_stat_base->mapping->host;
 		spin_lock(&inode->i_lock);
 		/*如果inode的引用计数是0，说明inode已经在释放环节了，不能再使用了。现在发现不一定，改为hlist_empty(&inode->i_dentry)判断*/
@@ -2278,6 +2315,8 @@ void get_file_name(char *file_name_path,struct file_stat_base *p_file_stat_base)
 				snprintf(file_name_path,MAX_FILE_NAME_LEN - 2,"i_count:%d dentry:0x%llx %s",atomic_read(&inode->i_count),(u64)dentry,/*dentry->d_iname*/dentry->d_name.name);
 			}
 			//dput(dentry);
+		}else{
+			snprintf(file_name_path,MAX_FILE_NAME_LEN - 2,"i_count:%d dentry:0x%llx lru_list_empty:%d",atomic_read(&inode->i_count),(u64)inode->i_dentry.first,list_empty(&inode->i_lru));
 		}
 		spin_unlock(&inode->i_lock);
 	}
@@ -2357,7 +2396,7 @@ static int print_one_list_file_stat(struct hot_cold_file_global *p_hot_cold_file
 		  但执行这个函数时，必须禁止执行cold_file_stat_delete_all_file_area()释放掉file_stat!!!!!!!!!!!!!!!!!!!!*/
 		smp_rmb();//内存屏障获取最新的file_stat状态
 		if(0 == file_stat_in_delete_base(p_file_stat_base)){
-			if(p_file_stat_base->file_area_count > 1){
+			if(p_file_stat_base->file_area_count > 0){
 				*file_stat_many_file_area_count = *file_stat_many_file_area_count + 1;
 
 				memset(file_name_path,0,sizeof(&file_name_path));
@@ -2714,6 +2753,9 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 					unlock_page(page);
 					continue;
 				}
+				
+				if(!is_file_area_page_bit_set(p_file_area,i))
+				    panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x page:0x%llx flags:0x%lx file_area_bit error!!!!!!\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,(u64)page,page->flags);
 
 				//if成立条件如果前后的两个page的lruvec不一样 或者 遍历的page数达到32，强制进行一次内存回收
 				if( (move_page_count >= SWAP_CLUSTER_MAX) ||

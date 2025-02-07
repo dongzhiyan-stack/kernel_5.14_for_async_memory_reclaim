@@ -288,7 +288,15 @@ static void destroy_inode(struct inode *inode)
 
 	BUG_ON(!list_empty(&inode->i_lru));
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL	
-	if(inode->i_mapping && IS_SUPPORT_FILE_AREA_READ_WRITE(inode->i_mapping)){
+	/* 重大bug，这里错误的要求inode->i_mapping->rh_reservh_1大于1才判定该inode是file_area inode，然后才会对inode->i_mapping->rh_reservh_1
+	 * 清0。但是有两个特殊情况 1:目录的inode，没有文件页page，不会分配file_stat，inode->i_mapping->rh_reservh_1始终是1。2:文件inode分配
+	 * inode后，但没有读写分配文件页，就被iput()释放了，到这里时inode->i_mapping->rh_reservh_1始终是1。此时也必须作为file_area inode
+	 * 处理，对inode->i_mapping->rh_reservh_1清0。否则，有些文件系统分配到该inode后，不会对inode全清0，则inode->i_mapping->rh_reservh_1
+	 * 保持原有的1。如果这个文件系统不支持file_area inode，则分配inode后会被误判为file_area inode。保存在xarray tree的file_area指针的
+	 * bit63清0，等从xarray tree获取该file_area指针后，会作为指针而使用，因bit63是0而非法内存访问而crash
+	 * */
+	//if(inode->i_mapping && IS_SUPPORT_FILE_AREA_READ_WRITE(inode->i_mapping)){
+	if(inode->i_mapping && IS_SUPPORT_FILE_AREA(inode->i_mapping)){
 		disable_mapping_file_area(inode);
 	}
 #endif	

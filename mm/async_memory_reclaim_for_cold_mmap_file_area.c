@@ -925,6 +925,10 @@ static noinline unsigned int check_one_file_area_cold_page_and_clear(struct hot_
 					unlock_page(page);
 					continue;
 				}
+
+			    if(!is_file_area_page_bit_set(p_file_area,i))
+				    panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x page:0x%llx flags:0x%lx file_area_bit error!!!!!!\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,(u64)page,page->flags);
+
 				/*如果page不是mmap的要跳过。一个文件可能是cache文件，同时也被mmap映射，因此这类的文件页page可能不是mmap的，只是cache page
 				 *这个判断必须放到lock_page后边*/
 				if (!page_mapped(page)){
@@ -2939,6 +2943,9 @@ next_file_area:
 	/*如果到这里file_stat->file_area_temp链表时空的，说明上边的file_area都被遍历过了，那就令p_file_stat->file_area_last = NULL。
 	 *否则令p_file_stat->file_area_last指向本次最后在file_stat->file_area_temp链表上遍历的file_area的上一个file_area*/
 	if(!list_empty(&p_file_stat_base->file_area_temp)){
+		if(&p_file_area->file_area_list  == &p_file_stat_base->file_area_temp) 
+			panic("%s file_stat:0x%llx is list_head\n",__func__,(u64)p_file_stat_base);
+
 		/*下个周期直接从p_file_stat->file_area_last指向的file_area开始扫描*/
 		if(!list_is_first(&p_file_area->file_area_list,&p_file_stat_base->file_area_temp))
 			p_file_stat_base->file_area_last = list_prev_entry(p_file_area,file_area_list);

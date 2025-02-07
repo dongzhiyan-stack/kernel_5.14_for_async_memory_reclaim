@@ -2177,7 +2177,7 @@ find_page_from_file_area:
 				panic("%s mapping:0x%llx p_file_area:0x%llx page:0x%llx not dirty\n",__func__,(u64)mapping,(u64)p_file_area,(u64)page);
 			}
 			/*检测查找到的page是否正确，不是则crash*/
-			CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,(struct page *)page,p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
+			CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,mapping,(struct page *)page,p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
 
 			set_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_TOWRITE);
 		}
@@ -2631,7 +2631,7 @@ void __folio_mark_dirty_for_file_area(struct folio *folio, struct address_space 
 		p_file_area = entry_to_file_area(p_file_area);
 
 		/*检测查找到的page是否正确，不是则crash*/
-		CHECK_FOLIO_FROM_FILE_AREA_VALID_MARK(&xas,folio,p_file_area->pages[page_offset_in_file_area],p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
+		CHECK_FOLIO_FROM_FILE_AREA_VALID_MARK(&xas,mapping,folio,p_file_area->pages[page_offset_in_file_area],p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
 
 		/*先标记file_area是dirtry，然后在file_area的page的dirty*/
 		xas_set_mark(&xas, PAGECACHE_TAG_DIRTY);
@@ -3003,7 +3003,7 @@ bool __folio_end_writeback_for_file_area(struct folio *folio)
 			}
 			p_file_area = entry_to_file_area(p_file_area);
 			/*检测查找到的page是否正确，不是则crash*/
-			CHECK_FOLIO_FROM_FILE_AREA_VALID_MARK(&xas,folio,p_file_area->pages[page_offset_in_file_area],p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
+			CHECK_FOLIO_FROM_FILE_AREA_VALID_MARK(&xas,mapping,folio,p_file_area->pages[page_offset_in_file_area],p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
 
 			/*先清理file_area的writeback标记，再清理file_area里的page的writeback mark。错了，只有file_area的4个page的writeback
 			 * mark全被清理了，才能清理file_area的writeback mark标记位，因此把清理file_area的writeback mark放到下边了*/
@@ -3153,7 +3153,7 @@ bool __folio_start_writeback_for_file_area(struct folio *folio, bool keep_write)
 		p_file_area = entry_to_file_area(p_file_area);
 
 		/*检测查找到的page是否正确，不是则crash*/
-		CHECK_FOLIO_FROM_FILE_AREA_VALID_MARK(&xas,folio,p_file_area->pages[page_offset_in_file_area],p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
+		CHECK_FOLIO_FROM_FILE_AREA_VALID_MARK(&xas,mapping,folio,p_file_area->pages[page_offset_in_file_area],p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
 
 		ret = folio_test_set_writeback(folio);
 		if (!ret) {
