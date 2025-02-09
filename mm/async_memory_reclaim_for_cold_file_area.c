@@ -197,12 +197,16 @@ int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 	/* 释放file_area，要对xarray tree对应槽位赋值NULL，因此必须保证inode不能被并发释放，要加锁。但是不能返回-1，因为
 	 * 返回-1是说明该file_area在释放时又分配page了，要设置该file_area in_refault。如果该文件inode被释放了，会在iput()
 	 * 把file_stat移动到global detele链表处理，更不能返回-1导致设置file_area in_refault，其实设置了好像也没事!!!!!!!*/
+
+#if 0//这个加锁放到遍历file_stat内存回收，最初执行的get_file_area_from_file_stat_list()函数里了，这里不再重复加锁
 	if(0 == file_inode_lock(p_file_stat_base))
 		return 0;
-
+#endif
 	cold_file_area_delete_lock(p_hot_cold_file_global,p_file_stat_base,p_file_area);
 
+#if 0
 	file_inode_unlock(p_file_stat_base);
+#endif
 	return 0;
 }
 EXPORT_SYMBOL(cold_file_area_delete);
@@ -309,6 +313,10 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 	//rcu_read_lock();
 	//lock_file_stat(p_file_stat_del,0);
 	//spin_lock(&p_file_stat_del->file_stat_lock);
+	
+	/* cold_file_stat_delete()还需要对inode加锁吗，因为已经在异步内存回收线程遍历file_stat，探测内存回收而执行的get_file_area_from_file_stat_list()
+	 * 函数执行file_inode_lock()过了。需要的，因为会执行这个函数的，异步内存回收线程还会在file_stat_has_zero_file_area_manage()
+	 * 函数，对所有的零个file_area的file_stat进行探测，然后释放file_stat，这中file_stat跟异步内存回收线程进行内存回收的file_stat是两码事*/
 	if(0 == file_inode_lock(p_file_stat_base_del))
 		return ret;
 
@@ -2647,10 +2655,13 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 
 	//lock_file_stat(p_file_stat,0);
 	//rcu_read_lock();
+	//
+#if 0//这个加锁放到遍历file_stat内存回收，最初执行的get_file_area_from_file_stat_list()函数里了，这里不再重复加锁
 	if(0 == file_inode_lock(p_file_stat_base)){
 		printk("%s file_stat:0x%llx status 0x%x inode lock fail\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
 		return 0;
 	}
+#endif	
 	/*执行到这里，就不用担心该inode会被其他进程iput释放掉*/
 
 	mapping = p_file_stat_base->mapping;
@@ -2825,8 +2836,9 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 
 	//unlock_file_stat(p_file_stat);
 	//rcu_read_unlock();
+#if 0
 	file_inode_unlock(p_file_stat_base);
-
+#endif
 	//当函数退出时，如果move_page_count大于0，则强制回收这些page
 	if(move_page_count > 0){
 		if(lruvec)
@@ -3634,7 +3646,11 @@ static int walk_throuth_all_file_area(struct hot_cold_file_global *p_hot_cold_fi
 #endif
 static inline void move_file_stat_to_global_delete_list(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,unsigned char file_type)
 {
-	spin_lock_irq(&p_hot_cold_file_global->global_lock);
+	if(file_stat_in_cache_file_base(p_file_stat_base))
+		spin_lock_irq(&p_hot_cold_file_global->global_lock);
+	else
+		spin_lock_irq(&p_hot_cold_file_global->mmap_file_global_lock);
+
 	/*如果file_stat有in_delete标记则移动到global delete链表，但如果有in_delete_file标记则crash，global temp链表上的file_stat不可能有in_delete_file标记*/
 	if(!file_stat_in_delete_base(p_file_stat_base) || file_stat_in_delete_file_base(p_file_stat_base))
 		panic("%s p_file_stat:0x%llx status:0x%x delete status fial\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
@@ -3657,7 +3673,11 @@ static inline void move_file_stat_to_global_delete_list(struct hot_cold_file_glo
 		//list_move(&p_file_stat_tiny_small->hot_cold_file_list,&hot_cold_file_global_info.file_stat_tiny_small_delete_head);
 		list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_tiny_small_delete_head);
 	}
-	spin_unlock_irq(&p_hot_cold_file_global->global_lock);
+
+	if(file_stat_in_cache_file_base(p_file_stat_base))
+	    spin_unlock_irq(&p_hot_cold_file_global->global_lock);
+	else
+	    spin_unlock_irq(&p_hot_cold_file_global->mmap_file_global_lock);
 }
 
 /*遍历global file_stat_zero_file_area_head链表上的file_stat，如果file_stat对应文件长时间不被访问杂释放掉file_stat。如果file_stat对应文件又被访问了，
@@ -6126,6 +6146,9 @@ static inline int cache_file_change_to_mmap_file(struct hot_cold_file_global *p_
 	 *为什么要限定只有tiny small file才能从cache file转成mmap file？想想没有这个必要，实际测试有很多normal cache文件实际是mmap
 	 *文件。只要限定file_area都是in_temp的file_area就可以了
 	 */
+
+	/* 有个隐藏很深的bug，如果此时正在使用file_stat的mapping的，但是给文件inode被iput了，实际测试遇到过，导致crash，要file_inode_lock
+	 * 防护inode被释放。这个加锁操作放到get_file_area_from_file_stat_list()函数里了*/
 	if(mapping_mapped((struct address_space *)p_file_stat_base->mapping) && (p_file_stat_base->file_area_count == p_file_stat_base->file_area_count_in_temp_list)){
 		//scan_move_to_mmap_head_file_stat_count ++;
 		cache_file_stat_move_to_mmap_head(p_hot_cold_file_global,p_file_stat_base,file_type);
@@ -6498,6 +6521,21 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 		 *这个检测必须放到遍历file_stat最开头，防止跳过*/
 		is_file_stat_mapping_error(p_file_stat_base);
 
+		/* 重大隐藏bug：在下边遍历文件file_stat过程，有多出会用到该文件mapping、xarray tree、mapping->i_mmap.rb_root。
+		 * 比如cold_file_stat_delete()、cold_file_area_delete()、cache_file_change_to_mmap_file()。这些都得确保该文件inode不能被iput()释放了，
+		 * 否则就是无效内存访问。实际测试时确实遇到过上边两处，因为inode被释放了而crash。当然可以单独在这两处单独
+		 * file_inode_lock()，但是万一后期又有其他代码使用mapping、xarray tree、mapping->i_mmap.rb_root，万一忘了
+		 * 加file_inode_lock()，那就又是要访问inode无效内存了。干脆在遍历文件file_stat最初就加file_inode_lock，
+		 * 一劳永逸，之后就能绝对保证该文件inode不会被释放*/
+		if(0 == file_inode_lock(p_file_stat_base)){
+			printk("%s file_stat:0x%llx status 0x%x inode lock fail\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+			if(!file_stat_in_delete_base(p_file_stat_base))
+				panic("%s file_stat:0x%llx not delete status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+			move_file_stat_to_global_delete_list(p_hot_cold_file_global,p_file_stat_base,file_type);
+			goto next_file_stat;
+		}
 		/*测试cache文件是否能转成mmap文件，是的话转成mmap文件，然后直接continue遍历下一个文件。但是却
 		 *引入了一个重大的隐藏bug。continue会导致没有执行file_stat_delete_protect_lock(1)，就跳到for
 		 *循环最前边，去遍历下一个file_stat。此时没有加锁，遍历到的file_stat就可能被并发iput()而非法。
@@ -6508,7 +6546,7 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 			continue;
 #else
 		if(cache_file_change_to_mmap_file(p_hot_cold_file_global,p_file_stat_base,file_type))
-			goto next_file_stat;
+			goto next_file_stat_unlock;
 #endif		
 		/* tiny small文件的file_area个数如果超过阀值则转换成small或normal文件等。这个操作必须放到get_file_area_from_file_stat_list_common()
 		 * 函数里遍历该file_stat的file_area前边，以保证该文件的in_refault、in_hot、in_free属性的file_area都集中在tiny small->temp链表尾的64
@@ -6528,6 +6566,10 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 			/*否则，normal、small、tiny small这3大类文件，按照标准流程处理他们的各种file_area*/
 			scan_file_area_count += get_file_area_from_file_stat_list_common(p_hot_cold_file_global,p_file_stat_base,scan_file_area_max,file_stat_list_type,file_type);
 		}
+
+next_file_stat_unlock:
+
+	    file_inode_unlock(p_file_stat_base);
 
 next_file_stat:
 		file_stat_delete_protect_lock(1);
