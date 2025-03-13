@@ -738,19 +738,23 @@ enum file_area_status{
 //清理file_area的状态，在哪个链表
 #define CLEAR_FILE_AREA_LIST_STATUS(list_name) \
 	static inline void clear_file_area_in_##list_name(struct file_area *p_file_area)\
-{ p_file_area->file_area_state &= ~(1 << F_file_area_in_##list_name);}
+{clear_bit_unlock(F_file_area_in_##list_name,(unsigned long *)&p_file_area->file_area_state);}
+//{ p_file_area->file_area_state &= ~(1 << F_file_area_in_##list_name);}
 //设置file_area在哪个链表的状态
 #define SET_FILE_AREA_LIST_STATUS(list_name) \
 	static inline void set_file_area_in_##list_name(struct file_area *p_file_area)\
-{ p_file_area->file_area_state |= (1 << F_file_area_in_##list_name);}
+{set_bit(F_file_area_in_##list_name,(unsigned long *)&p_file_area->file_area_state);}
+//{ p_file_area->file_area_state |= (1 << F_file_area_in_##list_name);}
 //测试file_area在哪个链表
 #define TEST_FILE_AREA_LIST_STATUS(list_name) \
 	static inline int file_area_in_##list_name(struct file_area *p_file_area)\
-{return p_file_area->file_area_state & (1 << F_file_area_in_##list_name);}
+{return test_bit(F_file_area_in_##list_name,(unsigned long *)&p_file_area->file_area_state);}
+//{return p_file_area->file_area_state & (1 << F_file_area_in_##list_name);}
 
+/*这个测试file_area_state的error状态，无法使用set_bit/clear_bit形式，需要特别注意!!!!!!!!!*/
 #define TEST_FILE_AREA_LIST_STATUS_ERROR(list_name) \
 	static inline int file_area_in_##list_name##_error(struct file_area *p_file_area)\
-{return p_file_area->file_area_state & (~(1 << F_file_area_in_##list_name) & FILE_AREA_LIST_MASK);}
+{return READ_ONCE(p_file_area->file_area_state) & (~(1 << F_file_area_in_##list_name) & FILE_AREA_LIST_MASK);}
 
 #define FILE_AREA_LIST_STATUS(list_name)     \
 	CLEAR_FILE_AREA_LIST_STATUS(list_name) \
@@ -768,15 +772,18 @@ FILE_AREA_LIST_STATUS(mapcount_list)
 	//清理file_area的状态，在哪个链表
 #define CLEAR_FILE_AREA_STATUS(status) \
 		static inline void clear_file_area_in_##status(struct file_area *p_file_area)\
-{ p_file_area->file_area_state &= ~(1 << F_file_area_in_##status);}
+{clear_bit_unlock(F_file_area_in_##status,(unsigned long *)&p_file_area->file_area_state);}
+//{ p_file_area->file_area_state &= ~(1 << F_file_area_in_##status);}
 	//设置file_area在哪个链表的状态
 #define SET_FILE_AREA_STATUS(status) \
 		static inline void set_file_area_in_##status(struct file_area *p_file_area)\
-{ p_file_area->file_area_state |= (1 << F_file_area_in_##status);}
+{set_bit(F_file_area_in_##status,(unsigned long *)&p_file_area->file_area_state);}
+//{ p_file_area->file_area_state |= (1 << F_file_area_in_##status);}
 	//测试file_area在哪个链表
 #define TEST_FILE_AREA_STATUS(status) \
 		static inline int file_area_in_##status(struct file_area *p_file_area)\
-{return p_file_area->file_area_state & (1 << F_file_area_in_##status);}
+{return test_bit(F_file_area_in_##status,(unsigned long *)&p_file_area->file_area_state);}
+//{return p_file_area->file_area_state & (1 << F_file_area_in_##status);}
 
 #define FILE_AREA_STATUS(status)     \
 		CLEAR_FILE_AREA_STATUS(status) \
@@ -1125,6 +1132,139 @@ static inline int is_file_area_entry(void *file_area_entry)
 	//最高的4个bit位依次是 0、1、1、1 则说明是file_area_entry，bit0和bit1也得是1
 	return ((unsigned long)file_area_entry & 0xF000000000000003) == 0x7000000000000000;
 }
+
+#if 1
+static inline void clear_file_area_page_bit(struct file_area *p_file_area,unsigned char page_offset_in_file_area)
+{	
+	//page在 p_file_area->file_area_state对应的bit位清0
+	if (!test_and_clear_bit(PAGE_BIT_OFFSET_IN_FILE_AREA_BASE + page_offset_in_file_area , (unsigned long *)&p_file_area->file_area_state))
+		panic("%s file_area:0x%llx file_area_state:0x%x page_offset_in_file_area:%d already clear\n",__func__,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area);
+}
+static inline void set_file_area_page_bit(struct file_area *p_file_area,unsigned char page_offset_in_file_area)
+{
+	//page在 p_file_area->file_area_state对应的bit位置1
+	if(test_and_set_bit(PAGE_BIT_OFFSET_IN_FILE_AREA_BASE + page_offset_in_file_area,(unsigned long *)&p_file_area->file_area_state))
+		panic("%s file_area:0x%llx file_area_state:0x%x page_offset_in_file_area:%d already set\n",__func__,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area);
+}
+//测试page_offset_in_file_area这个位置的page在p_file_area->file_area_state对应的bit位是否置1了
+/*这个测试file_area_state的error状态，无法使用set_bit/clear_bit形式，需要特别注意!!!!!!!!!*/
+static inline int is_file_area_page_bit_set(struct file_area *p_file_area,unsigned char page_offset_in_file_area)
+{
+	//unsigned int file_area_page_bit_set = 1 << (PAGE_BIT_OFFSET_IN_FILE_AREA_BASE + page_offset_in_file_area);
+	unsigned int file_area_page_bit_set = (PAGE_BIT_OFFSET_IN_FILE_AREA_BASE + page_offset_in_file_area);
+
+	//return (READ_ONCE(p_file_area->file_area_state) & file_area_page_bit_set);
+	return (test_bit(file_area_page_bit_set,(unsigned long *)&p_file_area->file_area_state));
+}
+/*这个测试file_area_state的error状态，无法使用set_bit/clear_bit形式，需要特别注意!!!!!!!!!*/
+static inline int file_area_have_page(struct file_area *p_file_area)
+{
+	return  (READ_ONCE(p_file_area->file_area_state) & ~((1 << PAGE_BIT_OFFSET_IN_FILE_AREA_BASE) - 1));//0XF000 0000
+}
+
+/*探测file_area里的page是读还是写*/
+static inline void set_file_area_page_read(struct file_area *p_file_area/*,unsigned char page_offset_in_file_area*/)
+{
+	set_file_area_in_read(p_file_area);
+}
+static inline void clear_file_area_page_read(struct file_area *p_file_area/*,unsigned char page_offset_in_file_area*/)
+{
+	clear_file_area_in_read(p_file_area);
+}
+static inline int file_area_page_is_read(struct file_area *p_file_area/*,unsigned char page_offset_in_file_area*/)
+{
+	return  file_area_in_read(p_file_area);
+}
+
+/*清理file_area所有的towrite、dirty、writeback的mark标记。这个函数是在把file_area从xarray tree剔除时执行的，之后file_area是无效的，有必要吗????????????*/
+static inline void clear_file_area_towrite_dirty_writeback_mark(struct file_area *p_file_area)
+{
+
+}
+static inline void clear_file_area_page_mark_bit(struct file_area *p_file_area,unsigned char page_offset_in_file_area,xa_mark_t type)
+{
+	unsigned int file_area_page_bit_clear;
+
+	if(PAGECACHE_TAG_DIRTY == type){
+		file_area_page_bit_clear =  DIRTY_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area;
+	}else if (PAGECACHE_TAG_WRITEBACK == type){
+		file_area_page_bit_clear = WRITEBACK_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area;
+	}else{
+		if(PAGECACHE_TAG_TOWRITE != type)
+			panic("%s file_area:0x%llx file_area_state:0x%x page_offset_in_file_area:%d type:%d\n",__func__,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,type);
+
+		file_area_page_bit_clear = TOWRITE_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area;
+	}
+	//page在 p_file_area->file_area_state对应的bit位清0
+	clear_bit_unlock(file_area_page_bit_clear,(unsigned long *)&p_file_area->file_area_state);
+
+}
+static inline void set_file_area_page_mark_bit(struct file_area *p_file_area,unsigned char page_offset_in_file_area,xa_mark_t type)
+{
+	unsigned int file_area_page_mark_bit_set;
+
+	if(PAGECACHE_TAG_DIRTY == type){
+		file_area_page_mark_bit_set = DIRTY_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area;
+	}else if (PAGECACHE_TAG_WRITEBACK == type){
+		file_area_page_mark_bit_set = WRITEBACK_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area;
+	}else{
+		if(PAGECACHE_TAG_TOWRITE != type)
+			panic("%s file_area:0x%llx file_area_state:0x%x page_offset_in_file_area:%d type:%d\n",__func__,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,type);
+
+		file_area_page_mark_bit_set = TOWRITE_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area;
+	}
+
+	//page在 p_file_area->file_area_state对应的bit位置1
+	set_bit(file_area_page_mark_bit_set,(unsigned long *)&p_file_area->file_area_state);
+}
+//测试page_offset_in_file_area这个位置的page在p_file_area->file_area_state对应的bit位是否置1了
+static inline int is_file_area_page_mark_bit_set(struct file_area *p_file_area,unsigned char page_offset_in_file_area,xa_mark_t type)
+{
+	unsigned int file_area_page_mark_bit_set;
+
+	if(PAGECACHE_TAG_DIRTY == type){
+		file_area_page_mark_bit_set = DIRTY_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area;
+	}else if (PAGECACHE_TAG_WRITEBACK == type){
+		file_area_page_mark_bit_set = WRITEBACK_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area;
+	}else{
+		if(PAGECACHE_TAG_TOWRITE != type)
+			panic("%s file_area:0x%llx file_area_state:0x%x page_offset_in_file_area:%d type:%d\n",__func__,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,type);
+
+		file_area_page_mark_bit_set = TOWRITE_MARK_IN_FILE_AREA_BASE + page_offset_in_file_area;
+	}
+
+	return (test_bit(file_area_page_mark_bit_set,(unsigned long *)&p_file_area->file_area_state));
+}
+
+/*统计有多少个 mark page置位了，比如file_area有3个page是writeback，则返回3*/
+/*这个测试file_area_state的error状态，无法使用set_bit/clear_bit形式，需要特别注意!!!!!!!!!*/
+static inline int file_area_page_mark_bit_count(struct file_area *p_file_area,char type)
+{
+	unsigned int file_area_page_mark;
+	int count = 0;
+	unsigned long page_mark_mask = (1 << PAGE_COUNT_IN_AREA) - 1;/*与上0xF，得到4个bit哪些置位0*/
+
+	if(PAGECACHE_TAG_DIRTY == type){
+		file_area_page_mark = (READ_ONCE(p_file_area->file_area_state) >> DIRTY_MARK_IN_FILE_AREA_BASE) & page_mark_mask;
+	}else if (PAGECACHE_TAG_WRITEBACK == type){
+		file_area_page_mark = (READ_ONCE(p_file_area->file_area_state) >> WRITEBACK_MARK_IN_FILE_AREA_BASE) & page_mark_mask;
+	}else{
+		if(PAGECACHE_TAG_TOWRITE != type)
+			panic("%s file_area:0x%llx file_area_state:0x%x type:%d\n",__func__,(u64)p_file_area,p_file_area->file_area_state,type);
+
+		file_area_page_mark = (READ_ONCE(p_file_area->file_area_state) >> TOWRITE_MARK_IN_FILE_AREA_BASE) & page_mark_mask;
+	}
+	while(file_area_page_mark){
+		if(file_area_page_mark & 0x1)
+			count ++;
+
+		file_area_page_mark = file_area_page_mark >> 1;
+	}
+
+	return count;
+}
+
+#else
 static inline void clear_file_area_page_bit(struct file_area *p_file_area,unsigned char page_offset_in_file_area)
 {
 	unsigned int file_area_page_bit_clear = ~(1 << (PAGE_BIT_OFFSET_IN_FILE_AREA_BASE + page_offset_in_file_area));
@@ -1261,6 +1401,8 @@ static inline int file_area_page_mark_bit_count(struct file_area *p_file_area,ch
 
 	return count;
 }
+#endif
+
 static inline void is_cold_file_area_reclaim_support_fs(struct address_space *mapping,struct super_block *sb)
 {
 	if(SUPPORT_FS_ALL == hot_cold_file_global_info.support_fs_type){
