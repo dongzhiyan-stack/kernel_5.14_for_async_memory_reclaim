@@ -2110,7 +2110,7 @@ static void inline file_inode_unlock_mapping(struct address_space *mapping)
 
 /*对文件inode加锁，如果inode已经处于释放状态则返回0，此时不能再遍历该文件的inode的address_space的radix tree获取page，释放page，
  *此时inode已经要释放了，inode、address_space、radix tree都是无效内存。否则，令inode引用计数加1，然后其他进程就无法再释放这个
- *文件的inode，此时返回1*/
+ *文件的inode，此时返回1。如果inode被iput释放而有free标记则返回-1。总之加锁失败返回值 <= 0*/
 static int inline file_inode_lock(struct file_stat_base *p_file_stat_base)
 {
     /*不能在这里赋值，因为可能文件inode被iput后p_file_stat->mapping赋值NULL，这样会crash*/
@@ -2148,7 +2148,7 @@ static int inline file_inode_lock(struct file_stat_base *p_file_stat_base)
 	//unlock_file_stat(p_file_stat);
 	//rcu_read_unlock();
 
-	/*inode正被其他进程iput释放，加锁失败*/
+	/*inode正被其他进程iput释放，加锁失败。此时该文件的file_stat就可能没有in_delete标记，这个遇到过*/
 	if(inode->i_state & (I_FREEING|I_WILL_FREE|I_NEW)){
 		lock_fail = 1;
 	}
@@ -2181,8 +2181,9 @@ static int inline file_inode_lock(struct file_stat_base *p_file_stat_base)
 	if(2 == lock_fail)
 		iput(inode);
 #endif
-
-	return (0 == lock_fail);
+    
+	/*加锁成功lock_fail是0而返回1，因inode有free标记而加锁失败则lock_fail是1而返回-1*/
+	return (0 == lock_fail) ? 1:-1;
 }
 #else
 static void inline file_inode_unlock(struct file_stat_base * p_file_stat_base)

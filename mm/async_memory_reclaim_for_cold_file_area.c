@@ -199,7 +199,7 @@ int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 	 * 把file_stat移动到global detele链表处理，更不能返回-1导致设置file_area in_refault，其实设置了好像也没事!!!!!!!*/
 
 #if 0//这个加锁放到遍历file_stat内存回收，最初执行的get_file_area_from_file_stat_list()函数里了，这里不再重复加锁
-	if(0 == file_inode_lock(p_file_stat_base))
+	if(file_inode_lock(p_file_stat_base) <= 0)
 		return 0;
 #endif
 	cold_file_area_delete_lock(p_hot_cold_file_global,p_file_stat_base,p_file_area);
@@ -317,7 +317,7 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 	/* cold_file_stat_delete()还需要对inode加锁吗，因为已经在异步内存回收线程遍历file_stat，探测内存回收而执行的get_file_area_from_file_stat_list()
 	 * 函数执行file_inode_lock()过了。需要的，因为会执行这个函数的，异步内存回收线程还会在file_stat_has_zero_file_area_manage()
 	 * 函数，对所有的零个file_area的file_stat进行探测，然后释放file_stat，这中file_stat跟异步内存回收线程进行内存回收的file_stat是两码事*/
-	if(0 == file_inode_lock(p_file_stat_base_del))
+	if(file_inode_lock(p_file_stat_base_del) <= 0)
 		return ret;
 
 	mapping = p_file_stat_base_del->mapping;
@@ -2657,7 +2657,7 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 	//rcu_read_lock();
 	//
 #if 0//这个加锁放到遍历file_stat内存回收，最初执行的get_file_area_from_file_stat_list()函数里了，这里不再重复加锁
-	if(0 == file_inode_lock(p_file_stat_base)){
+	if(file_inode_lock(p_file_stat_base) <= 0){
 		printk("%s file_stat:0x%llx status 0x%x inode lock fail\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
 		return 0;
 	}
@@ -6449,6 +6449,7 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 	unsigned int scan_file_area_count  = 0;
 	unsigned int scan_file_stat_count  = 0;
 	char file_stat_delete_lock = 0;
+	int ret;
 	
 	//LIST_HEAD(file_area_free_temp);
 	//struct file_area *p_file_area,*p_file_area_temp;
@@ -6526,10 +6527,12 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 		 * file_inode_lock()，但是万一后期又有其他代码使用mapping、xarray tree、mapping->i_mmap.rb_root，万一忘了
 		 * 加file_inode_lock()，那就又是要访问inode无效内存了。干脆在遍历文件file_stat最初就加file_inode_lock，
 		 * 一劳永逸，之后就能绝对保证该文件inode不会被释放*/
-		if(0 == file_inode_lock(p_file_stat_base)){
+		ret = file_inode_lock(p_file_stat_base);
+		if(ret <= 0){
 			printk("%s file_stat:0x%llx status 0x%x inode lock fail\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
-
-			if(!file_stat_in_delete_base(p_file_stat_base))
+			/* 如果上边加锁失败，但是是因为inode被iput()而inode有了free标记，此时ret是-1，但file_stat不一定有in_delete标记，
+			 * 此时不能crash*/
+			if(!file_stat_in_delete_base(p_file_stat_base) && (-1 != ret))
 				panic("%s file_stat:0x%llx not delete status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
 
 			move_file_stat_to_global_delete_list(p_hot_cold_file_global,p_file_stat_base,file_type);

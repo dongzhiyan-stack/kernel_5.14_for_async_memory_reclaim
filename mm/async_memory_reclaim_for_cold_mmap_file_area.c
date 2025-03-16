@@ -95,7 +95,7 @@ unsigned int cold_mmap_file_isolate_lru_pages_and_shrink(struct hot_cold_file_gl
 	 * 函数里，执行了file_inode_lock()对inode和file_stat加锁，因为在check_one_file_area_cold_page_and_clear()
 	 * 中要通过file_stat->pages[]数组遍历page.这里内存回收前再加锁其实也没事，无非是inode引用计数加1，但可靠*/
 	//lock_file_stat(p_file_stat,0);
-	if(0 == file_inode_lock(p_file_stat_base))
+	if(file_inode_lock(p_file_stat_base) <= 0)
 		return 0;
 
 	/*执行到这里，就不用担心该inode会被其他进程iput释放掉*/
@@ -3165,7 +3165,7 @@ static noinline int traverse_mmap_file_stat_get_cold_page(struct hot_cold_file_g
 	 * 的radix tree，找到空洞file_area，这些file_area对应的page还没有被管控起来*/
 
 	//令inode引用计数加1，防止遍历该文件的radix tree时文件inode被释放了
-	if(file_inode_lock(p_file_stat_base) == 0)
+	if(file_inode_lock(p_file_stat_base) <= 0)
 	{
 		printk("%s file_stat:0x%llx status 0x%x inode lock fail\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
 		return -1;
