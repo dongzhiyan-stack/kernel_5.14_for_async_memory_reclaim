@@ -3137,7 +3137,7 @@ find_folio:
 	/*到这里才判定page有有效，没有被其他进程并发释放掉*/
 	CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,mapping,folio,p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
 	//统计page引用计数
-	hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,1,FILE_AREA_PAGE_IS_WRITE,folio->index);
+	hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,1,FILE_AREA_PAGE_IS_WRITE/*,folio->index*/);
 
 #ifdef ASYNC_MEMORY_RECLAIM_DEBUG
 	/*如果本次查找的page所在xarray tree的父节点变化了，则把最新的保存到mapping->rh_reserved2。
@@ -4732,10 +4732,10 @@ find_page_from_file_area:
 			 *page_offset_in_file_area - page_offset_in_file_area_origin。之后，file_area的page的访问计数是page_offset_in_file_area，
 			 *此时page_offset_in_file_area与PAGE_COUNT_IN_AREA相等*/
 			if(page_offset_in_file_area_origin == -1)
-				hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area,FILE_AREA_PAGE_IS_READ,folio->index);//page_offset_in_file_area
+				hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area,FILE_AREA_PAGE_IS_READ/*,folio->index*/);
 			else{
 				/*访问的第一个file_area，page访问计数是page_offset_in_file_area - page_offset_in_file_area_origin*/
-				hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area - page_offset_in_file_area_origin,FILE_AREA_PAGE_IS_READ,folio->index);
+				hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area - page_offset_in_file_area_origin,FILE_AREA_PAGE_IS_READ/*,folio->index*/);
 				page_offset_in_file_area_origin = -1;
 			}
             
@@ -4753,11 +4753,11 @@ retry:
     /*如果前边for循环异常break了，就无法统计最后file_area的访问计数了，那就在这里统计*/
 	if(page_offset_in_file_area_origin == -1){
 		if(page_offset_in_file_area)/*可能这个file_area一个page都没有获取到，要过滤掉*/
-			hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area,FILE_AREA_PAGE_IS_READ,folio != NULL? folio->index:-1);
+			hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area,FILE_AREA_PAGE_IS_READ/*,folio != NULL? folio->index:-1*/);
 	}
 	else{//访问的第一个file_area就跳出for循环了，page访问计数是page_offset_in_file_area - page_offset_in_file_area_origin
 		if(page_offset_in_file_area > page_offset_in_file_area_origin)/*这样才说明至少有一个page被获取了*/
-		    hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area - page_offset_in_file_area_origin,FILE_AREA_PAGE_IS_READ,folio != NULL? folio->index:-1);
+		    hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area - page_offset_in_file_area_origin,FILE_AREA_PAGE_IS_READ/*,folio != NULL? folio->index:-1*/);
 	}
 
 	/*如果本次查找的page所在xarray tree的父节点变化了，则把最新的保存到mapping->rh_reserved2。实际测试表明，

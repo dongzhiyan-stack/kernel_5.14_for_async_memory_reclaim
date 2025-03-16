@@ -984,7 +984,7 @@ static int inline is_file_area_hot(struct file_area *p_file_area)
  * file_stat->hot、refault、warm链表上file_area被多次访问，只是设置file_area的ahead标记，不会再把file_area移动到
  * 各自的链表头。还是为了减少性能损耗！简单说，file_area被多次访问只是设置ahead标记，而不是移动到各自file_stat链表头
  * */
-void hot_file_update_file_status(struct address_space *mapping,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,int access_count,int read_or_write,unsigned long index)
+void hot_file_update_file_status(struct address_space *mapping,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,int access_count,int read_or_write/*,unsigned long index*/)
 {
 	//检测file_area被访问的次数，判断是否有必要移动到file_stat->hot、refault、temp等链表头
 	int file_area_move_list_head = is_file_area_move_list_head(p_file_area);
@@ -995,12 +995,12 @@ void hot_file_update_file_status(struct address_space *mapping,struct file_stat_
 	if(!enable_update_file_area_age)
 		return;
 
-	if(p_file_stat_base->mapping->rh_reserved2){
+	/*if(p_file_stat_base->mapping->rh_reserved2){
         printk("%s %d inode:0x%llx mapped:%d index:%ld %d\n",current->comm,current->pid,(u64)p_file_stat_base->mapping->host,mapping_mapped(mapping),index,read_or_write);
 	}
 	if(p_file_stat_base->mapping->rh_reserved3 && read_or_write){
 		dump_stack();
-	}
+	}*/
 
 	//file_area_in_update_count ++;
 	/*hot_cold_file_global_info.global_age更新了，把最新的global age更新到本次访问的file_area->file_area_age。并对
@@ -3679,7 +3679,6 @@ static inline void move_file_stat_to_global_delete_list(struct hot_cold_file_glo
 	else
 	    spin_unlock_irq(&p_hot_cold_file_global->mmap_file_global_lock);
 }
-
 /*遍历global file_stat_zero_file_area_head链表上的file_stat，如果file_stat对应文件长时间不被访问杂释放掉file_stat。如果file_stat对应文件又被访问了，
   则把file_stat再移动回 gloabl file_stat_temp_head、file_stat_large_file_head、file_stat_hot_head链表*/
 static noinline void file_stat_has_zero_file_area_manage(struct hot_cold_file_global *p_hot_cold_file_global,struct list_head *file_stat_zero_list_head,unsigned int file_type)
