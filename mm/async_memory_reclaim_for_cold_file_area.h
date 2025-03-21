@@ -13,6 +13,10 @@
 #define FILE_AREA_IN_REFAULT_LIST 1
 #define FILE_AREA_IN_FREE_LIST 2
 
+/*允许一个周期内file_stat->temp链表上file_area移动到file_stat->temp链表头的最大次数*/
+#define FILE_AREA_MOVE_TO_HEAD_COUNT_MAX 16
+
+
 /*极小的文件，pagecache小于1M的文件*/
 #define FILE_STAT_TINY_SMALL 0
 /*小文件，pagecache在1M~10M的文件*/
@@ -185,6 +189,10 @@ struct mmap_file_shrink_counter
 	unsigned int mmap_free_pages_count;
 	unsigned int writeback_count;
 	unsigned int dirty_count;
+
+	unsigned int file_area_hot_to_warm_list_count;
+	unsigned int file_area_refault_to_warm_list_count;
+	unsigned int file_area_free_count_from_free_list;
 #if 0	
 	//扫描的file_area个数
 	unsigned int scan_file_area_count;
@@ -653,6 +661,8 @@ struct hot_cold_file_global
 	struct list_head mmap_file_stat_mapcount_head;
 	//0个file_area的file_stat移动到这个链表，暂时没用到
 	struct list_head mmap_file_stat_zero_file_area_head;
+	struct list_head mmap_file_stat_small_zero_file_area_head;
+	struct list_head mmap_file_stat_tiny_small_zero_file_area_head;
 	//inode被删除的文件的file_stat移动到这个链表，暂时不需要
 	struct list_head mmap_file_stat_delete_head;
 	struct list_head mmap_file_stat_small_delete_head;
@@ -729,6 +739,9 @@ enum file_area_status{
 	 *内存回收遇到有ahead且长时间没访问的file_area，先豁免一次，等下次遍历到这个file_area再回收这个file_area的page*/
 	F_file_area_in_ahead,
 	F_file_area_in_read,
+	F_file_area_in_cache,
+	F_file_area_in_mmap,
+	F_file_area_in_mmap_init,/*mmap的文件，分配file_area后立即设置该标记*/
 	//F_file_area_in_cache,//file_area保存在ile_stat->hot_file_area_cache[]数组里
 };
 //不能使用 clear_bit_unlock、test_and_set_bit_lock、test_bit，因为要求p_file_area->file_area_state是64位数据，但实际只是u8型数据
@@ -790,9 +803,11 @@ FILE_AREA_LIST_STATUS(mapcount_list)
 	SET_FILE_AREA_STATUS(status)  \
 	TEST_FILE_AREA_STATUS(status) 
 
-	//FILE_AREA_STATUS(cache)
+	FILE_AREA_STATUS(cache)
+	FILE_AREA_STATUS(mmap)
+	FILE_AREA_STATUS(mmap_init)
 	FILE_AREA_STATUS(ahead)
-FILE_AREA_STATUS(read)
+    FILE_AREA_STATUS(read)
 
 
 #define file_area_in_temp_list_not_have_hot_status (1 << F_file_area_in_temp_list)
@@ -2085,6 +2100,8 @@ static inline struct file_area *file_area_alloc_and_init(unsigned int area_index
 
 	//在file_stat->file_area_temp链表的file_area个数加1
 	p_file_stat_base->file_area_count_in_temp_list ++;
+	/*mmap文件的分配的file_area都设置改标记*/
+	set_file_area_in_mmap_init(p_file_area);
 
 out:
 	spin_unlock(&p_file_stat_base->file_stat_lock);
@@ -2550,7 +2567,7 @@ extern int reverse_other_file_area_list_common(struct hot_cold_file_global *p_ho
 
 extern void hot_file_update_file_status(struct address_space *mapping,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,int access_count,int read_or_write/*,unsigned long index*/);
 extern void get_file_name(char *file_name_path,struct file_stat_base *p_file_stat_base);
-extern unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_free,struct list_head *file_area_have_mmap_page_head);
+//extern unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_free,struct list_head *file_area_have_mmap_page_head);
 extern unsigned int cold_mmap_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base * p_file_stat_base,struct file_area *p_file_area,struct page *page_buf[],int cold_page_count);
 extern unsigned long shrink_inactive_list_async(unsigned long nr_to_scan, struct lruvec *lruvec,struct hot_cold_file_global *p_hot_cold_file_global,int is_mmap_file, enum lru_list lru);
 extern int walk_throuth_all_mmap_file_area(struct hot_cold_file_global *p_hot_cold_file_global);
@@ -2559,8 +2576,12 @@ extern unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_glo
 extern int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base_del,unsigned int file_type);
 extern int cold_file_area_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area);
 
-extern void file_stat_temp_middle_large_file_change(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,unsigned int file_stat_list_type, unsigned int file_type,char is_cache_file);
+extern void file_stat_temp_middle_large_file_change(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,unsigned int file_stat_list_type, unsigned int normal_file_type,char is_cache_file);
 extern int mmap_file_area_cache_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_have_cache_page_head,struct list_head *file_area_free_temp,unsigned int file_type);
 extern int cache_file_area_mmap_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_have_mmap_page_head,unsigned int file_type);
 extern int check_file_stat_is_valid(struct file_stat_base *p_file_stat_base,unsigned int file_stat_list_type,char is_cache_file);
+extern noinline int hot_cold_file_print_all_file_stat(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print);
+extern noinline void printk_shrink_param(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print);
+extern int hot_cold_file_thread(void *p);
+extern int async_memory_reclaim_main_thread(void *p);
 #endif
