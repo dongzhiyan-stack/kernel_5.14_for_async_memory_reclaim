@@ -570,6 +570,7 @@ struct hot_cold_file_global
 	unsigned int drop_cache_file_count;
 	//热文件file_stat个数
 	unsigned int file_stat_hot_count;
+	unsigned int mmap_file_stat_hot_count;
 	//大文件file_stat个数
 	unsigned int file_stat_large_count;
 	unsigned int file_stat_middle_count;
@@ -739,9 +740,10 @@ enum file_area_status{
 	 *内存回收遇到有ahead且长时间没访问的file_area，先豁免一次，等下次遍历到这个file_area再回收这个file_area的page*/
 	F_file_area_in_ahead,
 	F_file_area_in_read,
+
 	F_file_area_in_cache,
 	F_file_area_in_mmap,
-	F_file_area_in_mmap_init,/*mmap的文件，分配file_area后立即设置该标记*/
+	F_file_area_in_init,/*新分配file_area后立即设置该标记*/
 	//F_file_area_in_cache,//file_area保存在ile_stat->hot_file_area_cache[]数组里
 };
 //不能使用 clear_bit_unlock、test_and_set_bit_lock、test_bit，因为要求p_file_area->file_area_state是64位数据，但实际只是u8型数据
@@ -805,7 +807,7 @@ FILE_AREA_LIST_STATUS(mapcount_list)
 
 	FILE_AREA_STATUS(cache)
 	FILE_AREA_STATUS(mmap)
-	FILE_AREA_STATUS(mmap_init)
+	FILE_AREA_STATUS(init)
 	FILE_AREA_STATUS(ahead)
     FILE_AREA_STATUS(read)
 
@@ -820,12 +822,12 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	F_file_stat_in_file_stat_hot_head_list,
 	F_file_stat_in_file_stat_tiny_small_file_head_list,
 	F_file_stat_in_file_stat_small_file_head_list,
-	F_file_stat_in_file_stat_temp_head_list,
+	F_file_stat_in_file_stat_temp_head_list,//3
 	
 	F_file_stat_in_file_stat_middle_file_head_list,
 	F_file_stat_in_file_stat_large_file_head_list,
 	F_file_stat_in_mapcount_file_area_list,//文件file_stat是mapcount文件
-	F_file_stat_in_zero_file_area_list,
+	F_file_stat_in_zero_file_area_list,//7
 	
 	F_file_stat_in_cache_file,//cache文件，sysctl读写产生pagecache。有些cache文件可能还会被mmap映射，要与mmap文件互斥
 	F_file_stat_in_mmap_file,//mmap文件，有些mmap文件可能也会被sysctl读写产生pagecache，要与cache文件互斥
@@ -2100,8 +2102,7 @@ static inline struct file_area *file_area_alloc_and_init(unsigned int area_index
 
 	//在file_stat->file_area_temp链表的file_area个数加1
 	p_file_stat_base->file_area_count_in_temp_list ++;
-	/*mmap文件的分配的file_area都设置改标记*/
-	set_file_area_in_mmap_init(p_file_area);
+	set_file_area_in_init(p_file_area);
 
 out:
 	spin_unlock(&p_file_stat_base->file_stat_lock);
@@ -2400,7 +2401,7 @@ static int inline can_file_stat_move_to_list_head(struct list_head *file_stat_te
 	struct file_stat_base *p_file_stat_base_next = list_next_entry(p_file_stat_base, hot_cold_file_list);
 	struct file_stat_base *p_file_stat_base_prev = list_prev_entry(p_file_stat_base, hot_cold_file_list);
 
-	/*如果file_stat在链表前后没有成员，失败。如果file_stat_base已经从链表删除，事变*/
+	/*如果file_stat在链表前后没有成员，失败。如果file_stat_base已经从链表删除，失败*/
 	if(list_empty(&p_file_stat_base->hot_cold_file_list) || p_file_stat_base->hot_cold_file_list.next == LIST_POISON1 || p_file_stat_base->hot_cold_file_list.prev == LIST_POISON2){
 		printk("%ps->can_file_stat_move file_stat:0x%llx  is_cache_file:%d file_stat_in_list_type_bit:%d error!!!!!!!!!!!!!!\n",__builtin_return_address(0),(u64)p_file_stat_base,is_cache_file,file_stat_in_list_type);
 		return 0;
