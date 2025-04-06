@@ -93,6 +93,7 @@ int open_file_area_printk = 0;
 int open_file_area_printk_important = 0;
 
 static void change_memory_reclaim_age_dx(struct hot_cold_file_global *p_hot_cold_file_global);
+extern void deactivate_file_folio(struct folio *folio);
 
 /*****file_area、file_stat、inode 的delete*********************************************************************************/
 static void i_file_area_callback(struct rcu_head *head)
@@ -1682,7 +1683,7 @@ next_folio:
 		i += scan_page_interval;
 	}
 
-	if(1 == scan_page_interval && scan_page_count != PAGE_COUNT_IN_AREA){
+	if(1 == scan_page_interval && scan_page_count != PAGE_COUNT_IN_AREA && mapcount_file_area != 0){
 	    printk("%s file_area:0x%llx status:0x%x has init flag,but scan_page_count=%d\n",__func__,(u64)p_file_area,p_file_area->file_area_state,scan_page_count);
 	}
 
@@ -1757,6 +1758,272 @@ next_folio:
         file_area_age = get_file_area_age_mmap(p_file_stat_base,p_file_area,p_hot_cold_file_global,&file_stat_changed,file_type);\
 	}\
 }
+#if 1
+//遍历p_file_stat对应文件的file_area_free链表上的file_area结构，找到这些file_area结构对应的page，这些page被判定是冷页，可以回收
+unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,
+		struct list_head *file_area_free/*,struct list_head *file_area_have_mmap_page_head*/)
+{
+	struct file_area *p_file_area,*tmp_file_area;
+	int i;
+	struct address_space *mapping = NULL;
+	//pg_data_t *pgdat = NULL;
+	//struct page *page;
+	struct folio *folio;
+	//unsigned int isolate_pages = 0;
+	//int traverse_file_area_count = 0;  
+	//struct lruvec *lruvec = NULL,*lruvec_new = NULL;
+	//int move_page_count = 0;
+	/*file_area里的page至少一个page发现是mmap的，则该file_area移动到file_area_have_mmap_page_head，后续回收mmap的文件页*/
+	//int find_file_area_have_mmap_page;
+	//unsigned int find_mmap_page_count_from_cache_file = 0;
+	char print_once = 1;
+	unsigned char mmap_page_count = 0;
+	struct folio_batch fbatch;
+	int ret;
+	unsigned int free_pages = 0;
+	int j,page_count;
+
+	/*使用前必须先对fbatch初始化*/
+	folio_batch_init(&fbatch);
+
+	/*char file_name_path[MAX_FILE_NAME_LEN];
+	  memset(file_name_path,0,sizeof(&file_name_path));
+	  get_file_name(file_name_path,p_file_stat_base);*/
+
+	/*最初方案：当前函数执行lock_file_stat()对file_stat加锁。在__destroy_inode_handler_post()中也会lock_file_stat()加锁。防止
+	 * __destroy_inode_handler_post()中把inode释放了，而当前函数还在遍历该文件inode的mapping的xarray tree
+	 * 查询page，访问已经释放的内存而crash。这个方案太麻烦!!!!!!!!!!!!!!，现在的方案是使用rcu，这里
+	 * rcu_read_lock()和__destroy_inode_handler_post()中标记inode delete形成并发。极端情况是，二者同时执行，
+	 * 但这里rcu_read_lock后，进入rcu宽限期。而__destroy_inode_handler_post()执行后，触发释放inode，然后执行到destroy_inode()里的
+	 * call_rcu(&inode->i_rcu, i_callback)后，无法真正释放掉inode结构。当前函数可以放心使用inode、mapping、xarray tree。
+	 * 但有一点需注意，rcu_read_lock后不能休眠，否则rcu宽限期会无限延长。
+	 *
+	 * 但是又有一个问题，就是下边的循环执行的时间可能会很长，并且下边执行的内存回收shrink_inactive_list_async()可能会休眠。
+	 * 而rcu_read_lock后不能休眠。因此，新的解决办法是，file_inode_lock()对inode加锁，并且令inode引用计数加1。如果成功则下边
+	 * 不用再担心inode被其他进程iput释放。如果失败则直接return 0。详细 file_inode_lock()有说明
+	 * */
+
+	//lock_file_stat(p_file_stat,0);
+	//rcu_read_lock();
+	//
+#if 0//这个加锁放到遍历file_stat内存回收，最初执行的get_file_area_from_file_stat_list()函数里了，这里不再重复加锁
+	if(file_inode_lock(p_file_stat_base) <= 0){
+		printk("%s file_stat:0x%llx status 0x%x inode lock fail\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+		return 0;
+	}
+#endif	
+	/*执行到这里，就不用担心该inode会被其他进程iput释放掉*/
+
+	mapping = p_file_stat_base->mapping;
+
+	/*!!隐藏非常深的地方，这里遍历file_area_free(即)链表上的file_area时，可能该file_area在hot_file_update_file_status()中被访问而移动到了temp链表
+	  这里要用list_for_each_entry_safe()，不能用list_for_each_entry!!!!!!!!!!!!!!!!!!!!!!!!*/
+	list_for_each_entry_safe(p_file_area,tmp_file_area,file_area_free,file_area_list){
+		/*每遍历一个file_area，都要先对mmap_page_count清0，然后下边遍历到file_area的每一个mmap page再加1*/
+		mmap_page_count = 0;
+		//得到file_area对应的page
+		for(i = 0;i < PAGE_COUNT_IN_AREA;i ++){
+			folio = p_file_area->pages[i];
+			if(!folio || folio_is_file_area_index(folio)){
+				if(shrink_page_printk_open1)
+					printk("%s file_area:0x%llx status:0x%x folio NULL\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+
+				/*如果一个file_area的page全都释放了，则file_stat->pages[0/1]就保存file_area的索引。然后第一个page又被访问了，
+				 *然后这个file_area被使用。等这个file_area再次内存回收，到这里时，file_area->pages[1]就是file_area_index*/
+				if(folio_is_file_area_index(folio) && print_once){
+					print_once = 0;
+					if(shrink_page_printk_open_important)
+						printk(KERN_ERR"%s file_area:0x%llx status:0x%x folio_is_file_area_index!!!!!!!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+				}
+
+				continue;
+			}
+			if(xa_is_value(folio) || !is_file_area_page_bit_set(p_file_area,i)){
+				panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x page:0x%llx flags:0x%lx xa_is_value or file_area_bit error!!!!!!\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,(u64)folio,folio->flags);
+			}
+
+			/*如果page映射了也表页目录，这是异常的，要给出告警信息!!!!!!!!!!!!!!!!!!!还有其他异常状态。但实际调试
+			 *遇到过page来自tmpfs文件系统，即PageSwapBacked(page)，最后错误添加到inacitve lru链表，但没有令inactive lru
+			 *链表的page数加1，最后导致隔离page时触发mem_cgroup_update_lru_size()中发现lru链表page个数是负数而告警而crash*/
+			if (unlikely(folio_test_anon(folio))|| unlikely(PageCompound(&folio->page)) || unlikely(folio_test_swapbacked(folio))){
+				panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x page:0x%llx flags:0x%lx error\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,(u64)folio,folio->flags);
+			}
+
+			/*到这里，page经过第一阶段针对file_area的判断，合法了。下边是针对page是否能参与内存回收的合法性判断。
+			 * 以下函数流程drop_cache释放pagecache执行的invalidate_mapping_pagevec函数，截断pagecache一致
+			 *
+			 *    执行find_lock_entries->find_get_entry->if (!folio || xa_is_value(folio))，从xarray tree得到page并判断合法，上边一判断
+			 * 1：执行find_lock_entries->if (!folio_try_get_rcu(folio)) 令page引用加1
+			 * 2：执行find_lock_entries->if (unlikely(folio != xas_reload(xas))) page引用计数加1后再判断page是否被其他进程释放了
+			 * 3：执行find_lock_entries->if (!folio_trylock(folio)) 加锁
+			 * 4：执行find_lock_entries->if (folio->mapping != mapping) 判断folio是否被其他进程释放了并重新分配给新的文件
+			 * 5：执行mapping_evict_folio()，判断page是否是dirty、writeback文件页
+			 * 6：执行mapping_evict_folio()，判断page引用计数计数异常，尤其是mmaped文件页。这里需要回收mmap文件页
+			 * 7：执行mapping_evict_folio()->if (folio_has_private(folio)...)释放page bh
+			 * 8：执行mapping_evict_folio()->remove_mapping(mapping, folio)，把page从xrray tree剔除
+			 * 9：folio_unlock解锁
+			 * */
+
+
+            /*1：page引用计数加1，如果page引用计数原本是0则if成立，说明page已经被其他进程释放了*/
+            if (!folio_try_get_rcu(folio))
+			    continue;
+
+            /*2：page被其他进程释放了，if成立。上边folio_try_get_rcu()可能失败，被其他进程抢先令page引用计数减1并释放掉，
+			 *   再被新的文件分配。此时下边的if就不成立了，因为这个page即p_file_area->pages[i]已经被释放了*/
+			if (unlikely(folio != rcu_dereference(p_file_area->pages[i]))) {
+			    /* 参照find_lock_entries()，在folio_try_get_rcu(folio)后，如果folio内存回收失败，必须folio_put(folio)令folio
+				 * 引用计数减1。而符合内存回收条件的page，在folio_batch_release()中会令page引用计数自动减1*/
+			    folio_put(folio);
+				continue;
+			}
+
+			/*3：folio加锁。这里是异步内存回收线程，获取锁失败而休眠也允许，因此把trylock_page改为lock_page*/
+			folio_lock(folio);
+
+			/*4：如果page被其他进程回收，又被新的进程访问了，分配给了新的文件，page->mapping指向了新的文件，不参与内存回收*/
+			if(unlikely(folio->mapping != mapping)){
+			    /*参照find_lock_entries()对内存回收失败的page的处理，先folio_unlock后folio_put*/
+				folio_unlock(folio);
+				folio_put(folio);
+
+				printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x page:0x%llx flags:0x%lx page->mapping:0x%llx != mapping:0x%llx\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,(u64)folio,folio->flags,(u64)folio->mapping,(u64)mapping);
+				continue;
+			}
+
+			/*5：page是脏页或者writeback页或者不可回收页，不参与内存回收*/
+			if (folio_test_dirty(folio) || folio_test_writeback(folio) || folio_test_unevictable(folio)){
+				folio_unlock(folio);
+				folio_put(folio);
+
+				printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x page:0x%llx flags:0x%lx mapping:0x%llx page dirty or writeback or unevictable\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,(u64)folio,folio->flags,(u64)mapping);
+				continue;
+			}
+
+			/*6：mmap文件页的处理，清理掉mmap映射。仿照shrink_page_list()对mmap page的处理*/
+			if (folio_mapped(folio)){
+				enum ttu_flags flags = TTU_BATCH_FLUSH;
+				mmap_page_count ++;
+
+				try_to_unmap(folio, flags);
+				/*try_to_unmap()后如果page还有mmap映射，说明内存回收失败*/
+				if (folio_mapped(folio)) {
+					folio_unlock(folio);
+					folio_put(folio);
+
+					printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x page:0x%llx flags:0x%lx mapping:0x%llx try_to_unmap fail\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,(u64)folio,folio->flags,(u64)mapping);
+					continue;
+				}
+			}
+
+			/*7：释放page bh，page引用计数减1。照shrink_page_list()对page bh的处理
+			 *   filemap_release_page()最后一个参数表示释放page bh时是否允许等待，0不允许，GFP_KERNEL允许，内存都有用!!!!!!!!!*/
+			if (folio_has_private(folio) && !filemap_release_folio(folio, GFP_KERNEL)){
+				folio_unlock(folio);
+				folio_put(folio);
+
+				printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x page:0x%llx flags:0x%lx mapping:0x%llx filemap_release_page fail\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,(u64)folio,folio->flags,(u64)mapping);
+				continue;
+			}
+					
+			/*8：把page从radix tree剔除，并令page引用计数减1。流程跟invalidate_mapping_pagevec->mapping_evict_folio截断pagecache一致。
+			 *而不再参照truncate_inode_pages_range截断pagecache流程了。因为前者是尝试截断pagecache，后者是强制，本场景跟前者一样*/
+			ret = remove_mapping(mapping, folio);
+
+			/*9：page解锁*/
+			folio_unlock(folio);
+
+			/* 到这里说明page内存回收失败了，按照page的属性再移动回lru链表。为什么要这样处理？这个流程跟invalidate_mapping_pagevec()
+			 * 一样，看注释是把page移动到inacitve lru链表尾，这样该page就会尽快被回收掉。其实想想，这个处理也是多余的。另外要注意，
+			 * 这种page在remove_mapping()中从radix tree剔除失败了，page引用计数没有减1，这种page在folio_batch_release()是不会释放回伙伴系统的*/
+			if (!ret) {
+				deactivate_file_folio(folio);
+			}
+
+			/*!!!!!!到这里，page才真正符合内存回收的条件。下边把这些folio保存到fbatch->folios[]数组，然后回收掉!!!!!!*/
+
+			/* 把folio保存到fbatch->folios[]数组。该数组容量15，数组满了返回0，释放掉fbatch->folios[]里的page后，在继续遍历其他page。
+			 * 这个流程跟truncate_inode_pages_range->find_lock_entries()遍历folio到fbatch->folios[]数组，数组满了则开始回收
+			 * fbatch->folios[]数组里的page。然后再执行find_lock_entries()遍历folio到fbatch->folios[]数组*/
+			if (!folio_batch_add(&fbatch, folio)){
+				page_count = folio_batch_count(&fbatch);	
+#if 0    
+				/* 把page从radix tree剔除，整个流程跟invalidate_mapping_pagevec或truncate_inode_pages_range截断pagecache一致
+				 * 最新改动，不再参照truncate_inode_pages_range了，page从radix tree剔除放到前边了*/
+				delete_from_page_cache_batch(mapping, &fbatch);
+				/*page解锁*/
+				for (j = 0; j < folio_batch_count(&fbatch); j++)
+					folio_unlock(fbatch.folios[j]);
+#endif				   
+				/*这里真正把fbatch->folios[]保存的folio释放回伙伴系统，并自动把fbatch->nr清0，表示fbatch->folios[]数组空了，后续可以继续向fbatch->folios[]保存page*/
+				folio_batch_release(&fbatch);
+				/*防止for循环耗时太长导致本地cpu没有调度*/
+				cond_resched();
+
+				/*注意，folio_batch_release()里可能会回收page失败，因此真实回收的page数 <= page_count，因此free_pages可能比真实回收的page数大*/
+				free_pages += page_count;
+				for(j = 0;j < page_count;j ++){
+					if(folio_ref_count(fbatch.folios[j]) != 0 ){
+						printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x page:0x%llx flags:0x%lx index:%ld mapping:0x%llx folio_ref_count:%d != 0 !!!!!!\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,(u64)fbatch.folios[j],fbatch.folios[j]->flags,fbatch.folios[j]->index,(u64)mapping,folio_ref_count(fbatch.folios[j]));
+					}
+				}
+			}
+		}
+
+		/* cache文件的file_area，如果有mmap page，则标记file_area in_mmap标记。mmap的文件不再处理，因为mmap文件的file_area
+		 * 每次执行get_file_area_age()都会遍历该file_area的所有page，而cache文件执行get_file_area_age()，直接返回file_area_age，
+		 * 而没有遍历file_area的page，正好趁着内存回收函数遍历file_area的page的机会，判断一下该file_area是否有mmap page，节省性能
+		 *
+		 * 还有一点，遇到过mmap文件的file_area被判定为cache file_area，但是它的mmap page每次内存回收都因访问而内存回收失败。导致
+		 * file_area被判定为refault file_area，但是却无法把最新的globe_age更新到file_area_age，因为它是cache file_area。这导致
+		 * 该file_area的page再次因file_area_age很小而从refault链表移动到temp链表，再移动到free链表，再次参与内存回收，再次因
+		 * mmap page被访问，pte access bit置位而内存回收失败。就这样一直在循环，做无用功。针对这种情况，要把file_area的cache标记
+		 * 清理掉，后续因为它所属文件是mmap文件，从而get_file_area_age时走慢速分支，就可以检测pte access bit更新file_area_age了。
+		 * */
+		if(mmap_page_count > 0){
+			if(mmap_page_count > PAGE_COUNT_IN_AREA)
+				panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x mmap_page_count:%d error\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,mmap_page_count);
+
+			if(file_stat_in_cache_file_base(p_file_stat_base) && !file_area_in_mmap(p_file_area)){
+				set_file_area_in_mmap(p_file_area);
+				printk("%s file_stat:0x%llx file_area:0x%llx status:%d  to mmap\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
+			}
+
+			if(file_stat_in_mmap_file_base(p_file_stat_base) && file_area_in_cache(p_file_area)){
+				clear_file_area_in_cache(p_file_area);
+				printk("%s file_stat:0x%llx file_area:0x%llx status:%d clear cache\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
+			}
+		}
+	}
+
+	//unlock_file_stat(p_file_stat);
+	//rcu_read_unlock();
+#if 0
+	file_inode_unlock(p_file_stat_base);
+#endif
+
+	/*上边的for循环，存在folio_batch_add(fbatch, folio)向fbatch->folios[]数组保存folio后，后续执行形如
+	 * if(unlikely(folio->mapping != mapping))判断导致for循环提前中断。如此这些fbatch->folios[]数组保存
+	 * folio就没办法回收了，于是这里强制回收掉*/
+	page_count = folio_batch_count(&fbatch);
+	if(page_count){
+		/*这里真正把fbatch->folios[]保存的folio释放回伙伴系统，并自动把fbatch->nr清0，表示fbatch->folios[]数组空了，后续可以继续向fbatch->folios[]保存page*/
+		folio_batch_release(&fbatch);
+
+		/*注意，folio_batch_release()里可能会回收page失败，因此真实回收的page数 <= page_count，因此free_pages可能比真实回收的page数大*/
+		free_pages += page_count;
+		for(j = 0;j < page_count;j ++){
+			if(folio_ref_count(fbatch.folios[j]) != 0 ){
+				printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x page:0x%llx flags:0x%lx index:%ld mapping:0x%llx folio_ref_count:%d != 0 !!!!!!\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,(u64)fbatch.folios[j],fbatch.folios[j]->flags,fbatch.folios[j]->index,(u64)mapping,folio_ref_count(fbatch.folios[j]));
+			}
+		}
+	}
+
+	p_hot_cold_file_global->hot_cold_file_shrink_counter.free_pages_count = free_pages;
+	return free_pages;
+}
+
+#else
 //遍历p_file_stat对应文件的file_area_free链表上的file_area结构，找到这些file_area结构对应的page，这些page被判定是冷页，可以回收
 unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,
 		struct list_head *file_area_free/*,struct list_head *file_area_have_mmap_page_head*/)
@@ -1830,6 +2097,8 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 		/*每次遍历新的file_area前必须对find_file_area_have_mmap_page清0*/
 		//find_file_area_have_mmap_page = 0;
 
+		/*每遍历一个file_area，都要先对mmap_page_count清0，然后下边遍历到每一个mmap page再加1*/
+		mmap_page_count = 0;
 		//得到file_area对应的page
 		for(i = 0;i < PAGE_COUNT_IN_AREA;i ++){
 			folio = p_file_area->pages[i];
@@ -1986,6 +2255,8 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 		 * 清理掉，后续因为它所属文件是mmap文件，从而get_file_area_age时走慢速分支，就可以检测pte access bit更新file_area_age了。
 		 * */
 		if(mmap_page_count > 0){
+			if(mmap_page_count > PAGE_COUNT_IN_AREA)
+				panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x mmap_page_count:%d error\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,mmap_page_count);
 			if(file_stat_in_cache_file_base(p_file_stat_base) && !file_area_in_mmap(p_file_area)){
 				set_file_area_in_mmap(p_file_area);
 				printk("%s file_stat:0x%llx file_area:0x%llx status:%d  to mmap\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
@@ -2028,6 +2299,7 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 	p_hot_cold_file_global->hot_cold_file_shrink_counter.find_mmap_page_count_from_cache_file += find_mmap_page_count_from_cache_file;
 	return isolate_pages;
 }
+#endif
 static inline void move_file_stat_to_global_delete_list(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,unsigned char file_type,char is_cache_file)
 {
 	if(is_cache_file)
