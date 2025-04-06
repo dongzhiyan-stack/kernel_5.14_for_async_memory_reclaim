@@ -1609,11 +1609,15 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 		xas_lock_irq(&xas);
 		/*file_stat可能会被方法删除，则分配一个新的file_stat，具体看cold_file_stat_delete()函数*/
 		if(SUPPORT_FILE_AREA_INIT_OR_DELETE == mapping->rh_reserved1){
+#if 0
 			//if(RB_EMPTY_ROOT(&mapping->i_mmap.rb_root))
 			if(!mapping_mapped(mapping))
 				p_file_stat_base  = file_stat_alloc_and_init(mapping,FILE_STAT_TINY_SMALL,0);
 			else
 				p_file_stat_base = add_mmap_file_stat_to_list(mapping,FILE_STAT_TINY_SMALL,0);
+#else
+			p_file_stat_base = file_stat_alloc_and_init_tiny_small(mapping,!mapping_mapped(mapping));
+#endif
 
 			if(!p_file_stat_base){
 				xas_set_err(&xas, -ENOMEM);
@@ -4579,6 +4583,8 @@ static void filemap_get_read_batch_for_file_area(struct address_space *mapping,
 	struct file_area *p_file_area = NULL;
 	unsigned int page_offset_in_file_area_origin = page_offset_in_file_area;
 	unsigned long folio_index_from_xa_index;
+	/*默认file_area没有init标记*/
+	int file_area_is_init = 0;
 	
 	rcu_read_lock();
 	//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
@@ -4645,6 +4651,15 @@ static void filemap_get_read_batch_for_file_area(struct address_space *mapping,
 		 *p_file_stat->xa_node_cache要用到*/
 		p_file_area = entry_to_file_area(p_file_area);
 		xa_node_vaild = xas.xa_node;
+
+		/* 如果是第一次读文件，file_area刚分配而设置了init标记，分配file_area时已经更新了file_area_age。这里
+		 * read操作时，file_area_is_init置1，就不再执行hot_file_update_file_status函数了，降低损耗。目的是
+		 * 降低第一次读文件时，损耗有增加的的问题*/
+		file_area_is_init = 0;
+		if(unlikely(file_area_in_init(p_file_area))){
+			clear_file_area_in_init(p_file_area);
+			file_area_is_init = 1;
+		}
 
 #ifdef ASYNC_MEMORY_RECLAIM_DEBUG
 		FILE_AREA_PRINT("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld xas->xa_offset:%d xa_node_cache:0x%llx cache_base_index:%ld index:%ld\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index,xas.xa_offset,(u64)p_file_stat_base->xa_node_cache,p_file_stat_base->xa_node_cache_base_index,index);
@@ -4731,12 +4746,14 @@ find_page_from_file_area:
 			/*统计page引用计数。如果是第一次统计，page_offset_in_file_area_origin >=0，此时访问file_area的page的访问计数是
 			 *page_offset_in_file_area - page_offset_in_file_area_origin。之后，file_area的page的访问计数是page_offset_in_file_area，
 			 *此时page_offset_in_file_area与PAGE_COUNT_IN_AREA相等*/
-			if(page_offset_in_file_area_origin == -1)
-				hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area,FILE_AREA_PAGE_IS_READ/*,folio->index*/);
-			else{
-				/*访问的第一个file_area，page访问计数是page_offset_in_file_area - page_offset_in_file_area_origin*/
-				hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area - page_offset_in_file_area_origin,FILE_AREA_PAGE_IS_READ/*,folio->index*/);
-				page_offset_in_file_area_origin = -1;
+			if(0 == file_area_is_init){
+				if(page_offset_in_file_area_origin == -1)
+					hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area,FILE_AREA_PAGE_IS_READ/*,folio->index*/);
+				else{
+					/*访问的第一个file_area，page访问计数是page_offset_in_file_area - page_offset_in_file_area_origin*/
+					hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area - page_offset_in_file_area_origin,FILE_AREA_PAGE_IS_READ/*,folio->index*/);
+					page_offset_in_file_area_origin = -1;
+				}
 			}
             
 			//要查找下一个file_area了，page_offset_in_file_area要清0
@@ -4751,15 +4768,16 @@ retry:
 	}
 	
     /*如果前边for循环异常break了，就无法统计最后file_area的访问计数了，那就在这里统计*/
-	if(page_offset_in_file_area_origin == -1){
-		if(page_offset_in_file_area)/*可能这个file_area一个page都没有获取到，要过滤掉*/
-			hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area,FILE_AREA_PAGE_IS_READ/*,folio != NULL? folio->index:-1*/);
+	if(0 == file_area_is_init){
+		if(page_offset_in_file_area_origin == -1){
+			if(page_offset_in_file_area)/*可能这个file_area一个page都没有获取到，要过滤掉*/
+				hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area,FILE_AREA_PAGE_IS_READ/*,folio != NULL? folio->index:-1*/);
+		}
+		else{//访问的第一个file_area就跳出for循环了，page访问计数是page_offset_in_file_area - page_offset_in_file_area_origin
+			if(page_offset_in_file_area > page_offset_in_file_area_origin)/*这样才说明至少有一个page被获取了*/
+				hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area - page_offset_in_file_area_origin,FILE_AREA_PAGE_IS_READ/*,folio != NULL? folio->index:-1*/);
+		}
 	}
-	else{//访问的第一个file_area就跳出for循环了，page访问计数是page_offset_in_file_area - page_offset_in_file_area_origin
-		if(page_offset_in_file_area > page_offset_in_file_area_origin)/*这样才说明至少有一个page被获取了*/
-		    hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area - page_offset_in_file_area_origin,FILE_AREA_PAGE_IS_READ/*,folio != NULL? folio->index:-1*/);
-	}
-
 	/*如果本次查找的page所在xarray tree的父节点变化了，则把最新的保存到mapping->rh_reserved2。实际测试表明，
 	 *当查找不到page时，xas_load(&xas)->xas_start 里会给xas.xa_node赋值1，即XAS_BOUNDS。导致错误赋值给
 	 *p_file_stat->xa_node_cache=1，导致后续非法指针crash。因此必须判断父节点的合法性!!!!!!!!。错了，错了，

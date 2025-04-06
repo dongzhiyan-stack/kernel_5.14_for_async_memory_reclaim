@@ -1072,8 +1072,8 @@ void hot_file_update_file_status(struct address_space *mapping,struct file_stat_
 {
 	//检测file_area被访问的次数，判断是否有必要移动到file_stat->hot、refault、temp等链表头
 	int file_area_move_list_head = is_file_area_move_list_head(p_file_area);
-	int is_mmap_file = file_stat_in_mmap_file_base(p_file_stat_base);
-	int is_cache_file = file_stat_in_cache_file_base(p_file_stat_base);
+	//int is_mmap_file = file_stat_in_mmap_file_base(p_file_stat_base);
+	//int is_cache_file = file_stat_in_cache_file_base(p_file_stat_base);
 	unsigned int file_area_state;
 
 	if(!enable_update_file_area_age)
@@ -1097,7 +1097,7 @@ void hot_file_update_file_status(struct address_space *mapping,struct file_stat_
 		p_file_stat_base->recent_access_age = hot_cold_file_global_info.global_age;
 
 		/*file_area访问计数清0，这个必须放到is_file_area_move_list_head()后边，因为is_file_area_move_list_head()依赖这个访问计数*/
-		if(file_area_access_count_get(p_file_area) && is_cache_file)
+		if(file_area_access_count_get(p_file_area)/* && is_cache_file*/)
 			file_area_access_count_clear(p_file_area);
 		/*新的周期重置p_file_stat->file_area_move_to_head_count。但如果file_stat的file_area个数太少，
 		 *file_area_move_to_head_count直接赋值0，因为file_area个数太少就没有必要再向file_stat->temp链表头移动file_area了*/
@@ -1112,6 +1112,8 @@ void hot_file_update_file_status(struct address_space *mapping,struct file_stat_
 		set_file_area_page_read(p_file_area);
 	}
 
+	/*cache和mmap文件二合一后，不再区分二者，mmap文件照样可以被read/write读写*/
+#if 0
 	/*如果mmap的文件file_area里有cache page被read/write读写，也让这些page参与file_area_page_is_read、
 	 *file_area_in_ahead判断，但不能按照cache文件file_area在各个链表之间移动到的逻辑处理，于是这里要return。
 	 *其实想想也没事呀，mmap文件的cache file_area难道不应该按照cache文件逻辑处理？主要这个file_area可能有mmap page，此时就不能了*/
@@ -1126,6 +1128,7 @@ void hot_file_update_file_status(struct address_space *mapping,struct file_stat_
 	 *file_area到file_stat到任何链表.因为file_area里可能既有mmap page，又有cache page，因此不能按照cache文件逻辑处理*/
 	else if(!is_cache_file)
 		return;
+#endif
 
 	/*file_area访问的次数加access_count，是原子操作，不用担心并发。*/
 	file_area_access_count_add(p_file_area,access_count);
@@ -1974,10 +1977,24 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 
 		/* cache文件的file_area，如果有mmap page，则标记file_area in_mmap标记。mmap的文件不再处理，因为mmap文件的file_area
 		 * 每次执行get_file_area_age()都会遍历该file_area的所有page，而cache文件执行get_file_area_age()，直接返回file_area_age，
-		 * 而没有遍历file_area的page，正好趁着内存回收函数遍历file_area的page的机会，判断一下该file_area是否有mmap page，节省性能*/
+		 * 而没有遍历file_area的page，正好趁着内存回收函数遍历file_area的page的机会，判断一下该file_area是否有mmap page，节省性能
+		 *
+		 * 还有一点，遇到过mmap文件的file_area被判定为cache file_area，但是它的mmap page每次内存回收都因访问而内存回收失败。导致
+		 * file_area被判定为refault file_area，但是却无法把最新的globe_age更新到file_area_age，因为它是cache file_area。这导致
+		 * 该file_area的page再次因file_area_age很小而从refault链表移动到temp链表，再移动到free链表，再次参与内存回收，再次因
+		 * mmap page被访问，pte access bit置位而内存回收失败。就这样一直在循环，做无用功。针对这种情况，要把file_area的cache标记
+		 * 清理掉，后续因为它所属文件是mmap文件，从而get_file_area_age时走慢速分支，就可以检测pte access bit更新file_area_age了。
+		 * */
 		if(mmap_page_count > 0){
-			if(file_stat_in_cache_file_base(p_file_stat_base) && !file_area_in_mmap(p_file_area))
+			if(file_stat_in_cache_file_base(p_file_stat_base) && !file_area_in_mmap(p_file_area)){
 				set_file_area_in_mmap(p_file_area);
+				printk("%s file_stat:0x%llx file_area:0x%llx status:%d  to mmap\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
+			}
+
+			if(file_stat_in_mmap_file_base(p_file_stat_base) && file_area_in_cache(p_file_area)){
+				clear_file_area_in_cache(p_file_area);
+				printk("%s file_stat:0x%llx file_area:0x%llx status:%d clear cache\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
+			}
 		}
 
 #if 0	
@@ -3594,8 +3611,8 @@ static noinline int hot_file_stat_solve(struct hot_cold_file_global *p_hot_cold_
 	/*list_for_each_entry()机制保证，即便遍历的链表空返回的链表也是指向链表头，故p_file_stat_base不可能是NULL*/
 	//if((&p_file_stat_base->hot_cold_file_list != &p_hot_cold_file_global->file_stat_hot_head) && !file_stat_in_delete_base(p_file_stat_base)){
 	if(/*p_file_stat_base && */(&p_file_stat_base->hot_cold_file_list != file_stat_hot_head) && !file_stat_in_delete_base(p_file_stat_base)){
-		if(can_file_stat_move_to_list_head(&p_hot_cold_file_global->file_stat_hot_head,p_file_stat_base,F_file_stat_in_file_stat_hot_head_list,is_cache_file))
-			list_move_enhance(&p_hot_cold_file_global->file_stat_hot_head,&p_file_stat_base->hot_cold_file_list);
+		if(can_file_stat_move_to_list_head(file_stat_hot_head,p_file_stat_base,F_file_stat_in_file_stat_hot_head_list,is_cache_file))
+			list_move_enhance(file_stat_hot_head,&p_file_stat_base->hot_cold_file_list);
 	}
 	if(is_cache_file)
 		spin_unlock(&p_hot_cold_file_global->global_lock);
@@ -3794,6 +3811,8 @@ static noinline unsigned int free_page_from_file_area(struct hot_cold_file_globa
 	unsigned int isolate_lru_pages = 0;
 	//LIST_HEAD(file_area_have_mmap_page_head);
 
+	/*每次内存回收前先对free_pages_count清0*/
+	p_hot_cold_file_global->hot_cold_file_shrink_counter.free_pages_count = 0;
 	/*释放file_stat->file_area_free_temp链表上冷file_area的page，如果遇到有mmap文件页的file_area，则会保存到file_area_have_mmap_page_head链表*/
 	//isolate_lru_pages += cold_file_isolate_lru_pages_and_shrink(p_hot_cold_file_global,p_file_stat,&p_file_stat->file_area_free_temp);
 	isolate_lru_pages = cold_file_isolate_lru_pages_and_shrink(p_hot_cold_file_global,p_file_stat_base,file_area_free_temp/*,&file_area_have_mmap_page_head*/);
@@ -4132,12 +4151,14 @@ void can_tiny_small_file_change_to_small_normal_file(struct hot_cold_file_global
 
 		if(is_cache_file){
 			p_global_lock = &p_hot_cold_file_global->global_lock;
-			p_file_stat_base = file_stat_alloc_and_init(p_file_stat_base_tiny_small->mapping,FILE_STAT_NORMAL,1);
+			//p_file_stat_base = file_stat_alloc_and_init(p_file_stat_base_tiny_small->mapping,FILE_STAT_NORMAL,1);
 		}
 		else{
 			p_global_lock = &p_hot_cold_file_global->mmap_file_global_lock;
-			p_file_stat_base = add_mmap_file_stat_to_list(p_file_stat_base_tiny_small->mapping,FILE_STAT_NORMAL,1);
+			//p_file_stat_base = add_mmap_file_stat_to_list(p_file_stat_base_tiny_small->mapping,FILE_STAT_NORMAL,1);
 		}
+
+		p_file_stat_base = file_stat_alloc_and_init_other(p_file_stat_base_tiny_small->mapping,FILE_STAT_NORMAL,1,is_cache_file);
 
 
 		//clear_file_stat_in_file_stat_small_file_head_list_base(p_file_stat_tiny_small);
@@ -4236,12 +4257,14 @@ void can_tiny_small_file_change_to_small_normal_file(struct hot_cold_file_global
 
 		if(is_cache_file){
 			p_global_lock = &p_hot_cold_file_global->global_lock;
-			p_file_stat_base = file_stat_alloc_and_init(p_file_stat_base_tiny_small->mapping,FILE_STAT_SMALL,1);
+			//p_file_stat_base = file_stat_alloc_and_init(p_file_stat_base_tiny_small->mapping,FILE_STAT_SMALL,1);
 		}
 		else{
 			p_global_lock = &p_hot_cold_file_global->mmap_file_global_lock;
-			p_file_stat_base = add_mmap_file_stat_to_list(p_file_stat_base_tiny_small->mapping,FILE_STAT_SMALL,1);
+			//p_file_stat_base = add_mmap_file_stat_to_list(p_file_stat_base_tiny_small->mapping,FILE_STAT_SMALL,1);
 		}
+
+		p_file_stat_base = file_stat_alloc_and_init_other(p_file_stat_base_tiny_small->mapping,FILE_STAT_SMALL,1,is_cache_file);
 
 		//clear_file_stat_in_file_stat_small_file_head_list_base(p_file_stat_tiny_small);
 		//set_file_stat_in_file_stat_temp_file_head_list(p_file_stat_tiny_small);
@@ -4299,12 +4322,13 @@ void can_small_file_change_to_normal_file(struct hot_cold_file_global *p_hot_col
 
 		if(is_cache_file){
 			p_global_lock = &p_hot_cold_file_global->global_lock;
-			p_file_stat_base = file_stat_alloc_and_init(p_file_stat_base_small->mapping,FILE_STAT_NORMAL,1);
+			//p_file_stat_base = file_stat_alloc_and_init(p_file_stat_base_small->mapping,FILE_STAT_NORMAL,1);
 		}
 		else{
 			p_global_lock = &p_hot_cold_file_global->mmap_file_global_lock;
-			p_file_stat_base = add_mmap_file_stat_to_list(p_file_stat_base_small->mapping,FILE_STAT_NORMAL,1);
+			//p_file_stat_base = add_mmap_file_stat_to_list(p_file_stat_base_small->mapping,FILE_STAT_NORMAL,1);
 		}
+		p_file_stat_base = file_stat_alloc_and_init_other(p_file_stat_base_small->mapping,FILE_STAT_NORMAL,1,is_cache_file);
 
 		//clear_file_stat_in_file_stat_small_file_head_list_base(p_file_stat_small);
 		//set_file_stat_in_file_stat_temp_file_head_list(p_file_stat_small);
@@ -4353,7 +4377,11 @@ static inline int cache_file_change_to_mmap_file(struct hot_cold_file_global *p_
 
 	/* 有个隐藏很深的bug，如果此时正在使用file_stat的mapping的，但是给文件inode被iput了，实际测试遇到过，导致crash，要file_inode_lock
 	 * 防护inode被释放。这个加锁操作放到get_file_area_from_file_stat_list()函数里了*/
-	if(mapping_mapped((struct address_space *)p_file_stat_base->mapping) && (p_file_stat_base->file_area_count == p_file_stat_base->file_area_count_in_temp_list)){
+
+	/*最新改进，之前限制只有file_area全都是in_temp_list的file_stat才能转成mmap file_stat，不这样的话，转成过程，就要把老的file_stat->free、hot
+	 * 、refault等链表上的file_area要一个个遍历，判断属性，然后移动到新的mmap file_stat的对应的file_stat->free、hot、refault链表，
+	 * 太浪费性能。现在cache和mmap文件的处理合二为一了，不再做这个限制，原来file_area是什么属性，到新的mmap file_stat依然是什么属性*/
+	if(mapping_mapped((struct address_space *)p_file_stat_base->mapping)/* && (p_file_stat_base->file_area_count == p_file_stat_base->file_area_count_in_temp_list)*/){
 		//scan_move_to_mmap_head_file_stat_count ++;
 		cache_file_stat_move_to_mmap_head(p_hot_cold_file_global,p_file_stat_base,file_type);
 		return 1;

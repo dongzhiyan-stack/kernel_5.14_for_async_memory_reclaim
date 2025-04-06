@@ -2067,6 +2067,218 @@ static inline struct file_stat_base *add_mmap_file_stat_to_list(struct address_s
 out:
 	return p_file_stat_base;
 }
+static inline void file_stat_base_init(struct address_space *mapping,struct file_stat_base *p_file_stat_base,char is_cache_file)
+{
+	mapping->rh_reserved1 = (unsigned long)(p_file_stat_base);
+	p_file_stat_base->mapping = mapping;
+	//设置文件是mmap文件状态，有些mmap文件可能还会被读写，要与cache文件互斥，要么是cache文件要么是mmap文件，不能两者都是
+	if(is_cache_file){
+		set_file_stat_in_cache_file_base(p_file_stat_base);
+		hot_cold_file_global_info.mmap_file_stat_tiny_small_count++;
+	}
+	else{
+		set_file_stat_in_mmap_file_base(p_file_stat_base);
+		hot_cold_file_global_info.mmap_file_stat_tiny_small_count++;
+	}
+	INIT_LIST_HEAD(&p_file_stat_base->file_area_temp);
+
+	//set_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
+	//list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_tiny_small_file_head);
+	spin_lock_init(&p_file_stat_base->file_stat_lock);
+	
+	/*新分配的file_stat的recent_access_age赋值global age，否则就是0，可能会被识别为冷文件而迅速释放掉*/
+	p_file_stat_base->recent_access_age = hot_cold_file_global_info.global_age;
+
+}
+static inline struct file_stat_base *file_stat_alloc_and_init_tiny_small(struct address_space *mapping,char is_cache_file)
+{
+	struct file_stat_tiny_small *p_file_stat_tiny_small = NULL;
+	struct file_stat_base *p_file_stat_base = NULL;
+	spinlock_t *p_global_lock;
+	if(is_cache_file)
+		p_global_lock = &hot_cold_file_global_info.global_lock;
+	else
+		p_global_lock = &hot_cold_file_global_info.mmap_file_global_lock;
+
+	p_file_stat_tiny_small = kmem_cache_alloc(hot_cold_file_global_info.file_stat_tiny_small_cachep,GFP_ATOMIC);
+	if (!p_file_stat_tiny_small) {
+		printk("%s file_stat alloc fail\n",__func__);
+		goto out;
+	}
+	memset(p_file_stat_tiny_small,0,sizeof(struct file_stat_tiny_small));
+
+	spin_lock(p_global_lock);
+
+	/*如果已经有进程并发分配了file_stat并执行file_stat_base_init()赋值给了mapping->rh_reserved1，那就释放掉本次分配的file_stat*/
+	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)){
+		spin_unlock(p_global_lock);
+
+		kmem_cache_free(hot_cold_file_global_info.file_stat_tiny_small_cachep,p_file_stat_tiny_small);
+		p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+
+		printk("%s file_stat:0x%llx already alloc\n",__func__,(u64)mapping->rh_reserved1);
+		goto out;
+	}
+	p_file_stat_base = &p_file_stat_tiny_small->file_stat_base;
+	/* 对file_stat_base初始化，重点赋值mapping->rh_reserved1 = p_file_stat_base。这个赋值必须放到spin_lock加锁代码里，不能放到spin_unlock后。
+	 * 否则，进程1 spin_unlock，还没赋值mapping->rh_reserved1 = p_file_stat_base。进程spin_lock成功，此时mapping->rh_reserved1还没赋值，
+	 * 导致这里又把同一个文件的file_stat_tiny_small添加到mmap_file_stat_tiny_small_file_head链表，泄漏了，乱套了*/
+	file_stat_base_init(mapping,p_file_stat_base,is_cache_file);
+	set_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
+
+	if(is_cache_file){
+		hot_cold_file_global_info.file_stat_tiny_small_count++;
+		list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_tiny_small_file_head);
+	}
+	else{
+		hot_cold_file_global_info.mmap_file_stat_tiny_small_count++;
+		list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_tiny_small_file_head);
+	}
+
+	spin_unlock(p_global_lock);
+
+
+out:
+	return p_file_stat_base;
+}
+static inline struct file_stat_base * file_stat_alloc_and_init_other(struct address_space *mapping,unsigned int file_type,char free_old_file_stat,char is_cache_file)
+{
+	struct file_stat_base *p_file_stat_base = NULL;
+	spinlock_t *p_global_lock;
+
+	if(is_cache_file)
+		p_global_lock = &hot_cold_file_global_info.global_lock;
+	else
+		p_global_lock = &hot_cold_file_global_info.mmap_file_global_lock;
+
+	if(FILE_STAT_SMALL == file_type){
+		struct file_stat_small *p_file_stat_small;
+
+		p_file_stat_small = kmem_cache_alloc(hot_cold_file_global_info.file_stat_small_cachep,GFP_ATOMIC);
+		if (!p_file_stat_small) {
+			spin_unlock(&hot_cold_file_global_info.mmap_file_global_lock);
+			printk("%s file_stat alloc fail\n",__func__);
+			goto out;
+		}
+		memset(p_file_stat_small,0,sizeof(struct file_stat_small));
+
+		spin_lock(p_global_lock);
+
+		/*1:如果两个进程同时访问一个文件，同时执行到这里，需要加锁。第1个进程加锁成功后，分配file_stat并赋值给
+		 *mapping->rh_reserved1，第2个进程获取锁后执行到这里mapping->rh_reserved1就会成立
+		 *2:异步内存回收功能禁止了
+		 *3:当small file_stat转到normal file_stat，释放老的small file_stat然后分配新的normal file_stat，此时
+		 *free_old_file_stat 是1，下边的if不成立，忽略mapping->rh_reserved1，进而才不会goto out，而是分配新的file_stat
+		 *mapping->rh_reserved1指向的老的file_stat另有代码释放掉这里不用管
+		 */
+		if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping) && !free_old_file_stat){
+			spin_unlock(p_global_lock);
+			
+			kmem_cache_free(hot_cold_file_global_info.file_stat_small_cachep,p_file_stat_small);
+			p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+
+			printk("%s file_stat:0x%llx already alloc\n",__func__,(u64)mapping->rh_reserved1);
+			goto out;  
+		}
+
+		p_file_stat_base = &p_file_stat_small->file_stat_base;
+		file_stat_base_init(mapping,p_file_stat_base,is_cache_file);
+		//mapping->file_stat记录该文件绑定的file_stat结构，将来判定是否对该文件分配了file_stat
+		//mapping->rh_reserved1 = (unsigned long)(p_file_stat_base);
+		//p_file_stat_base->mapping = mapping;
+		//设置文件是mmap文件状态，有些mmap文件可能还会被读写，要与cache文件互斥，要么是cache文件要么是mmap文件，不能两者都是 
+		//set_file_stat_in_mmap_file_base(p_file_stat_base);
+		//INIT_LIST_HEAD(&p_file_stat_base->file_area_temp);
+		//spin_lock_init(&p_file_stat_base->file_stat_lock);
+
+		INIT_LIST_HEAD(&p_file_stat_small->file_area_other);
+
+		set_file_stat_in_file_stat_small_file_head_list_base(p_file_stat_base);
+
+		if(is_cache_file){
+			hot_cold_file_global_info.file_stat_small_count++;
+			list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_small_file_head);
+		}
+		else{
+			hot_cold_file_global_info.mmap_file_stat_small_count++;
+			list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_small_file_head);
+		}
+		spin_unlock(p_global_lock);
+	}
+	else if(FILE_STAT_NORMAL == file_type){
+		struct file_stat *p_file_stat;
+
+		p_file_stat = kmem_cache_alloc(hot_cold_file_global_info.file_stat_cachep,GFP_ATOMIC);
+		if (!p_file_stat) {
+			spin_unlock(&hot_cold_file_global_info.mmap_file_global_lock);
+			printk("%s file_stat alloc fail\n",__func__);
+			goto out;
+		}
+		memset(p_file_stat,0,sizeof(struct file_stat));
+
+		spin_lock(p_global_lock);
+
+		if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping) && !free_old_file_stat){
+			spin_unlock(p_global_lock);
+
+			kmem_cache_free(hot_cold_file_global_info.file_stat_cachep,p_file_stat);
+			p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+
+			printk("%s file_stat:0x%llx already alloc\n",__func__,(u64)mapping->rh_reserved1);
+			goto out;  
+		}
+
+		p_file_stat_base = &p_file_stat->file_stat_base;
+		file_stat_base_init(mapping,p_file_stat_base,is_cache_file);
+
+		//设置文件是mmap文件状态，有些mmap文件可能还会被读写，要与cache文件互斥，要么是cache文件要么是mmap文件，不能两者都是 
+		//set_file_stat_in_mmap_file_base(p_file_stat_base);
+		INIT_LIST_HEAD(&p_file_stat->file_area_hot);
+		//INIT_LIST_HEAD(&p_file_stat_base->file_area_temp);
+		INIT_LIST_HEAD(&p_file_stat->file_area_warm);
+		/*mmap文件需要p_file_stat->file_area_free_temp暂存参与内存回收的file_area，不能注释掉*/
+		//INIT_LIST_HEAD(&p_file_stat->file_area_free_temp);
+		INIT_LIST_HEAD(&p_file_stat->file_area_free);
+		INIT_LIST_HEAD(&p_file_stat->file_area_refault);
+		//file_area对应的page的pagecount大于0的，则把file_area移动到该链表
+		INIT_LIST_HEAD(&p_file_stat->file_area_mapcount);
+
+		//mapping->file_stat记录该文件绑定的file_stat结构，将来判定是否对该文件分配了file_stat
+		//mapping->rh_reserved1 = (unsigned long)(p_file_stat_base);
+		//p_file_stat_base->mapping = mapping;
+#if 1
+		/*新分配的file_stat必须设置in_file_stat_temp_head_list链表。这个设置file_stat状态的操作必须放到 把file_stat添加到
+		 *tmep链表前边，还要加内存屏障。否则会出现一种极端情况，异步内存回收线程从temp链表遍历到这个file_stat，
+		 *但是file_stat还没有设置为in_temp_list状态。这样有问题会触发panic。因为mmap文件异步内存回收线程，
+		 *从temp链表遍历file_stat没有mmap_file_global_lock加锁，所以与这里存在并发操作。而针对cache文件，异步内存回收线程
+		 *从global temp链表遍历file_stat，全程global_lock加锁，不会跟向global temp链表添加file_stat存在方法，但最好改造一下*/
+		set_file_stat_in_file_stat_temp_head_list_base(p_file_stat_base);
+		smp_wmb();
+#endif	
+		//spin_lock_init(&p_file_stat_base->file_stat_lock);
+		if(is_cache_file){
+			hot_cold_file_global_info.file_stat_count++;
+			list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_temp_head);
+		}
+		else{
+			hot_cold_file_global_info.mmap_file_stat_count++;
+			list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_temp_head);
+		}
+
+		spin_unlock(p_global_lock);
+
+	}else
+		BUG();
+
+
+	if(shrink_page_printk_open)
+		printk("%s file_stat:0x%llx\n",__func__,(u64)p_file_stat_base);
+
+out:
+	return p_file_stat_base;
+
+}
+
 static inline struct file_area *file_area_alloc_and_init(unsigned int area_index_for_page,struct file_stat_base *p_file_stat_base)
 {
 	struct file_area *p_file_area = NULL;
