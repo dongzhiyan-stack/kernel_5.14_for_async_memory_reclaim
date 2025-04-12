@@ -671,6 +671,8 @@ static noinline void __destroy_inode_handler_post(struct inode *inode)
 			if(!file_stat_in_delete_base(p_file_stat_base)){
 				/*file_stat不一定只会在global temp链表，也会在global hot等链表，这些标记不清理了*/
 				//clear_file_stat_in_file_stat_temp_head_list(p_file_stat);
+				/* 注意，file_stat有delete标记，不能说明file_stat移动到了global delete链表。file_stat有in_delete_file
+				 * 标记才能说明file_stat被iput()移动到了global delete链表*/
 				set_file_stat_in_delete_base(p_file_stat_base);
 
 				/*尝试test_and_set_bit(file_stat_delete_protect)令变量置1，如果成功，异步内存回收线程无法再从global temp链表
@@ -1683,7 +1685,7 @@ next_folio:
 		i += scan_page_interval;
 	}
 
-	if(1 == scan_page_interval && scan_page_count != PAGE_COUNT_IN_AREA && mapcount_file_area != 0){
+	if(1 == scan_page_interval && scan_page_count != PAGE_COUNT_IN_AREA && mapcount_file_area == 0){
 	    printk("%s file_area:0x%llx status:0x%x has init flag,but scan_page_count=%d\n",__func__,(u64)p_file_area,p_file_area->file_area_state,scan_page_count);
 	}
 
@@ -2307,38 +2309,64 @@ static inline void move_file_stat_to_global_delete_list(struct hot_cold_file_glo
 	else
 		spin_lock(&p_hot_cold_file_global->mmap_file_global_lock);
 
-	/*如果file_stat有in_delete标记则移动到global delete链表，但如果有in_delete_file标记则crash，global temp链表上的file_stat不可能有in_delete_file标记*/
-	if(!file_stat_in_delete_base(p_file_stat_base) || file_stat_in_delete_file_base(p_file_stat_base))
+	/* 如果file_stat有in_delete标记则移动到global delete链表，但如果有in_delete_file标记则crash，global temp链表上的file_stat不可能有in_delete_file标记.
+	 * 无语了，竟然因为这个设计，触发了crash。场景是：poweroff关机截断所有文件时，iput()->__destroy_inode_handler_post()截断文件pagecache，
+	 * 标记file_stat的in_delete和in_delete_file标记。正好此时异步内存回收线程先 get_file_area_from_file_stat_list()遍历global temp链表
+	 * 得到该file_stat。得到file_stat后，iput()->__destroy_inode_handler_post()里标记了file_stat的in_delete和in_delete_file标记。
+	 * 回到异步内存回收线程，get_file_area_from_file_stat_list()对该文件inode加锁失败，因为file_stat有delete标记，于是执行
+	 * move_file_stat_to_global_delete_list()欲把file_stat移动到global delete链表。但是因为file_stat有in_delete标记，于是触发panic。
+	 * 这是正常现象，要去掉这个判断。!!!!!!!!!!!!!!!!!!!!!
+	 *
+	 * 还有一个重大隐藏bug，move_file_stat_to_global_delete_list函数里，global_lock加锁后，如果file_stat有in_delete_file标记，
+	 * 就不能再把file_stat移动到global delete链表了。因为这个file_stat已经被iput()->__destroy_inode_handler_post()并发标记
+	 * in_delete_file标记，并移动到global delete链表了。bug就在这里，之前把file_stat移动到global delete链表，是判断file_stat
+	 * 是否有in_delete标记，但是iput()->__destroy_inode_handler_post()并发释放inode时，是global_lock加锁后，标记file_stat的
+	 * in_delete标记，然后file_stat_delete_protect_try_lock加锁成功，才会标记file_stat的in_delete_file标记，然后把file_stat
+	 * 移动到global delete链表。因此，我的异步内存回收线程里，把file_stat移动到global delete链表，要判断file_stat是否有
+	 * in_delete_file标记，而不是in_delete标记。!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	 *
+	 * file_stat被iput()并发移动到global delete链表的唯一标记是file_stat in_delete_file标记，而不是in_delete标记*/
+	if(!file_stat_in_delete_base(p_file_stat_base)/* || file_stat_in_delete_file_base(p_file_stat_base)*/)
 		panic("%s p_file_stat:0x%llx status:0x%x delete status fial\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+   
+	/* file_stat被iput()并发移动到global delete链表的唯一标记是file_stat in_delete_file标记，而不是in_delete标记.
+	 * 因此异步内存回收线程 把file_stat移动到global delete链表前要判断file_stat是否有in_delete_file标记。否则，就会
+	 * 出现问题：iput()__destroy_inode_handler_post()里，global_lock加锁后，标记file_stat的in_delete标记，但是
+	 * file_stat_delete_protect_try_lock加锁失败，而没有标记file_stat的in_delete_file，并把file_stat移动到global delete
+	 * 链表。然后，异步内存回收线程，检测到file_stat有delete标记，于是执行move_file_stat_to_global_delete_list()
+	 * 把file_stat移动global delete链表，global_lock加锁后，因file_stat有delete链表，就不再把file_stat移动到
+	 * global delete链表了。于是这个file_stat就长时间残留在global temp链表，移动不到global delete链表*/
+	if(/*!file_stat_in_delete_base(p_file_stat_base)*/ !file_stat_in_delete_file_base(p_file_stat_base)){
+		/*凡是移动到global delete链表的file_stat都要设置in_delete_file标记*/
+		set_file_stat_in_delete_file_base(p_file_stat_base);
+		if(FILE_STAT_NORMAL == file_type){
+			//p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
+			//list_move(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.file_stat_delete_head);
+			if(is_cache_file)
+				list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_delete_head);
+			else
+				list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_delete_head);
+		}
+		else if(FILE_STAT_SMALL == file_type){
+			//p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
+			//list_move(&p_file_stat_small->hot_cold_file_list,&hot_cold_file_global_info.file_stat_small_delete_head);
+			if(is_cache_file)
+				list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_small_delete_head);
+			else
+				list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_small_delete_head);
+		}
+		else{
+			if(FILE_STAT_TINY_SMALL != file_type)
+				panic("%s file_stat:0x%llx status:0x%x file_stat_type:0x%x error\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_type);
 
-	if(FILE_STAT_NORMAL == file_type){
-		//p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
-		//list_move(&p_file_stat->hot_cold_file_list,&hot_cold_file_global_info.file_stat_delete_head);
-		if(is_cache_file)
-			list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_delete_head);
-		else
-			list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_delete_head);
+			//p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
+			//list_move(&p_file_stat_tiny_small->hot_cold_file_list,&hot_cold_file_global_info.file_stat_tiny_small_delete_head);
+			if(is_cache_file)
+				list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_tiny_small_delete_head);
+			else
+				list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_tiny_small_delete_head);
+		}
 	}
-	else if(FILE_STAT_SMALL == file_type){
-		//p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
-		//list_move(&p_file_stat_small->hot_cold_file_list,&hot_cold_file_global_info.file_stat_small_delete_head);
-		if(is_cache_file)
-			list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_small_delete_head);
-		else
-			list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_small_delete_head);
-	}
-	else{
-		if(FILE_STAT_TINY_SMALL != file_type)
-			panic("%s file_stat:0x%llx status:0x%x file_stat_type:0x%x error\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_type);
-
-		//p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
-		//list_move(&p_file_stat_tiny_small->hot_cold_file_list,&hot_cold_file_global_info.file_stat_tiny_small_delete_head);
-		if(is_cache_file)
-			list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_tiny_small_delete_head);
-		else
-			list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_tiny_small_delete_head);
-	}
-
 	if(is_cache_file)
 	    spin_unlock(&p_hot_cold_file_global->global_lock);
 	else
