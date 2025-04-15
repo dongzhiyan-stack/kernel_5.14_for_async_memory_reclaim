@@ -69,6 +69,9 @@
 #define MMAP_FILE_REFAULT_TO_TEMP_AGE_DX 8
 #define MMAP_FILE_COLD_TO_FREE_AGE_DX    5
 
+#define TINY_SMALL_TO_TINY_SMALL_ONE_AREA_LEVEL 3
+#define TINY_SMALL_ONE_AREA_TO_TINY_SMALL_LEVEL 6
+
 //每次扫描文件file_stat的热file_area个数
 #define SCAN_HOT_FILE_AREA_COUNT_ONCE 8
 ////每次扫描文件file_stat的mapcount file_area个数
@@ -1690,8 +1693,10 @@ next_folio:
 	}
 
 	/*file_area里有至少一个mmap page，且pte access bit置1了，判定为被访问了，赋值global_age*/
-	if(ret > 0)
+	if(ret > 0){
 		p_file_area->file_area_age = p_hot_cold_file_global->global_age;
+		p_file_stat_base->recent_access_age = p_hot_cold_file_global->global_age;
+	}
 
 	/* 目前只允许in_temp、in_warm链表上的file_area转成hot 和mapcount file_area。现在cache file和mmap file_aea获取file_area_age采用同一个
 	 * 函数接口。in_hot、in_mapcount、in_free等链表上的file_area也会执行该函数获取file_area_age，必须要屏蔽掉它们*/
@@ -2475,12 +2480,23 @@ file_stat_access:
 				 */
 				switch (file_type){
 					case FILE_STAT_TINY_SMALL:
-						if(is_cache_file)
-							list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_tiny_small_file_head);
-						else
-							list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_tiny_small_file_head);
+						if(p_file_stat_base->file_area_count > TINY_SMALL_TO_TINY_SMALL_ONE_AREA_LEVEL){
+							set_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
+							if(is_cache_file)
+								list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_tiny_small_file_head);
+							else
+								list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_tiny_small_file_head);
+						}
+						else{
+							set_file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base);
+							if(is_cache_file)
+								list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_tiny_small_file_one_area_head);
+							else
+								list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_tiny_small_file_one_area_head);
+						}
 						break;
 					case FILE_STAT_SMALL:
+						set_file_stat_in_file_stat_middle_file_head_list_base(p_file_stat_base);
 						if(is_cache_file)
 							list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_small_file_head);
 						else
@@ -4088,7 +4104,12 @@ static noinline unsigned int cache_file_stat_move_to_mmap_head(struct hot_cold_f
 		/*现在改为把file_stat_base结构体添加到global temp/hot/large/midlde/tiny small/small file链表，不再是file_stat或file_stat_small或file_stat_tiny_small结构体*/
 		if(FILE_STAT_TINY_SMALL == file_type){
 			//p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
-			list_add(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_tiny_small_file_head);
+			if(file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base))
+				list_add(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_tiny_small_file_head);
+			else if(file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base))
+				list_add(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_tiny_small_file_one_area_head);
+			else
+				BUG();
 		}
 		else if(FILE_STAT_SMALL == file_type){
 			//p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
@@ -4096,7 +4117,14 @@ static noinline unsigned int cache_file_stat_move_to_mmap_head(struct hot_cold_f
 		}
 		else if(FILE_STAT_NORMAL == file_type){
 			//p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
-			list_add(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_temp_head);
+			if(file_stat_in_file_stat_temp_head_list_base(p_file_stat_base))
+				list_add(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_temp_head);
+			else if(file_stat_in_file_stat_middle_file_head_list_base(p_file_stat_base))
+				list_add(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_middle_file_head);
+			else if(file_stat_in_file_stat_large_file_head_list_base(p_file_stat_base))
+				list_add(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_large_file_head);
+			else
+				BUG();
 		}else
 			BUG();
 	}
@@ -4704,6 +4732,12 @@ int check_file_stat_is_valid(struct file_stat_base *p_file_stat_base,unsigned in
 				panic("%s file_stat:0x%llx not int file_stat_tiny_small status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
 
 			break;
+		case F_file_stat_in_file_stat_tiny_small_file_one_area_head_list:
+			/*file_stat此时可能被方法iput()释放delete，但file_stat的delete的标记与file_stat in_temp_list 是共存的，不干扰file_stat in_temp_list的判断*/
+			if(!file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base) || file_stat_in_file_stat_tiny_small_file_one_area_head_list_error_base(p_file_stat_base))
+				panic("%s file_stat:0x%llx not int file_stat_tiny_small_one_area status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+			break;
 		case F_file_stat_in_file_stat_small_file_head_list:
 			/*file_stat此时可能被方法iput()释放delete，但file_stat的delete的标记与file_stat in_temp_list 是共存的，不干扰file_stat in_temp_list的判断*/
 			if(!file_stat_in_file_stat_small_file_head_list_base(p_file_stat_base) || file_stat_in_file_stat_small_file_head_list_error_base(p_file_stat_base))
@@ -4728,7 +4762,62 @@ int check_file_stat_is_valid(struct file_stat_base *p_file_stat_base,unsigned in
 	}
 	return 0;
 }
-static inline unsigned int get_file_area_from_file_stat_list_common(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,unsigned int scan_file_area_max,unsigned int file_stat_list_type,unsigned int file_type,char is_cache_file)
+static inline unsigned int one_file_area_file_stat_tiny_small_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,char is_cache_file)
+{
+	spinlock_t *p_global_lock;
+	int ret = 0;
+
+	if(is_cache_file)
+		p_global_lock = &p_hot_cold_file_global->global_lock;
+	else
+		p_global_lock = &p_hot_cold_file_global->mmap_file_global_lock;
+
+	/* global tiny small链表上只有一个file_area的file_stat移动到global tiny_small_one_area链表。
+	 * global tiny_small_one_area链表上的file_stat，如果个数大于一定数目则移动回global tiny small链表*/
+	if(file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base)){
+		/*file_stat的file_area_count必须大于0，等于0时要移动到global zero file_area链表*/
+		if(p_file_stat_base->file_area_count > 0 && p_file_stat_base->file_area_count <= TINY_SMALL_TO_TINY_SMALL_ONE_AREA_LEVEL
+				/*&& p_hot_cold_file_global->globe_age - p_file_stat_base->recent_access_age > 2*/){
+			spin_lock(p_global_lock);
+			if(!file_stat_in_delete_base(p_file_stat_base)){
+				clear_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
+				set_file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base);
+
+				if(is_cache_file)
+					list_move(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_tiny_small_file_one_area_head);
+				else
+					list_move(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_tiny_small_file_one_area_head);
+			}
+			spin_unlock(p_global_lock);
+
+			ret = 1;
+			p_hot_cold_file_global->tiny_small_file_stat_to_one_area_count ++;
+		}
+	}
+	else if(file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base)){
+		if(p_file_stat_base->file_area_count > TINY_SMALL_ONE_AREA_TO_TINY_SMALL_LEVEL){
+
+			spin_lock(p_global_lock);
+			if(!file_stat_in_delete_base(p_file_stat_base)){
+				clear_file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base);
+				set_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
+				/*移动到链表尾，尽可能快的遍历到，因为有可能是是small file_stat或大file_stat*/
+				if(is_cache_file)
+					list_move_tail(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_tiny_small_file_head);
+				else
+					list_move_tail(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_tiny_small_file_head);
+			}
+			spin_unlock(p_global_lock);
+
+			ret = 1;
+		}
+	}
+	else
+		BUG();
+
+	return ret;
+}
+static unsigned int get_file_area_from_file_stat_list_common(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,unsigned int scan_file_area_max,unsigned int file_stat_list_type,unsigned int file_type,char is_cache_file)
 {
 	struct file_stat *p_file_stat = NULL;
 	struct file_stat_small *p_file_stat_small = NULL;
@@ -4868,6 +4957,13 @@ static inline unsigned int get_file_area_from_file_stat_list_common(struct hot_c
 				//如果该文件没有file_area了，则把对应file_stat移动到hot_cold_file_global->zero链表
 				case F_file_stat_in_file_stat_tiny_small_file_head_list:
 					clear_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
+					if(is_cache_file)
+						list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_tiny_small_zero_file_area_head);
+					else
+						list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_tiny_small_zero_file_area_head);
+					break;
+				case F_file_stat_in_file_stat_tiny_small_file_one_area_head_list:
+					clear_file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base);
 					if(is_cache_file)
 						list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_tiny_small_zero_file_area_head);
 					else
@@ -5116,7 +5212,16 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 #else
 		if(is_cache_file && cache_file_change_to_mmap_file(p_hot_cold_file_global,p_file_stat_base,file_type))
 			goto next_file_stat_unlock;
-#endif		
+#endif	
+		/* global tiny small链表上只有一个file_area的file_stat移动到global tiny_small_one_area链表。global tiny_small_one_area链表上的file_stat，
+		 * 如果file_area个数大于一定数目则移动回global tiny small链表。if成立说明发生了这两种情况，本次循环就结束遍历。有一个隐藏情况，就是第2种
+		 * 情况，tiny_small_one_area file_stat因为file_area数目很多，超过64了，其实是可以执行下边的can_tiny_small_file_change_to_small_normal_file()
+		 * 直接转成small file_stat或file_stat的，但是该函数原本是针对tiny small file_stat设计的，不是针对tiny_small_one_area file_stat。为了避免
+		 * 后续出现状态混乱，这类规定tiny_small_one_area file_stat不能直接转成small file_stat或file_stat，而是先转成tiny small file_stat，在转*/
+		if(FILE_STAT_TINY_SMALL == file_type && one_file_area_file_stat_tiny_small_solve(p_hot_cold_file_global,p_file_stat_base,is_cache_file)){
+			goto next_file_stat_unlock;
+		}
+
 		/* tiny small文件的file_area个数如果超过阀值则转换成small或normal文件等。这个操作必须放到get_file_area_from_file_stat_list_common()
 		 * 函数里遍历该file_stat的file_area前边，以保证该文件的in_refault、in_hot、in_free属性的file_area都集中在tiny small->temp链表尾的64
 		 * file_area，后续即便大量新增file_area，都只在tiny small->temp链表头，详情见can_tiny_small_file_change_to_small_normal_file()注释*/
@@ -5482,6 +5587,9 @@ static noinline int walk_throuth_all_file_area(struct hot_cold_file_global *p_ho
 
 		scan_cold_file_area_count += get_file_area_from_file_stat_list(p_hot_cold_file_global,param->scan_tiny_small_file_area_max,param->scan_tiny_small_file_stat_max,
 				&p_hot_cold_file_global->file_stat_tiny_small_file_head,F_file_stat_in_file_stat_tiny_small_file_head_list,FILE_STAT_TINY_SMALL,is_cache_file);
+		
+		scan_cold_file_area_count += get_file_area_from_file_stat_list(p_hot_cold_file_global,param->scan_tiny_small_file_area_max,param->scan_tiny_small_file_stat_max,
+				&p_hot_cold_file_global->file_stat_tiny_small_file_one_area_head,F_file_stat_in_file_stat_tiny_small_file_one_area_head_list,FILE_STAT_TINY_SMALL,is_cache_file);
 	}else{
 		scan_cold_file_area_count += get_file_area_from_file_stat_list(p_hot_cold_file_global,param->scan_large_file_area_max,param->scan_large_file_stat_max, 
 				&p_hot_cold_file_global->mmap_file_stat_large_file_head,F_file_stat_in_file_stat_large_file_head_list,FILE_STAT_NORMAL,is_cache_file);
@@ -5498,6 +5606,9 @@ static noinline int walk_throuth_all_file_area(struct hot_cold_file_global *p_ho
 
 		scan_cold_file_area_count += get_file_area_from_file_stat_list(p_hot_cold_file_global,param->scan_tiny_small_file_area_max,param->scan_tiny_small_file_stat_max,
 				&p_hot_cold_file_global->mmap_file_stat_tiny_small_file_head,F_file_stat_in_file_stat_tiny_small_file_head_list,FILE_STAT_TINY_SMALL,is_cache_file);
+		
+		scan_cold_file_area_count += get_file_area_from_file_stat_list(p_hot_cold_file_global,param->scan_tiny_small_file_area_max,param->scan_tiny_small_file_stat_max,
+				&p_hot_cold_file_global->mmap_file_stat_tiny_small_file_one_area_head,F_file_stat_in_file_stat_tiny_small_file_one_area_head_list,FILE_STAT_TINY_SMALL,is_cache_file);
 	}
 
 	/* 遍历global hot链表上的file_stat，再遍历这些file_stat->hot链表上的file_area，如果不再是热的，则把file_area

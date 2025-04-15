@@ -469,7 +469,7 @@ struct file_stat_base
 
 	/**针对mmap文件新增的****************************/
 	//最新一次访问的file_area，mmap文件用
-	struct file_area *file_area_last;
+	//struct file_area *file_area_last;
 	//件file_stat->file_area_temp链表上已经扫描的file_stat个数，如果达到file_area_count_in_temp_list，说明这个文件的file_stat扫描完了，才会扫描下个文件file_stat的file_area
 	//unsigned int scan_file_area_count_temp_list;-
 	//在文件file_stat->file_area_temp链表上的file_area个数
@@ -477,7 +477,7 @@ struct file_stat_base
 	//文件 mapcount大于1的file_area的个数
 	//unsigned int mapcount_file_area_count;--------------------------------------
 	//当扫描完一轮文件file_stat的temp链表上的file_area时，置1，进入冷却期，在N个age周期内不再扫描这个文件上的file_area。
-	bool cooling_off_start;
+	//bool cooling_off_start;
 	
 	//处于中间状态的file_area结构添加到这个链表，新分配的file_area就添加到这里
 	struct list_head file_area_temp;
@@ -547,6 +547,7 @@ struct hot_cold_file_global
 	struct list_head file_stat_temp_head;
 	struct list_head file_stat_small_file_head;
 	struct list_head file_stat_tiny_small_file_head;
+	struct list_head file_stat_tiny_small_file_one_area_head;
 	/*中等大小文件移动到这个链表*/
 	struct list_head file_stat_middle_file_head;
 	/*如果文件file_stat上的page cache数太多，被判定为大文件，则把file_stat移动到这个链表。将来内存回收时，优先遍历这种file_stat，
@@ -653,6 +654,7 @@ struct hot_cold_file_global
 	struct list_head mmap_file_stat_temp_head;
 	struct list_head mmap_file_stat_small_file_head;
 	struct list_head mmap_file_stat_tiny_small_file_head;
+	struct list_head mmap_file_stat_tiny_small_file_one_area_head;
 	struct list_head mmap_file_stat_middle_file_head;
 	//文件file_stat个数超过阀值移动到这个链表
 	struct list_head mmap_file_stat_large_file_head;
@@ -721,6 +723,9 @@ struct hot_cold_file_global
 	unsigned long file_stat_delete_protect;
 
 	struct file_stat_base *print_file_stat;
+	
+	unsigned long tiny_small_file_stat_to_one_area_count;
+	unsigned long file_stat_tiny_small_one_area_move_tail_count;
 };
 
 
@@ -820,22 +825,24 @@ FILE_AREA_LIST_STATUS(mapcount_list)
 /*******file_stat状态**********************************************************/
 enum file_stat_status{//file_area_state是long类型，只有64个bit位可设置
 	F_file_stat_in_file_stat_hot_head_list,
+	F_file_stat_in_file_stat_tiny_small_file_one_area_head_list,//只有一个file_area的file_stat_tiny_small移动到这个链表头
 	F_file_stat_in_file_stat_tiny_small_file_head_list,
 	F_file_stat_in_file_stat_small_file_head_list,
+
 	F_file_stat_in_file_stat_temp_head_list,//3
-	
 	F_file_stat_in_file_stat_middle_file_head_list,
 	F_file_stat_in_file_stat_large_file_head_list,
 	F_file_stat_in_mapcount_file_area_list,//文件file_stat是mapcount文件
+
 	F_file_stat_in_zero_file_area_list,//7
-	
 	F_file_stat_in_cache_file,//cache文件，sysctl读写产生pagecache。有些cache文件可能还会被mmap映射，要与mmap文件互斥
 	F_file_stat_in_mmap_file,//mmap文件，有些mmap文件可能也会被sysctl读写产生pagecache，要与cache文件互斥
 	F_file_stat_in_from_cache_file,//mmap文件是从cache文件的global temp链表移动过来的
-	F_file_stat_in_test,
 
+	F_file_stat_in_test,
 	F_file_stat_invalid_start_index,
 	F_file_stat_in_delete_file,//标识该file_stat被移动到了global delete链表	
+
 	//F_file_stat_in_drop_cache,
 	//F_file_stat_in_free_page,//正在遍历file_stat的file_area的page，尝试释放page
 	//F_file_stat_in_free_page_done,//正在遍历file_stat的file_area的page，完成了page的内存回收,
@@ -920,6 +927,7 @@ FILE_STAT_STATUS_BASE(file_stat_middle_file_head)
 FILE_STAT_STATUS_BASE(file_stat_large_file_head)
 FILE_STAT_STATUS_BASE(file_stat_small_file_head)
 FILE_STAT_STATUS_BASE(file_stat_tiny_small_file_head)
+FILE_STAT_STATUS_BASE(file_stat_tiny_small_file_one_area_head)
 FILE_STAT_STATUS_BASE(zero_file_area)
 FILE_STAT_STATUS_BASE(mapcount_file_area)
 
@@ -1584,6 +1592,7 @@ static inline long get_file_stat_type(struct file_stat_base *file_stat_base)
 		case 1 << F_file_stat_in_file_stat_small_file_head_list:
 			return FILE_STAT_SMALL;
 		case 1 << F_file_stat_in_file_stat_tiny_small_file_head_list:
+		case 1 << F_file_stat_in_file_stat_tiny_small_file_one_area_head_list:
 			return FILE_STAT_TINY_SMALL;
 
 		case 1 << F_file_stat_in_file_stat_temp_head_list:
@@ -2315,6 +2324,48 @@ static inline struct file_area *file_area_alloc_and_init(unsigned int area_index
 	//在file_stat->file_area_temp链表的file_area个数加1
 	p_file_stat_base->file_area_count_in_temp_list ++;
 	set_file_area_in_init(p_file_area);
+
+	/* 如果tiny small文件的file_area个数超过阀值了，则把file_stat移动到global tiny_small链表尾，异步内存回收
+	 * 线程下个周期就会把该file_stat转成大file_stat或small file_stat。这个操作完全可以去掉。不行，有个漏洞。
+	 * 这个if很容易成立，file_area个数大于阀值时，每次执行到这里if都成立，浪费性能。可以判断是否是否在链表尾
+	 * global file_stat_tiny_small_file_head或global file_stat_tiny_small_file_one_area_head或
+	 * global mmap_file_stat_tiny_small_file_head链表尾，太麻烦了，这个函数不允许浪费性能。那怎么解决，把
+	 * file_area个数很少的tiny small file stat尽可能移动到global tiny small one area链表，尽可能移动到快的发现
+	 * 在global tiny small链表上的file_area个数很多的file_stat。也不太好。最后决定这样处理
+	 * 1：把global file_stat_tiny_small_file链表上的file_stat尽可能多移动到global file_stat_tiny_small_file_one_area
+	 * 链表，只要file_area个数小于3都移动，如此global file_stat_tiny_small_file链表上的file_stat会尽可能少
+	 * 2：当前函数，只判断global file_stat_tiny_small_file_one_area链表上file_stat_tiny_small_one_area，
+	 * 如果file_area个数大于阀值，则把该file_stat_tiny_small_one_area移动到global file_stat_tiny_small链表，
+	 * 这样if判断条件就很少了，也不用判断file_stat_tiny_small_file_one_area是否处于链表头。移动链表后，
+	 * if(file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base))就不成立了*/
+	if(file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base) && p_file_stat_base->file_area_count > SMALL_FILE_AREA_COUNT_LEVEL){
+		if(file_stat_in_cache_file_base(p_file_stat_base)){
+			spin_lock(&hot_cold_file_global_info.global_lock);
+			/* 1：一切把file_stat移动到global temp、small、tiny_small链表的的操作，加锁后都要判断file_stat是否被iput释放了
+			 * 但是执行该函数时，该文件正被读写分配folio，文件不可能会iput()，这个判断是多余的，先留着吧。
+			 * 2：但是，还有另一个重点，这里跟跟异步内存回收线程经常并发，因此加锁后，必须再判断，file_stat状态是否改变了，
+			 * 必须再判断一次file_stat状态!!!!!!!!!!!!!!!!!!!*
+			 * 3：还要再判断一次file_stat是否还是in_cache_file状态，因为异步内存回收线程可能把cache file转成mmap file了。
+			 *    mmap文件不判断转成cache文件，故mmap文件不做这个判断*/
+			if( !file_stat_in_delete_base(p_file_stat_base) && file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base) &&
+					file_stat_in_cache_file_base(p_file_stat_base)){
+				clear_file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base);
+				set_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
+				list_move_tail(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_tiny_small_file_head);
+			}
+			spin_unlock(&hot_cold_file_global_info.global_lock);
+		}
+		else{
+			spin_lock(&hot_cold_file_global_info.mmap_file_global_lock);
+			if(!file_stat_in_delete_base(p_file_stat_base) && file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base)){
+				clear_file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base);
+				set_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
+				list_move_tail(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_tiny_small_file_head);
+			}
+			spin_unlock(&hot_cold_file_global_info.mmap_file_global_lock);
+		}
+		hot_cold_file_global_info.file_stat_tiny_small_one_area_move_tail_count ++;
+	}
 
 out:
 	spin_unlock(&p_file_stat_base->file_stat_lock);
