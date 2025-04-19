@@ -671,6 +671,12 @@ static noinline void __destroy_inode_handler_post(struct inode *inode)
 			 * 一个我之前定下的一个原则，必须要在spin_lock加锁后再判断一次file_area和file_stat状态，是否有变化，
 			 * 因为可能在spin_lock加锁前一瞬间状态已经被修改了!!!!!!!!!!!!!!!!!!!!!!!*/
 			spin_lock_irq(&hot_cold_file_global_info.global_lock);
+			/*存在极端情况，iput()时，异步内存回收线程正把cache文件转成mmap文件，这里成功加锁后可能把cache file_stat转成mmap文件了，此时就要走mmap文件分支处理了*/
+			if(!file_stat_in_cache_file_base(p_file_stat_base)){
+			    spin_unlock_irq(&hot_cold_file_global_info.global_lock);
+				printk("%s p_file_stat:0x%llx status:0x%x cache change to mmap!!!!!!!\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+                goto mmap_file_solve;
+			}
 			if(!file_stat_in_delete_base(p_file_stat_base)){
 				/*file_stat不一定只会在global temp链表，也会在global hot等链表，这些标记不清理了*/
 				//clear_file_stat_in_file_stat_temp_head_list(p_file_stat);
@@ -720,6 +726,7 @@ static noinline void __destroy_inode_handler_post(struct inode *inode)
 			/* 注意，会出现极端情况。so等elf文件最初被判定为cache file而在global temp链表，然后
 			 * cache_file_stat_move_to_mmap_head()函数中正把该file_stat移动到globaol mmap_file_stat_temp_head链表。会出现短暂的
 			 * file_stat即没有in_cache_file也没有in_mmap_file状态，此时就会走到else分支，按照mmap文件的delete处理!!!!!!!!!!*/
+mmap_file_solve:
 
 			spin_lock_irq(&hot_cold_file_global_info.mmap_file_global_lock);
 			if(!file_stat_in_delete_base(p_file_stat_base)){
@@ -4034,6 +4041,7 @@ static noinline int scan_mmap_mapcount_file_stat(struct hot_cold_file_global *p_
 	p_hot_cold_file_global->mmap_file_shrink_counter.mapcount_to_temp_file_area_count_from_mapcount_file += mapcount_to_temp_file_area_count_from_mapcount_file;
 	return scan_file_area_count;
 }
+#if 0
 /*把在global file_stat_temp_head链表但实际是mmap的文件file_stat从global file_stat_temp_head链表剔除，然后添加到global mmap_file_stat_temp_head链表。
  *注意，现在规定只有tiny small文件才允许从cache file转成mmap文件，不允许small、normal文件转换。因为，转成tiny small mmap文件后，可以再经先有代码
  *转成small/normal mmap文件。目的是为了降低代码复杂度，其实这个函数里也可以根据file_area个数，把tiny small cache文件转成normal mmap文件，太麻烦了 */
@@ -4132,6 +4140,63 @@ static noinline unsigned int cache_file_stat_move_to_mmap_head(struct hot_cold_f
 
 	return 0;
 }
+#else
+/*把在global file_stat_temp_head链表但实际是mmap的文件file_stat从global file_stat_temp_head链表剔除，然后添加到global mmap_file_stat_temp_head链表。
+ *注意，现在规定只有tiny small文件才允许从cache file转成mmap文件，不允许small、normal文件转换。因为，转成tiny small mmap文件后，可以再经先有代码
+ *转成small/normal mmap文件。目的是为了降低代码复杂度，其实这个函数里也可以根据file_area个数，把tiny small cache文件转成normal mmap文件，太麻烦了 */
+static noinline unsigned int cache_file_stat_move_to_mmap_head(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,unsigned int file_type)
+{
+	if(file_stat_in_mmap_file_base(p_file_stat_base))
+		panic("%s file_stat:0x%llx status:0x%x in mmap error\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+	/* 之前的方案有问题
+	 * 1：在iput()，会发生file_stat既没有in_cache也没有in_mmap标记，怕因file_stat状态错误触发潜在bug!!!!!!!!!!!!!!
+	 * 并且，现在cache和mmap file_stat合二为一，不用再synchronize_rcu()等待进程hot_file_update_file_status()函数。
+	 * 2：还有一个潜在bug。之前的cache_file_stat_move_to_mmap_head()函数，是先global_lock加锁，list_del掉file_stat，
+	 * 然后再mmap_file_global_lock加锁，list_add把file_stat移动到mmap global file_stat等链表。这就有问题了。如果在
+	 * global_lock加锁，list_del掉file_stat，此时文件被并发iput()，则要把该file_stat list_move到global delete链表，
+	 * list_move本质list_del加list_add，可以该file_stat已经list_del了，再list_del就有问题了，这是个bug!!!!!!!!!!!
+	 * 
+	 * 于是，现在改为globla_lock和mmap_lock同时加锁，清理in_cache且设置in_mmap标记，避免潜在麻烦。此时iput()释放
+	 * 文件inode，不管是cache文件，还是mmap文件，因为这里globla_lock和mmap_lock同时加锁，都没有了并发问题*/
+	spin_lock(&p_hot_cold_file_global->global_lock);
+	spin_lock(&p_hot_cold_file_global->mmap_file_global_lock);
+	/*file_stat可能被并发iput释放掉，必须是加锁后判断一次是否delete了*/
+	if(!file_stat_in_delete_base(p_file_stat_base)){
+		clear_file_stat_in_cache_file_base(p_file_stat_base);
+		set_file_stat_in_mmap_file_base(p_file_stat_base);
+		set_file_stat_in_from_cache_file_base(p_file_stat_base);
+
+		/*现在改为把file_stat_base结构体添加到global temp/hot/large/midlde/tiny small/small file链表，不再是file_stat或file_stat_small或file_stat_tiny_small结构体*/
+		if(FILE_STAT_TINY_SMALL == file_type){
+			if(file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base))
+				list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_tiny_small_file_head);
+			else if(file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base))
+				list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_tiny_small_file_one_area_head);
+			else
+				BUG();
+		}
+		else if(FILE_STAT_SMALL == file_type){
+			list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_small_file_head);
+		}
+		else if(FILE_STAT_NORMAL == file_type){
+			if(file_stat_in_file_stat_temp_head_list_base(p_file_stat_base))
+				list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_temp_head);
+			else if(file_stat_in_file_stat_middle_file_head_list_base(p_file_stat_base))
+				list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_middle_file_head);
+			else if(file_stat_in_file_stat_large_file_head_list_base(p_file_stat_base))
+				list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_large_file_head);
+			else
+				BUG();
+		}else
+			BUG();
+	}
+	spin_unlock(&p_hot_cold_file_global->mmap_file_global_lock);
+	spin_unlock(&p_hot_cold_file_global->global_lock);
+
+	return 0;
+}
+#endif
 /*回收file_area->free_temp链表上的冷file_area的page，回收后的file_area移动到file_stat->free链表头*/
 static noinline unsigned int free_page_from_file_area(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_free_temp,char file_stat_type)
 {
