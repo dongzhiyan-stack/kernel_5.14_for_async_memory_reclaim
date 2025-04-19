@@ -873,12 +873,6 @@ static int print_one_list_file_stat(struct hot_cold_file_global *p_hot_cold_file
 	char file_name_path[MAX_FILE_NAME_LEN];
 	unsigned int scan_file_stat_count = 0;
 
-	if(!list_empty(file_stat_temp_head)){
-		if(is_proc_print)
-			seq_printf(m,"%s",file_stat_name);
-		else	
-			printk("%s",file_stat_name);
-	}
 	/* 如果在遍历file_stat过程，p_file_stat和它在链表的下一个file_stat即p_file_stat_temp都被iput释放了，
 	 * 二者都被移动到了global delete链表，然后得到p_file_stat或p_file_stat_temp在链表的下一个file_stat，
 	 * 就跨链表了，会陷入死循环，因为链表头由file_stat_temp_head变为了global delete。这样就会遍历链表
@@ -963,6 +957,13 @@ static int print_one_list_file_stat(struct hot_cold_file_global *p_hot_cold_file
 
 		if(need_resched())
 			cond_resched();
+	}
+
+	if(!list_empty(file_stat_temp_head)){
+		if(is_proc_print)
+			seq_printf(m,"%s file_count:%d\n\n",file_stat_name,scan_file_stat_count);
+		else	
+			printk("%s file_count:%d\n\n",file_stat_name,scan_file_stat_count);
 	}
 
 	return all_pages;

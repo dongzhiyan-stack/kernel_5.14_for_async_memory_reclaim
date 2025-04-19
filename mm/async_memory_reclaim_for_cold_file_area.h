@@ -2136,7 +2136,8 @@ static inline struct file_stat_base *file_stat_alloc_and_init_tiny_small(struct 
 	set_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
 
 	if(is_cache_file){
-		hot_cold_file_global_info.file_stat_tiny_small_count++;
+		//hot_cold_file_global_info.file_stat_tiny_small_count++;
+		hot_cold_file_global_info.file_stat_count++;
 		list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_tiny_small_file_head);
 	}
 	else{
@@ -2150,7 +2151,7 @@ static inline struct file_stat_base *file_stat_alloc_and_init_tiny_small(struct 
 out:
 	return p_file_stat_base;
 }
-static inline struct file_stat_base * file_stat_alloc_and_init_other(struct address_space *mapping,unsigned int file_type,char free_old_file_stat,char is_cache_file)
+static inline struct file_stat_base *file_stat_alloc_and_init_other(struct address_space *mapping,unsigned int file_type,char free_old_file_stat,char is_cache_file)
 {
 	struct file_stat_base *p_file_stat_base = NULL;
 	spinlock_t *p_global_lock;
@@ -2279,13 +2280,11 @@ static inline struct file_stat_base * file_stat_alloc_and_init_other(struct addr
 	}else
 		BUG();
 
-
 	if(shrink_page_printk_open)
 		printk("%s file_stat:0x%llx\n",__func__,(u64)p_file_stat_base);
 
 out:
 	return p_file_stat_base;
-
 }
 
 static inline struct file_area *file_area_alloc_and_init(unsigned int area_index_for_page,struct file_stat_base *p_file_stat_base)
@@ -2442,8 +2441,10 @@ static int inline file_inode_lock(struct file_stat_base *p_file_stat_base)
 				printk("%s file_stat:0x%llx inode:0x%llx dentry:0x%llx %s icount0!!!!!!!\n",__func__,(u64)p_file_stat_base,(u64)inode,(u64)dentry,dentry->d_name.name);
 			else 
 				printk("%s file_stat:0x%llx inode:0x%llx dentry:0x%llx icount0!!!!!!!\n",__func__,(u64)p_file_stat_base,(u64)inode,(u64)dentry);
-		}else
-			printk("%s file_stat:0x%llx inode:0x%llx icount0!!!!!!! i_nlink:%d nrpages:%ld lru_list_empty:%d %s\n",__func__,(u64)p_file_stat_base,(u64)inode,inode->i_nlink,inode->i_mapping->nrpages,list_empty(&inode->i_lru),inode->i_sb->s_id);
+		}else{
+			if(shrink_page_printk_open_important)
+				printk("%s file_stat:0x%llx inode:0x%llx icount0!!!!!!! i_nlink:%d nrpages:%ld lru_list_empty:%d %s\n",__func__,(u64)p_file_stat_base,(u64)inode,inode->i_nlink,inode->i_mapping->nrpages,list_empty(&inode->i_lru),inode->i_sb->s_id);
+		}
 		//iput(inode);
 
 		//lock_fail = 2;引用计数是0是正常现象，此时也能加锁成功，只要保证inode此时不是已经释放的状态
@@ -2520,9 +2521,11 @@ static void inline list_move_enhance(struct list_head *head,struct list_head *fi
 			new_tail->next = head;
 
 			if(shrink_page_printk_open_important)
-			    printk("%ps->list_move_enhance() head:0x%llx ok\n",__builtin_return_address(0),(u64)head);
-		}else
+				printk("%ps->list_move_enhance() head:0x%llx ok\n",__builtin_return_address(0),(u64)head);
+		}else{
+			if(shrink_page_printk_open_important || first != head->next)
 			printk("%ps->list_move_enhance() head:0x%llx first:0x%llx head->next:0x%llx %d fail\n",__builtin_return_address(0),(u64)head,(u64)first,(u64)head->next,list_is_last(tail,head));
+		}
 	}
 }
 /*测试file_area是否真的在file_area_in_list_type这个file_stat的链表(file_stat->temp、hot、refault、warm、mapcount链表)，不在则不能把p_file_area从链表尾的file_area移动到链表头*/
