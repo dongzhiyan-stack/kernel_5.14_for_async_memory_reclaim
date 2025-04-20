@@ -193,6 +193,26 @@ struct mmap_file_shrink_counter
 	unsigned int file_area_hot_to_warm_list_count;
 	unsigned int file_area_refault_to_warm_list_count;
 	unsigned int file_area_free_count_from_free_list;
+	
+	unsigned int scan_read_file_area_count_from_temp;
+	unsigned int temp_to_hot_file_area_count;
+	unsigned int scan_ahead_file_area_count_from_temp;
+	unsigned int warm_to_hot_file_area_count;
+	unsigned int scan_file_area_count_from_warm;
+	unsigned int scan_ahead_file_area_count_from_warm;
+	unsigned int scan_read_file_area_count_from_warm;
+	unsigned int file_area_hot_to_warm_from_hot_file;
+	unsigned int del_zero_file_area_file_stat_count;
+	unsigned int scan_zero_file_area_file_stat_count;
+	unsigned int cache_file_stat_get_file_area_fail_count;
+	unsigned int mmap_file_stat_get_file_area_from_cache_count;
+	unsigned int scan_cold_file_area_count_from_mmap_file;
+	unsigned int isolate_lru_pages_from_mmap_file;
+	unsigned int isolate_lru_pages;
+	unsigned int free_pages_count;
+	unsigned int free_pages_from_mmap_file;
+	unsigned int find_mmap_page_count_from_cache_file;
+	unsigned int scan_delete_file_stat_count;
 #if 0	
 	//扫描的file_area个数
 	unsigned int scan_file_area_count;
@@ -278,6 +298,10 @@ struct hot_cold_file_shrink_counter
 	unsigned int dirty_count;
 
 	unsigned int lru_lock_contended_count;
+	
+	unsigned int cache_file_stat_get_file_area_fail_count;
+	unsigned int mmap_file_stat_get_file_area_from_cache_count;
+	unsigned int scan_hot_file_area_count;
 #if 0
 	/**get_file_area_from_file_stat_list()函数******/
 	//扫描的file_area个数
@@ -2210,7 +2234,7 @@ static inline struct file_stat_base *file_stat_alloc_and_init_other(struct addre
 			list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_small_file_head);
 		}
 		else{
-			hot_cold_file_global_info.mmap_file_stat_small_count++;
+			hot_cold_file_global_info.mmap_file_stat_count++;
 			list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_small_file_head);
 		}
 		spin_unlock(p_global_lock);
@@ -2655,7 +2679,10 @@ static int inline can_file_stat_move_to_list_head_for_one(struct file_stat_base 
 	/*1:如果file_stat不在file_stat_in_list_type这个global链表上，测试失败
 	 *2:如果file_stat检测到在file_stat_in_list_type除外的其他global链表上，测试失败*/
 	if(0 == (p_file_stat_base->file_stat_status & (1 << file_stat_in_list_type))  ||  p_file_stat_base->file_stat_status & (~(1 << file_stat_in_list_type) & FILE_STAT_LIST_MASK)){
-		printk("%ps->can_file_stat_move one file_stat:0x%llx status:0x%x file_stat_in_list_type_bit:%d file_stat_type error\n",__builtin_return_address(0),(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_in_list_type);
+		/*如果是tiny small file转成了tiny small file one area，不再打印，这个很常见*/
+		if(!(file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base) && (F_file_stat_in_file_stat_tiny_small_file_head_list == file_stat_in_list_type)))
+		    printk("%ps->can_file_stat_move one file_stat:0x%llx status:0x%x file_stat_in_list_type_bit:%d file_stat_type error\n",__builtin_return_address(0),(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_in_list_type);
+
 		return 1;
 	}
 
