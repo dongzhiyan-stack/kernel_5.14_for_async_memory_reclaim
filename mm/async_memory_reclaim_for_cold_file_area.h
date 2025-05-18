@@ -65,15 +65,15 @@
 #define TREE_INTERNAL_NODE 1
 
 /*热file_area经过FILE_AREA_HOT_to_TEMP_AGE_DX个周期后，还没有被访问，则移动到file_area_warm链表*/
-#define FILE_AREA_HOT_to_TEMP_AGE_DX  5
+#define FILE_AREA_HOT_to_TEMP_AGE_DX  20
 /*发生refault的file_area经过FILE_AREA_REFAULT_TO_TEMP_AGE_DX个周期后，还没有被访问，则移动到file_area_warm链表*/
-#define FILE_AREA_REFAULT_TO_TEMP_AGE_DX 20
+#define FILE_AREA_REFAULT_TO_TEMP_AGE_DX 50
 /*普通的file_area在FILE_AREA_TEMP_TO_COLD_AGE_DX个周期内没有被访问则被判定是冷file_area，然后释放这个file_area的page*/
 #define FILE_AREA_TEMP_TO_COLD_AGE_DX  10
 /*在file_stat->warm上的file_area经过file_area_warm_to_temp_age_dx个周期没有被访问，则移动到file_stat->temp链表*/
 #define FILE_AREA_WARM_TO_TEMP_AGE_DX  (FILE_AREA_TEMP_TO_COLD_AGE_DX + 10) 
 /*一个冷file_area，如果经过FILE_AREA_FREE_AGE_DX个周期，仍然没有被访问，则释放掉file_area结构*/
-#define FILE_AREA_FREE_AGE_DX  10
+#define FILE_AREA_FREE_AGE_DX  60
 /*当一个file_area因多次访问被设置了ahead标记，经过FILE_AREA_AHEAD_CANCEL_AGE_DX个周期后file_area没有被访问，才会允许清理file_area的ahead标记*/
 #define FILE_AREA_AHEAD_CANCEL_AGE_DX (FILE_AREA_TEMP_TO_COLD_AGE_DX + 10)
 
@@ -736,10 +736,12 @@ struct hot_cold_file_global
 	unsigned long free_mmap_pages;
 	//在内存回收期间产生的refault file_area个数
 	unsigned long check_refault_file_area_count;
+	unsigned long check_refault_file_area_kswapd_count;
 	unsigned long check_mmap_refault_file_area_count;
 	unsigned long update_file_area_temp_list_count;
 	unsigned long update_file_area_warm_list_count;
 	unsigned long update_file_area_free_list_count;
+	unsigned long file_area_refault_file;
 
 	unsigned long update_file_area_other_list_count;
 	unsigned long update_file_area_move_to_head_count;
@@ -750,12 +752,17 @@ struct hot_cold_file_global
 	
 	unsigned long tiny_small_file_stat_to_one_area_count;
 	unsigned long file_stat_tiny_small_one_area_move_tail_count;
+	
+	unsigned long kswapd_free_page_count;
+	unsigned long async_thread_free_page_count;
 };
 
 
 /*******file_area状态**********************************************************/
 
-/*file_area_state是char类型，只有8个bit位可设置 !!!!!!!!!!!!!!!!!!!!!!!!!!!*/
+/* file_area_state是char类型，只有8个bit位可设置。现在修改了 bit31~bit16 这16个bit位分别用于
+ * file_area_have_page、writeback、dirty、towrite 的bit位，剩下的只有16个bit还能使用
+ * !!!!!!!!!!!!!!!!!!!!!!!!!!!*/
 enum file_area_status{
 	F_file_area_in_temp_list,
 	F_file_area_in_hot_list,
@@ -773,6 +780,7 @@ enum file_area_status{
 	F_file_area_in_cache,
 	F_file_area_in_mmap,
 	F_file_area_in_init,/*新分配file_area后立即设置该标记*/
+	F_file_area_in_free_kswapd,/*file_area的page被kswapd进程内存回收，不是被异步内存回收线程回收*/
 	//F_file_area_in_cache,//file_area保存在ile_stat->hot_file_area_cache[]数组里
 };
 //不能使用 clear_bit_unlock、test_and_set_bit_lock、test_bit，因为要求p_file_area->file_area_state是64位数据，但实际只是u8型数据
@@ -838,7 +846,8 @@ FILE_AREA_LIST_STATUS(mapcount_list)
 	FILE_AREA_STATUS(mmap)
 	FILE_AREA_STATUS(init)
 	FILE_AREA_STATUS(ahead)
-    FILE_AREA_STATUS(read)
+	FILE_AREA_STATUS(read)
+FILE_AREA_LIST_STATUS(free_kswapd)
 
 
 #define file_area_in_temp_list_not_have_hot_status (1 << F_file_area_in_temp_list)

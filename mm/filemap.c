@@ -326,6 +326,20 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
 
 	/* Leave page->index set: truncation lookup relies upon it */
 	//mapping->nrpages -= nr; 这个也要放到前边，page失效就要立即 mapping->nrpages -= nr，否则执行不了这里
+
+	/* 如果不是被异步内存回收线程回收的page的file_area，就没有in_free标记。这样后续该file_area的page再被访问，
+	 * 就无法被判定为refault page了。于是这里强制标记file_area的in_refault标记，并把file_area移动到in_free链表等等。
+	 * no，这里不能把file_area移动到in_free链表，这会跟异步内存回收线程遍历in_free链表上的file_area起冲突，
+	 * 异步内存回收线程遍历in_free链表的file_area，是没有加锁的。要么修改异步内存回收线程的代码，历in_free
+	 * 链表的file_area加锁，要么这里只是标记file_area的in_free标记，但不把file_area移动到in_free链表。我
+	 * 目前的代码设计，只有file_stat->temp链表上的file_area才spin_lock加锁，其他file_stat->链表上file_area
+	 * 遍历和移动都不加锁，遵循历史设计吧。最终决策，这里标记file_stat的in_free_kswaped标记，异步内存回收线程
+	 * 针对有in_free_kswaped标记的file_area，特殊处理*/
+	if(!file_area_in_free_list(p_file_area) /*&& !file_area_in_free_kswapd(p_file_area)*/){
+		set_file_area_in_free_kswapd(p_file_area);
+		hot_cold_file_global_info.kswapd_free_page_count ++;
+	}else
+		hot_cold_file_global_info.async_thread_free_page_count ++;
 }
 #endif
 static void page_cache_delete(struct address_space *mapping,
@@ -1684,6 +1698,22 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 			goto unlock;
 
 find_file_area:
+		/* 统计发生refault的page数，跟workingset_refault_file同一个含义。但是有个问题，只有被异步内存回收线程
+		 * 回收的page的file_area才会被标记in_free，被kswapd内存回收的page的file_area，就不会标记in_free
+		 * 了。问题就出在这里，当这些file_area的page将来被访问，发生refault，但是这些file_area因为没有in_free
+		 * 标记，导致这里if不成立，而无法统计发生refault的page，漏掉了。怎么解决，kswapd内存回收的page最终
+		 * 也是执行page_cache_delete_for_file_area函数释放page的，在该函数里，如果file_area没有in_free标记，
+		 * 则标记in_free。后续该file_area的page再被访问，这里就可以统计到了。
+		 *
+		 * 有个问题，假设file_area里有3个page，只有一个page0内存回收成功，还有两个page，page1、page3没回收
+		 * 成功。file_area被设置了in_free标记。如果将来page1被访问了，这里file_area_refault_file岂不是要
+		 * 加1了，这就是误加1了，因为page1并没有发生refault。仔细想想不会，因为page1存在于file_area，将来
+		 * 该page被访问，直接从xrray tree找到file_area再找到page1，就返回了，不会执行到当前函数。即便执行
+		 * 到当前函数，因为page1存在于file_area，上边xas_set_err(&xas, -EEXIST)就返回了，不会执行到这里的
+		 * hot_cold_file_global_info.file_area_refault_file ++。*/
+		if(file_area_in_free_list(p_file_area) || file_area_in_free_kswapd(p_file_area))
+			hot_cold_file_global_info.file_area_refault_file ++;
+		
 		set_file_area_page_bit(p_file_area,page_offset_in_file_area);
 		FILE_AREA_PRINT1("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx index:%ld page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,index,page_offset_in_file_area);
         
