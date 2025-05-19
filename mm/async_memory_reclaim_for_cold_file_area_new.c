@@ -177,8 +177,37 @@ static inline int cold_file_area_delete_lock(struct hot_cold_file_global *p_hot_
 	/*从xarray tree剔除。注意，xas_store不仅只是把保存file_area指针的xarray tree的父节点xa_node的槽位设置NULL。
 	 *还有一个隐藏重要作用，如果父节点node没有成员了，还是向上逐级释放父节点xa_node，直至xarray tree全被释放*/
 	old_file_area = xas_store(&xas, NULL);
+
+	/* 
+	 * 在查看page_cache_delete()源码时，突然有个灵感，如果file_area在iput()和异步内存回收线程同时执行
+	 * xas_store(xas,NULL)，会不会有问题？二者全程有加锁，没有并发问题，但有其他问题。重大隐藏bug!!!!!!
+	 * 
+	 * 当该文件的file_area0在内存回收后，没有爬个了，处于in_free链表。然后这个文件又被访问了分配了page0.
+	 * 但是因为系统文件太多，导致过了很长时间都没有遍历到这个文件，导致file_area的age与global age相差很大,
+	 * 时冷page。
+	 *
+	 * 此时，这个文件被iput()释放，设置该文件mapping的exit标记。然后执行
+	 * truncate_inode_pages_range->delete_from_page_cache_batch->page_cache_delete_batch_for_file_area()
+	 * 释放page0，因为此时mapping有exit标记，也会执行xas_store(xas,NULL)把该file_area从xarray tree剔除，
+	 * 这个过程是xas_lock_irq(&xas)加锁的，不用担心并发问题。但是，问题来了，还没有执行最后的
+	 * destroy_inode->__destroy_inode_handler_post()把该文件file_stat移动到global delete链表。
+	 *
+	 * 此时异步内存回收线程遍历到这个文件，这个文件有file_area0，但是因长时间
+	 * 没有访问，且file_area0没有page，就要执行cold_file_area_delete_lock()释放该file_area0。于是执行上边的
+	 * old_file_area = xas_store(&xas, NULL)，但是该file_area已经从xarray tree剔除了，于是在xarray tree
+	 * 查不到file_area而返回0，下边的if((NULL == old_file_area)成立而触发panic。这个bug跟时机紧密相关，
+	 * 但确实存在。解决办法很简单，就是如果文件mapping有exit标记，就不再panic了
+	 *
+	 * 不对，异步内存回收线程在扫描每一个文件时，都要先对文件inode加锁，之后是无法对该文件inode执行iput()
+	 * 释放pagecache的。上边的分析不存在，但是为了安全考虑，这个判断还是加上吧
+	 */
 	if((NULL == old_file_area))
-		panic("%s file_stat:0x%llx file_area:0x%llx find folio error:%ld\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,xas.xa_index);
+	{
+		if(mapping_exiting(p_file_stat_base->mapping))
+		    pr_warn("%s file_stat:0x%llx file_area:0x%llx find folio error:%ld\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,xas.xa_index);
+		else
+		    panic("%s file_stat:0x%llx file_area:0x%llx find folio error:%ld\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,xas.xa_index);
+	}
 
 	if (xas_error(&xas)){
 		printk("%s xas_error:%d  !!!!!!!!!!!!!!\n",__func__,xas_error(&xas));
