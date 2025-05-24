@@ -3301,7 +3301,7 @@ static noinline unsigned int file_stat_small_other_list_file_area_solve(struct h
 	list_for_each_entry_safe_reverse(p_file_area,p_file_area_temp,file_area_list_head,file_area_list){
 		if(scan_file_area_count ++ > scan_file_area_max)
 			break;
-        file_area_type = get_file_area_list_status(p_file_area);
+		file_area_type = get_file_area_list_status(p_file_area);
 		/*如果small_file_stat->other链表上的in_free的file_area因为访问在update函数又被设置in_refault属性，
 		 *则强制只给file_area_type赋值1 << F_file_area_in_free_list，这样file_stat_other_list_file_area_solve_common()
 		 *函数里走in_free分支，发现file_area有in_refault属性而被判定为refault area。
@@ -3310,7 +3310,11 @@ static noinline unsigned int file_stat_small_other_list_file_area_solve(struct h
 		if(file_area_type == (1 << F_file_area_in_free_list | 1 << F_file_area_in_refault_list))
 			file_area_type = 1 << F_file_area_in_free_list;
 
-        file_stat_other_list_file_area_solve_common(p_hot_cold_file_global,p_file_stat_base,p_file_area,file_area_type,file_type);
+		/*存在file_area既有mapcount和hot标记的情况*/
+		if(file_area_type == (1 << F_file_area_in_mapcount_list | 1 << F_file_area_in_hot_list))
+			file_area_type = 1 << F_file_area_in_free_list;
+
+		file_stat_other_list_file_area_solve_common(p_hot_cold_file_global,p_file_stat_base,p_file_area,file_area_type,file_type);
 	}
 	/* file_area_list_head链表非空且p_file_area不是指向链表头且p_file_area不是该链表的第一个成员，
 	 * 则执行list_move_enhance()把本次遍历过的file_area~链表尾的file_area移动到链表
@@ -3517,6 +3521,10 @@ static inline int file_stat_temp_list_file_area_solve(struct hot_cold_file_globa
 				//clear_file_area_in_free_list(p_file_area);
 				file_area_type = 1 << F_file_area_in_free_list;
 			}
+
+			/*这里遇到一个bug，tiny small文件mapcount的file_area，竟然有in_hot标记，这个是正常现象，这里强制去掉in_hot标记*/
+			if(file_area_in_mapcount_list(p_file_area) && file_area_in_hot_list(p_file_area))
+				file_area_type = 1 << F_file_area_in_mapcount_list;
 
 			file_stat_other_list_file_area_solve_common(p_hot_cold_file_global,p_file_stat_base,p_file_area,file_area_type,FILE_STAT_TINY_SMALL);
 			continue;
@@ -5101,9 +5109,8 @@ static unsigned int check_scan_file_area_max(struct hot_cold_file_global *p_hot_
 	switch (file_stat_list_type){
 		case F_file_stat_in_file_stat_tiny_small_file_one_area_head_list:
 		case F_file_stat_in_file_stat_tiny_small_file_head_list:
-			struct file_stat_tiny_small *p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
+			//struct file_stat_tiny_small *p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
 
-			p_file_stat_tiny_small->reclaim_pages;
 			scan_file_area_max = 32;
 			if(p_file_stat_base->refault_page_count > 100)
 				scan_file_area_max -= 30 ;
@@ -5115,7 +5122,7 @@ static unsigned int check_scan_file_area_max(struct hot_cold_file_global *p_hot_
 			break;
 
 		case F_file_stat_in_file_stat_small_file_head_list:
-			struct file_stat_small *p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
+			//struct file_stat_small *p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
 
 			scan_file_area_max = 100;
 			if(p_file_stat_base->refault_page_count > 100)
