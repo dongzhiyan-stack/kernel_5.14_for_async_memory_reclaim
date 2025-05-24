@@ -61,10 +61,10 @@
 /*当一个文件file_area个数超过FILE_AREA_MOVE_TO_HEAD_LEVEL，才允许一个周期内file_stat->temp链表上file_area移动到file_stat->temp链表头*/
 #define FILE_AREA_MOVE_TO_HEAD_LEVEL 32
 /*当mapcount值超过阀值则判定为mapcount file_area*/
-#define MAPCOUNT_LEVEL 6
+#define MAPCOUNT_LEVEL 2
 /*以下都是mmap文件在cache文件基础上，针对各种age的增量*/
 #define MMAP_FILE_TEMP_TO_WARM_AGE_DX    20
-#define MMAP_FILE_TEMP_TO_COLD_AGE_DX    10
+#define MMAP_FILE_TEMP_TO_COLD_AGE_DX    30
 #define MMAP_FILE_HOT_TO_TEMP_AGE_DX     6
 #define MMAP_FILE_REFAULT_TO_TEMP_AGE_DX 8
 #define MMAP_FILE_COLD_TO_FREE_AGE_DX    5
@@ -1714,7 +1714,7 @@ void get_file_area_age_mmap(struct file_stat_base *p_file_stat_base,struct file_
 			/*file_area里每检测到一个mmap文件则加1*/
 			mmap_page_count ++;
 			/*遇到mapcount偏大的page的file_area，直接break，节省性能*/
-			if(folio_mapcount(folio) > 6){
+			if(folio_mapcount(folio) > MAPCOUNT_LEVEL){
 				mapcount_file_area = 1;
 				folio_unlock(folio);
 				break;
@@ -1738,7 +1738,7 @@ next_folio:
 		i += scan_page_interval;
 	}
 
-	if(1 == scan_page_interval && scan_page_count != PAGE_COUNT_IN_AREA && mapcount_file_area == 0){
+	if(1 == scan_page_interval && (scan_page_count != PAGE_COUNT_IN_AREA) && (0 == mapcount_file_area)){
 	    printk("%s file_area:0x%llx status:0x%x has init flag,but scan_page_count=%d\n",__func__,(u64)p_file_area,p_file_area->file_area_state,scan_page_count);
 	}
 

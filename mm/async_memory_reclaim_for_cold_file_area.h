@@ -755,6 +755,7 @@ struct hot_cold_file_global
 	
 	unsigned long kswapd_free_page_count;
 	unsigned long async_thread_free_page_count;
+	unsigned long kswapd_file_area_refault_file;
 };
 
 

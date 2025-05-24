@@ -335,10 +335,12 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
 	 * 目前的代码设计，只有file_stat->temp链表上的file_area才spin_lock加锁，其他file_stat->链表上file_area
 	 * 遍历和移动都不加锁，遵循历史设计吧。最终决策，这里标记file_stat的in_free_kswaped标记，异步内存回收线程
 	 * 针对有in_free_kswaped标记的file_area，特殊处理*/
-	if(!file_area_in_free_list(p_file_area) /*&& !file_area_in_free_kswapd(p_file_area)*/){
+
+	/*可能一个file_area被异步内存回收线程回收标记in_free后，然后 kswapd再回收它里边的新读写产生的page，此时就不用再标记file_area in_free_kswaped了*/
+	if(shadow && !file_area_in_free_list(p_file_area) /*&& !file_area_in_free_kswapd(p_file_area)*/){
 		set_file_area_in_free_kswapd(p_file_area);
 		hot_cold_file_global_info.kswapd_free_page_count ++;
-	}else
+	}else if(file_area_in_free_list(p_file_area))
 		hot_cold_file_global_info.async_thread_free_page_count ++;
 }
 #endif
@@ -1532,7 +1534,7 @@ void replace_page_cache_page(struct page *old, struct page *new)
 	put_page(old);
 }
 EXPORT_SYMBOL_GPL(replace_page_cache_page);
-
+int printk_count;
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 		struct folio *folio, pgoff_t index, gfp_t gfp, void **shadowp)
@@ -1711,8 +1713,22 @@ find_file_area:
 		 * 该page被访问，直接从xrray tree找到file_area再找到page1，就返回了，不会执行到当前函数。即便执行
 		 * 到当前函数，因为page1存在于file_area，上边xas_set_err(&xas, -EEXIST)就返回了，不会执行到这里的
 		 * hot_cold_file_global_info.file_area_refault_file ++。*/
-		if(file_area_in_free_list(p_file_area) || file_area_in_free_kswapd(p_file_area))
+		if(file_area_in_free_list(p_file_area) /*|| file_area_in_free_kswapd(p_file_area)*/){
+			if(open_file_area_printk)
+				dump_stack();
+			
+			printk("file_area_in_free_list:%s file_stat:0x%llx file_area:0x%llx status:0x%x index:%ld\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,index);
 			hot_cold_file_global_info.file_area_refault_file ++;
+		}
+
+		if(file_area_in_free_kswapd(p_file_area)){
+			if(open_file_area_printk)
+				dump_stack();
+
+			printk("file_area_in_free_kswapd:%s file_stat:0x%llx file_area:0x%llx status:0x%x index:%ld\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,index);
+			hot_cold_file_global_info.kswapd_file_area_refault_file ++;
+		}
+		printk_count ++;
 		
 		set_file_area_page_bit(p_file_area,page_offset_in_file_area);
 		FILE_AREA_PRINT1("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx index:%ld page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,index,page_offset_in_file_area);
