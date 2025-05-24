@@ -24,8 +24,9 @@
 //普通文件，包含temp、middle、large 3类文件。pagecache在10M~30M是temp文件、30M~100M是middle文件，100M以上的是large文件 
 #define FILE_STAT_NORMAL 2
 
-/*file_area个数小于64是极小文件，在64~640是小文件*/
-#define SMALL_FILE_AREA_COUNT_LEVEL 64
+/*file_area个数小于64是极小文件，在64~640是小文件。现在改为file_area个数小于32是极小文件，在32~640是小文件*/
+//#define SMALL_FILE_AREA_COUNT_LEVEL 64
+#define SMALL_FILE_AREA_COUNT_LEVEL 32
 /*file_area个数在大于640，且小于1920是普通文件*/
 #define NORMAL_TEMP_FILE_AREA_COUNT_LEVEL 640
 /*file_area个数在大于1920，且小于6400是普通文件*/
@@ -489,6 +490,7 @@ struct file_stat_base
 	/*统计一个周期内file_stat->temp链表上file_area移动到file_stat->temp链表头的次数，每一个一次减1，减少到0则禁止
 	 *file_stat->temp链表上file_area再移动到file_stat->temp链表头*/
 	short file_area_move_to_head_count;
+	short refault_page_count;
 
 
 	/**针对mmap文件新增的****************************/
@@ -510,6 +512,7 @@ struct file_stat_base
 struct file_stat_tiny_small
 {
 	struct file_stat_base file_stat_base;
+	unsigned int reclaim_pages;
 }/*__attribute__((packed))*/;
 
 /*注意，有个隐藏的问题，在filemap.c函数里，是直接p_file_stat = (struct file_stat_base *)mapping->rh_reserved1，
@@ -525,6 +528,7 @@ struct file_stat_small
 	struct file_stat_base file_stat_base;
 	/*hot、refault、free 等状态的file_area移动到这个链表*/
 	struct list_head file_area_other;
+	unsigned int reclaim_pages;
 }/*__attribute__((packed))*/;
 //热点文件统计信息，一个文件一个
 struct file_stat
@@ -548,6 +552,10 @@ struct file_stat
 	struct list_head file_area_mapcount;
 	//存放内存回收的file_area，mmap文件用
 	struct list_head file_area_free_temp;
+	/*file_stat回收的总page数*/
+	unsigned int reclaim_pages;
+	/*上一个周期file_stat回收的总page数*/
+	unsigned int reclaim_pages_last_period;
 }/*__attribute__((packed))*/;
 
 /*hot_cold_file_node_pgdat结构体每个内存节点分配一个，内存回收前，从lruvec lru链表隔离成功page，移动到每个内存节点绑定的
@@ -645,16 +653,22 @@ struct hot_cold_file_global
 	unsigned int global_age_period;
 	//热file_area经过file_area_refault_to_temp_age_dx个周期后，还没有被访问，则移动到file_area_temp链表
 	unsigned int file_area_hot_to_temp_age_dx;
+	unsigned int file_area_hot_to_temp_age_dx_ori;
 	//发生refault的file_area经过file_area_refault_to_temp_age_dx个周期后，还没有被访问，则移动到file_area_temp链表
 	unsigned int file_area_refault_to_temp_age_dx;
+	unsigned int file_area_refault_to_temp_age_dx_ori;
 	//普通的file_area在file_area_temp_to_cold_age_dx个周期内没有被访问则被判定是冷file_area，然后释放这个file_area的page
 	unsigned int file_area_temp_to_cold_age_dx;
+	unsigned int file_area_temp_to_cold_age_dx_ori;
 	//普通的file_area在file_area_temp_to_warm_age_dx个周期内没有被访问则被判定是温file_area，然后把这个file_area移动到file_stat->file_area_warm链表
 	unsigned int file_area_temp_to_warm_age_dx;
+	unsigned int file_area_temp_to_warm_age_dx_ori;
 	/*在file_stat->warm上的file_area经过file_area_warm_to_temp_age_dx个周期没有被访问，则移动到file_stat->temp链表*/
 	unsigned int file_area_warm_to_temp_age_dx;
+	unsigned int file_area_warm_to_temp_age_dx_ori;
 	/*正常情况不会回收read属性的file_area的page，但是如果该file_area确实很长很长很长时间没访问，也参与回收*/
 	unsigned int file_area_reclaim_read_age_dx;
+	unsigned int file_area_reclaim_read_age_dx_ori;
 	//一个冷file_area，如果经过file_area_free_age_dx_fops个周期，仍然没有被访问，则释放掉file_area结构
 	unsigned int file_area_free_age_dx;
 	//当一个文件file_stat长时间不被访问，释放掉了所有的file_area，再过file_stat_delete_age_dx个周期，则释放掉file_stat结构

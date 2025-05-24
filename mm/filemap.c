@@ -1534,7 +1534,6 @@ void replace_page_cache_page(struct page *old, struct page *new)
 	put_page(old);
 }
 EXPORT_SYMBOL_GPL(replace_page_cache_page);
-int printk_count;
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 		struct folio *folio, pgoff_t index, gfp_t gfp, void **shadowp)
@@ -1714,21 +1713,17 @@ find_file_area:
 		 * 到当前函数，因为page1存在于file_area，上边xas_set_err(&xas, -EEXIST)就返回了，不会执行到这里的
 		 * hot_cold_file_global_info.file_area_refault_file ++。*/
 		if(file_area_in_free_list(p_file_area) /*|| file_area_in_free_kswapd(p_file_area)*/){
-			if(open_file_area_printk)
-				dump_stack();
 			
 			printk("file_area_in_free_list:%s file_stat:0x%llx file_area:0x%llx status:0x%x index:%ld\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,index);
+			atomic_long_add(1, &vm_node_stat[WORKINGSET_REFAULT_FILE]);
 			hot_cold_file_global_info.file_area_refault_file ++;
 		}
-
-		if(file_area_in_free_kswapd(p_file_area)){
-			if(open_file_area_printk)
-				dump_stack();
+		else if(file_area_in_free_kswapd(p_file_area)){
 
 			printk("file_area_in_free_kswapd:%s file_stat:0x%llx file_area:0x%llx status:0x%x index:%ld\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,index);
+			atomic_long_add(1, &vm_node_stat[WORKINGSET_REFAULT_FILE]);
 			hot_cold_file_global_info.kswapd_file_area_refault_file ++;
 		}
-		printk_count ++;
 		
 		set_file_area_page_bit(p_file_area,page_offset_in_file_area);
 		FILE_AREA_PRINT1("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx index:%ld page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,index,page_offset_in_file_area);
