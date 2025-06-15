@@ -4,6 +4,7 @@
 
 //#define ASYNC_MEMORY_RECLAIM_IN_KERNEL ------在pagemap.h定义过了
 //#define ASYNC_MEMORY_RECLAIM_DEBUG
+//#define HOT_FILE_UPDATE_FILE_STATUS_USE_OLD  hot_file_update_file_status函数使用老的方案
 #define ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
 
 #define CACHE_FILE_DELETE_PROTECT_BIT 0
@@ -81,7 +82,9 @@
 /*当一个file_area在一个周期内访问超过FILE_AREA_HOT_LEVEL次数，则判定是热的file_area*/
 #define FILE_AREA_HOT_LEVEL (PAGE_COUNT_IN_AREA << 2)
 /*如果一个file_area在FILE_AREA_MOVE_HEAD_DX个周期内被访问了两次，然后才能移动到链表头*/
-#define FILE_AREA_MOVE_HEAD_DX 3
+#define FILE_AREA_MOVE_HEAD_DX 5
+/*如果连续FILE_AREA_CHECK_HOT_DX个周期cache file_area都被访问，判定file_area为热file_area*/
+#define FILE_AREA_CHECK_HOT_DX 3
 /*在file_stat被判定为热文件后，记录当时的global_age。在未来HOT_FILE_COLD_AGE_DX时间内该文件进去冷却期：hot_file_update_file_status()函数中
  *只更新该文件file_area的age后，然后函数返回，不再做其他操作，节省性能*/
 #define HOT_FILE_COLD_AGE_DX 10
@@ -127,6 +130,8 @@
 /*file_area来自file_stat->free、refault、hot链表，遍历时不能移动该file_area到其他file_stat链表，并且file_area不参与内存回收*/
 #define FILE_STAT_OTHER_FILE_AREA (-102)
 
+#define PRINT_FILE_STAT_INFO 0
+#define UPDATE_FILE_STAT_REFAULT_COUNT 1
 
 #define MEMORY_IDLE_SCAN  0 /*内存正常，常规的巡检*/
 #define MEMORY_LITTLE_RECLAIM  1/*发现内存碎片，或者前后两个周期有大量内存分配*/
@@ -401,23 +406,6 @@ struct hot_cold_file_shrink_counter
 //一个file_area表示了一片page范围(默认6个page)的冷热情况，比如page索引是0~5、6~11、12~17各用一个file_area来表示
 struct file_area
 {
-	//不同取值表示file_area当前处于哪种链表
-	unsigned int file_area_state;
-	//该file_area最近被访问时的global_age，长时间不被访问则与global age差很多，则判定file_area是冷file_area，然后释放该file_area的page
-	//如果是mmap文件页，当遍历到文件页的pte置位，才会更新对应的file_area的age为全局age，否则不更新
-	unsigned int file_area_age;
-	union{
-		/*cache文件时，该file_area当前周期被访问的次数。mmap文件时，只有处于file_stat->temp链表上file_area才用access_count记录访问计数，
-		 *处于其他file_stat->refault、hot、free等链表上file_area，不会用到access_count。但是因为跟file_area_access_age是共享枚举变量，
-		 *要注意，从file_stat->refault、hot、free等链表移动file_area到file_stat->temp链表时，要对file_area_access_age清0*/
-		//unsigned int access_count;
-		atomic_t   access_count;
-		/*处于file_stat->refault、hot、free等链表上file_area，被遍历到时记录当时的global age，不理会文件页page是否被访问了。
-		 *由于和access_count是共享枚举变量，当file_area从file_stat->temp链表移动到file_stat->refault、hot、free等链表时，要对file_area_access_age清0*/
-		unsigned int file_area_access_age;
-	};
-	//该file_area里的某个page最近一次被回收的时间点，单位秒
-	//unsigned int shrink_time;
 	union{
 		//file_area通过file_area_list添加file_stat的各种链表
 		struct list_head file_area_list;
@@ -429,6 +417,35 @@ struct file_area
 	pgoff_t start_index;
 #endif	
 	struct folio __rcu *pages[PAGE_COUNT_IN_AREA];
+
+	//不同取值表示file_area当前处于哪种链表
+	unsigned int file_area_state;
+	//该file_area最近被访问时的global_age，长时间不被访问则与global age差很多，则判定file_area是冷file_area，然后释放该file_area的page
+	//如果是mmap文件页，当遍历到文件页的pte置位，才会更新对应的file_area的age为全局age，否则不更新
+	unsigned int file_area_age;
+#ifdef HOT_FILE_UPDATE_FILE_STATUS_USE_OLD	
+	union{
+		/*cache文件时，该file_area当前周期被访问的次数。mmap文件时，只有处于file_stat->temp链表上file_area才用access_count记录访问计数，
+		 *处于其他file_stat->refault、hot、free等链表上file_area，不会用到access_count。但是因为跟file_area_access_age是共享枚举变量，
+		 *要注意，从file_stat->refault、hot、free等链表移动file_area到file_stat->temp链表时，要对file_area_access_age清0*/
+		//unsigned int access_count;
+		atomic_t   access_count;
+		/*处于file_stat->refault、hot、free等链表上file_area，被遍历到时记录当时的global age，不理会文件页page是否被访问了。
+		 *由于和access_count是共享枚举变量，当file_area从file_stat->temp链表移动到file_stat->refault、hot、free等链表时，要对file_area_access_age清0*/
+		unsigned int file_area_access_age;
+	};
+#else
+	/*低4位表示file_area的hot ready计数，高4位ahead ready计数*/
+	union{
+        unsigned char file_area_hot_ahead_ready_all;
+		struct{
+            unsigned char hot_ready_count : 4;
+            unsigned char ahead_ready_count : 4;
+		}file_area_hot_ahead;
+	};
+#endif
+	//该file_area里的某个page最近一次被回收的时间点，单位秒
+	//unsigned int shrink_time;
 };
 struct hot_cold_file_area_tree_node
 {
@@ -489,8 +506,9 @@ struct file_stat_base
 	unsigned int recent_traverse_age;
 	/*统计一个周期内file_stat->temp链表上file_area移动到file_stat->temp链表头的次数，每一个一次减1，减少到0则禁止
 	 *file_stat->temp链表上file_area再移动到file_stat->temp链表头*/
-	short file_area_move_to_head_count;
-	short refault_page_count;
+	unsigned char file_area_move_to_head_count;
+	unsigned int refault_page_count;
+	unsigned int refault_page_count_last;
 
 
 	/**针对mmap文件新增的****************************/
@@ -759,6 +777,7 @@ struct hot_cold_file_global
 
 	unsigned long update_file_area_other_list_count;
 	unsigned long update_file_area_move_to_head_count;
+	unsigned long update_file_area_hot_list_count;
 	
 	unsigned long file_stat_delete_protect;
 
@@ -770,6 +789,10 @@ struct hot_cold_file_global
 	unsigned long kswapd_free_page_count;
 	unsigned long async_thread_free_page_count;
 	unsigned long kswapd_file_area_refault_file;
+	
+	unsigned int refault_file_area_scan_dx;
+	unsigned int reclaim_page_print_level;
+	unsigned int refault_page_print_level;
 };
 
 
@@ -890,14 +913,15 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	F_file_stat_in_test,
 	F_file_stat_invalid_start_index,
 	F_file_stat_in_delete_file,//标识该file_stat被移动到了global delete链表	
+	F_file_stat_in_delete,//仅仅表示该file_stat被触发delete了，并不能说明file_stat被移动到了global delete链表
 
 	//F_file_stat_in_drop_cache,
 	//F_file_stat_in_free_page,//正在遍历file_stat的file_area的page，尝试释放page
 	//F_file_stat_in_free_page_done,//正在遍历file_stat的file_area的page，完成了page的内存回收,
-	F_file_stat_in_delete,//仅仅表示该file_stat被触发delete了，并不能说明file_stat被移动到了global delete链表
 	//F_file_stat_in_large_file,
 	//F_file_stat_in_from_small_file,//该文件是从small文件的global small_temp链表移动过来的
 	F_file_stat_in_replaced_file,//file_stat_tiny_small或file_stat_small转成更大的文件时，老的file_stat被标记replaced
+	F_file_stat_in_blacklist,//设置文件黑名单，不扫描内存回收
 	F_file_stat_max_index,
 	//F_file_stat_lock,
 	//F_file_stat_lock_not_block,//这个bit位置1，说明inode在删除的，但是获取file_stat锁失败
@@ -1047,6 +1071,7 @@ FILE_STATUS_BASE(mmap_file)
 FILE_STATUS_BASE(from_cache_file)
 //FILE_STATUS_BASE(from_small_file)
 FILE_STATUS_BASE(replaced_file)
+FILE_STATUS_BASE(blacklist)
 
 
 /*设置/清除file_stat状态使用test_and_set_bit/clear_bit，是异步内存回收1.0版本的产物，现在不再需要。
@@ -2527,6 +2552,8 @@ static int inline file_inode_lock(struct file_stat_base *p_file_stat_base)
 	return 1;
 }
 #endif
+
+#ifdef HOT_FILE_UPDATE_FILE_STATUS_USE_OLD
 static void inline file_area_access_count_clear(struct file_area *p_file_area)
 {
 	atomic_set(&p_file_area->access_count,0);
@@ -2539,6 +2566,22 @@ static int inline file_area_access_count_get(struct file_area *p_file_area)
 {
 	return atomic_read(&p_file_area->access_count);
 }
+#else
+static void inline file_area_access_count_clear(struct file_area *p_file_area)
+{
+	p_file_area->file_area_hot_ahead.hot_ready_count = 0;
+}
+static void inline file_area_access_count_add(struct file_area *p_file_area,int count)
+{
+	/*hot_ready_count只是unsigned char的一半，占了4个bit位，最大只能16*/
+	if(p_file_area->file_area_hot_ahead.hot_ready_count < 0xF)
+		p_file_area->file_area_hot_ahead.hot_ready_count ++;
+}
+static int inline file_area_access_count_get(struct file_area *p_file_area)
+{
+	return p_file_area->file_area_hot_ahead.hot_ready_count;
+}
+#endif
 /*head代表一段链表，first~tail是这个链表尾的几个连续成员，该函数是把first~tail指向的几个成员移动到链表头*/
 //void list_move_enhance(struct list_head *head,struct list_head *first,struct list_head *tail)
 static void inline list_move_enhance(struct list_head *head,struct list_head *first)
@@ -2616,6 +2659,8 @@ static int inline can_file_area_move_to_list_head(struct file_area *p_file_area,
 	}
 
 	/*同样检测前一个file_area是否合法*/
+	/*这里有个问题，在遍历in_free链表上的file_area时，file_area有in_free和in_refault标记时，这里的prev file_area，下边的
+	 * next file_area的异常前后file_area判定，有很大概率判定导致if成立，而直接return 0，导致无法把本次遍历的file_area移动到file_stat->free链表头*/
 	if(&p_file_area_prev->file_area_list != file_area_list_head){
 		if(0 == (p_file_area_prev->file_area_state & file_area_in_list_type) ||  p_file_area_prev->file_area_state & (~(file_area_in_list_type) & FILE_AREA_LIST_MASK)){
 			printk("%ps->can_file_area_move file_area_list_head:0x%llx file_area:0x%llx p_file_area_prev:0x%llx state:0x%x file_area_in_list_type:0x%x p_file_area_prev error\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area,(u64)p_file_area_prev,p_file_area_prev->file_area_state,file_area_in_list_type);
@@ -2898,7 +2943,7 @@ extern void file_stat_temp_middle_large_file_change(struct hot_cold_file_global 
 extern int mmap_file_area_cache_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_have_cache_page_head,struct list_head *file_area_free_temp,unsigned int file_type);
 extern int cache_file_area_mmap_page_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_have_mmap_page_head,unsigned int file_type);
 extern int check_file_stat_is_valid(struct file_stat_base *p_file_stat_base,unsigned int file_stat_list_type,char is_cache_file);
-extern noinline int hot_cold_file_print_all_file_stat(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print);
+extern noinline int hot_cold_file_print_all_file_stat(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print,int print_file_stat_info_or_update_refault);
 extern noinline void printk_shrink_param(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print);
 extern int hot_cold_file_thread(void *p);
 extern int async_memory_reclaim_main_thread(void *p);

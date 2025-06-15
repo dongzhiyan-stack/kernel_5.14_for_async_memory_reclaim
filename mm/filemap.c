@@ -1713,14 +1713,22 @@ find_file_area:
 		 * 到当前函数，因为page1存在于file_area，上边xas_set_err(&xas, -EEXIST)就返回了，不会执行到这里的
 		 * hot_cold_file_global_info.file_area_refault_file ++。*/
 		if(file_area_in_free_list(p_file_area) /*|| file_area_in_free_kswapd(p_file_area)*/){
-			
-			printk("file_area_in_free_list:%s file_stat:0x%llx file_area:0x%llx status:0x%x index:%ld\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,index);
+
+			if(file_stat_in_test_base(p_file_stat_base))
+				printk("file_area_in_free_list:%s file_stat:0x%llx file_area:0x%llx status:0x%x index:%ld\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,index);
 			atomic_long_add(1, &vm_node_stat[WORKINGSET_REFAULT_FILE]);
 			hot_cold_file_global_info.file_area_refault_file ++;
+
+			/* 单独统计的每个文件的refault次数，最初是放到hot_file_update_file_status和file_stat_other_list_file_area_solve_common函数
+			 * 但是统计mmap文件refault次数会延迟很大，因为只有遍历到file_stat->free链表上的file_area时，才会令
+			 * p_file_stat_base->refault_page_count++，这样延迟很大。于是不得不统计到__filemap_add_folio函数了*/
+			if(p_file_stat_base->refault_page_count < USHRT_MAX - 2)
+				p_file_stat_base->refault_page_count ++;
 		}
 		else if(file_area_in_free_kswapd(p_file_area)){
 
-			printk("file_area_in_free_kswapd:%s file_stat:0x%llx file_area:0x%llx status:0x%x index:%ld\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,index);
+			if(file_stat_in_test_base(p_file_stat_base))
+				printk("file_area_in_free_kswapd:%s file_stat:0x%llx file_area:0x%llx status:0x%x index:%ld\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,index);
 			atomic_long_add(1, &vm_node_stat[WORKINGSET_REFAULT_FILE]);
 			hot_cold_file_global_info.kswapd_file_area_refault_file ++;
 		}
