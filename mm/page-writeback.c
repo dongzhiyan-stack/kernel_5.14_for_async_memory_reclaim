@@ -2171,7 +2171,7 @@ find_page_from_file_area:
 			//page = p_file_area->pages[page_offset_in_file_area];
 			page = rcu_dereference(p_file_area->pages[page_offset_in_file_area]);
 			/*如果folio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
-			folio_is_file_area_index_and_clear_NULL(page);
+			folio_is_file_area_index_or_shadow_and_clear_NULL(page);
 			/*实际测试表明，存在并发情况，file_area有dirty mark但是page没有dirty标记，因为page dirty标记被另外的进程先清理了，后续它会再清理ditry mark标记*/
 			if(!page/* || !PageDirty(page)*/){
 				panic("%s mapping:0x%llx p_file_area:0x%llx page:0x%llx not dirty\n",__func__,(u64)mapping,(u64)p_file_area,(u64)page);

@@ -5,7 +5,7 @@
 //#define ASYNC_MEMORY_RECLAIM_IN_KERNEL ------在pagemap.h定义过了
 //#define ASYNC_MEMORY_RECLAIM_DEBUG
 //#define HOT_FILE_UPDATE_FILE_STATUS_USE_OLD  hot_file_update_file_status函数使用老的方案
-#define ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
+//#define ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
 
 #define CACHE_FILE_DELETE_PROTECT_BIT 0
 #define MMAP_FILE_DELETE_PROTECT_BIT 1
@@ -1191,6 +1191,7 @@ extern int open_file_area_printk_important;
 #define DIRTY_MARK_IN_FILE_AREA_BASE     (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA*3)
 #define TOWRITE_MARK_IN_FILE_AREA_BASE   (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA*4)
 
+#if 0
 #define FILE_AREA_PRINT(fmt,...) \
     do{ \
         if(open_file_area_printk) \
@@ -1202,6 +1203,10 @@ extern int open_file_area_printk_important;
         if(open_file_area_printk_important) \
 			printk(fmt,##__VA_ARGS__); \
 	}while(0);
+#else
+#define FILE_AREA_PRINT(fmt,...)  {}
+#define FILE_AREA_PRINT1(fmt,...) {}
+#endif
 
 #ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
 
@@ -1215,7 +1220,7 @@ panic("%s xas:0x%llx file_area:0x%llx folio:0x%llx folio_from_file_area:0x%llx p
 
 #else
 
-#define CHECK_FOLIO_FROM_FILE_AREA_VALID(xas,folio,mapping,p_file_area,page_offset_in_file_area,folio_index_from_xa_index) \
+#define CHECK_FOLIO_FROM_FILE_AREA_VALID(xas,mapping,folio,p_file_area,page_offset_in_file_area,folio_index_from_xa_index) \
 	if((folio)->index != ((p_file_area)->start_index + page_offset_in_file_area) || (folio)->index != folio_index_from_xa_index || (folio)->mapping != mapping)\
 panic("%s xas:0x%llx file_area:0x%llx folio:0x%llx page_offset_in_file_area:%d mapping:0x%llx_0x%llx\n",__func__,(u64)xas,(u64)p_file_area,(u64)folio,page_offset_in_file_area,(u64)mapping,(u64)((folio)->mapping));
 
@@ -1553,23 +1558,34 @@ extern int shrink_page_printk_open1;
 extern int shrink_page_printk_open;
 extern int shrink_page_printk_open_important;
 
-#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY 
-/*folio非0，但不是有效的指针，即bit63是0，说明保存在file_area->folio[]中的是file_area的索引，不是有效的page指针*/
-#define folio_is_file_area_index(folio) (((u64)folio & (1UL << 63)) == 0)
 
-/*如果fiolio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
-#define folio_is_file_area_index_and_clear_NULL(folio) \
+#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY 
+#define file_area_shadow_bit_set (1UL << 61)
+#define file_area_index_bit_set  (1UL << 62)
+/* folio非0，但不是有效的指针，即bit63是0，说明保存在file_area->folio[]中的是file_area的索引，不是有效的page指针。
+ * 但是，最新方案，bit62是1说明是index，bit61是1说明是shadow(page刚内存回收)。因此，file_area->pages[0~3]除了保存
+ * 的是folio或NULL指针外，还有 1:是file_area_index(bit62是1) 2:是shadow(bit61是1)  3:file_area_index和shadow共存(bit62和bit61是1)*/
+#define folio_is_file_area_index_or_shadow(folio) ((0 == ((u64)folio & (1UL << 63))) && ((u64)folio & (file_area_shadow_bit_set | file_area_index_bit_set)))
+
+/*如果folio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
+#define folio_is_file_area_index_or_shadow_and_clear_NULL(folio) \
 { \
-	if(folio_is_file_area_index(folio))\
+	if(folio_is_file_area_index_or_shadow(folio))\
 		folio = NULL; \
 }
 
-/*p_file_area)->pages[]中保存的file_area的索引file_area->start_index >> PAGE_COUNT_IN_AREA_SHIFT后的，不不用再左移PAGE_COUNT_IN_AREA_SHIFT后的*/
-#define get_file_area_start_index(p_file_area) (((u64)((p_file_area)->pages[0]) << 32) + (u64)((p_file_area)->pages[1]))
+/* p_file_area)->pages[]中保存的file_area的索引file_area->start_index >> PAGE_COUNT_IN_AREA_SHIFT后的，不不用再左移PAGE_COUNT_IN_AREA_SHIFT后的
+ * 要与上U32_MAX，因为bit62 和 bit61可能是1*/
+#define get_file_area_start_index(p_file_area) (((u64)((p_file_area)->pages[0]) << 32) + (u64)((u64)((p_file_area)->pages[1]) & U32_MAX))
 
 #else
-#define folio_is_file_area_index(folio) 0
-#define folio_is_file_area_index(folio) {}
+#define folio_is_file_area_index_or_shadow(folio) xa_is_value(folio)
+
+#define folio_is_file_area_index_or_shadow_and_clear_NULL(folio) \
+{ \
+	if(folio_is_file_area_index_or_shadow(folio))\
+		folio = NULL; \
+}
 #endif
 
 static inline void file_stat_delete_protect_lock(char is_cache_file)

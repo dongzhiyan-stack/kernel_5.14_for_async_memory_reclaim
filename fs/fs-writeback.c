@@ -434,7 +434,7 @@ static bool inode_do_switch_wbs_for_file_area(struct inode *inode,
 			//folio = p_file_area->pages[i];
 			folio = rcu_dereference(p_file_area->pages[i]);
 			/*如果folio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
-			folio_is_file_area_index_and_clear_NULL(folio);
+			folio_is_file_area_index_or_shadow_and_clear_NULL(folio);
 			if (folio && folio_test_dirty(folio)) {
 				nr = folio_nr_pages(folio);
 				wb_stat_mod(old_wb, WB_RECLAIMABLE, -nr);
@@ -467,7 +467,7 @@ static bool inode_do_switch_wbs_for_file_area(struct inode *inode,
 			//folio = p_file_area->pages[i];
 			folio = rcu_dereference(p_file_area->pages[i]);
 			/*如果folio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
-			folio_is_file_area_index_and_clear_NULL(folio);
+			folio_is_file_area_index_or_shadow_and_clear_NULL(folio);
 			if(folio && folio_test_writeback(folio)){
 				nr = folio_nr_pages(folio);
 				/*这个异常判断用两个panic替代*/
