@@ -1100,7 +1100,7 @@ static int print_one_list_file_stat(struct hot_cold_file_global *p_hot_cold_file
 			/* 如果print_file_stat_info_or_update_refault是更新file_stat_refault，说明此时是cat /proc/async_memory_reclaime/async_memory_reclaime_info 
 			 * 最后，执行close proc文件，此时才更新p_file_stat_base->refault_page_count_last*/
 			if(UPDATE_FILE_STAT_REFAULT_COUNT == print_file_stat_info_or_update_refault){
-				//p_file_stat_base->refault_page_count_last = p_file_stat_base->refault_page_count;
+				///p_file_stat_base->refault_page_count_last = p_file_stat_base->refault_page_count;
 				goto no_print; 
 			}
 
@@ -1136,11 +1136,11 @@ static int print_one_list_file_stat(struct hot_cold_file_global *p_hot_cold_file
 					//printk("2:stat:0x%llx refault_pages:%d last:%d\n",(u64)p_file_stat_base,p_file_stat_base->refault_page_count,p_file_stat_base->refault_page_count_last);
 
 
-					//refault_page_dx = p_file_stat_base->refault_page_count - p_file_stat_base->refault_page_count_last;
+					///refault_page_dx = p_file_stat_base->refault_page_count - p_file_stat_base->refault_page_count_last;
 					smp_wmb();
 					//p_file_stat_base->refault_page_count_last = p_file_stat_base->refault_page_count;
 					if(is_proc_print){
-						seq_printf(m,"stat:0x%llx status:0x%x max_age:%d traverse_age:%d file_areas:%d nrpages:%ld refault_pages:%d refault_pages_dx:%d reclaim_pages:%d mmap:%d %s\n",(u64)p_file_stat_base,p_file_stat_base->file_stat_status,p_file_stat_base->recent_access_age,p_file_stat_base->recent_traverse_age,p_file_stat_base->file_area_count,p_file_stat_base->mapping->nrpages,p_file_stat_base->refault_page_count,p_file_stat_base->refault_page_count_last,reclaim_pages,mapping_mapped(p_file_stat_base->mapping),file_name_path);
+						seq_printf(m,"stat:0x%llx status:0x%x max_age:%d traverse_age:%d file_areas:%d nrpages:%ld refault_pages:%d refault_pages_kswapd:%d reclaim_pages:%d mmap:%d %s\n",(u64)p_file_stat_base,p_file_stat_base->file_stat_status,p_file_stat_base->recent_access_age,p_file_stat_base->recent_traverse_age,p_file_stat_base->file_area_count,p_file_stat_base->mapping->nrpages,p_file_stat_base->refault_page_count,p_file_stat_base->refault_page_count_last,reclaim_pages,mapping_mapped(p_file_stat_base->mapping),file_name_path);
 						//seq_printf(m,"stat:0x%llx status:0x%x max_age:%d traverse_age:%d file_areas:%d nrpages:%ld refault_pages:%d %d refault_pages_dx:%d reclaim_pages:%d mmap:%d %s\n",(u64)p_file_stat_base,p_file_stat_base->file_stat_status,p_file_stat_base->recent_access_age,p_file_stat_base->recent_traverse_age,p_file_stat_base->file_area_count,p_file_stat_base->mapping->nrpages,p_file_stat_base->refault_page_count,p_file_stat_base->refault_page_count_last,refault_page_dx,reclaim_pages,mapping_mapped(p_file_stat_base->mapping),file_name_path);
 						/*如果上边的seq_printf()打印file_stat数据时，seq_file->buf满了，不能再容纳打印数据，m->count和m->size相等，此时直接return -1，中断打印file_stat信息*/
 						if(m->count == m->size){

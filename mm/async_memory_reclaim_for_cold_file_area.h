@@ -6,6 +6,7 @@
 //#define ASYNC_MEMORY_RECLAIM_DEBUG
 //#define HOT_FILE_UPDATE_FILE_STATUS_USE_OLD  hot_file_update_file_status函数使用老的方案
 //#define ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
+//#define FILE_AREA_IN_FREE_KSWAPD_AND_SHADOW
 
 #define CACHE_FILE_DELETE_PROTECT_BIT 0
 #define MMAP_FILE_DELETE_PROTECT_BIT 1
@@ -413,8 +414,9 @@ struct file_area
 		struct rcu_head		i_rcu;
 	};
 #ifndef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
-	//该file_area代表的N个连续page的起始page索引
-	pgoff_t start_index;
+	//该file_area代表的N个连续page的起始page索引。为了节省内存，改为int类型，因此只能最大只能支持63.9T的文件产生的pagecache。是否要做个限制????????????????????????????
+	//pgoff_t start_index;/*之前start_index代表的是对应的起始folio索引*/
+	unsigned int start_index;/*现在该为file_area的索引，不是对应的起始folio索引*/
 #endif	
 	struct folio __rcu *pages[PAGE_COUNT_IN_AREA];
 
@@ -434,7 +436,8 @@ struct file_area
 		 *由于和access_count是共享枚举变量，当file_area从file_stat->temp链表移动到file_stat->refault、hot、free等链表时，要对file_area_access_age清0*/
 		unsigned int file_area_access_age;
 	};
-#else
+#endif
+#ifdef FILE_AREA_IN_FREE_KSWAPD_AND_SHADOW
 	/*低4位表示file_area的hot ready计数，高4位ahead ready计数*/
 	union{
         unsigned char file_area_hot_ahead_ready_all;
@@ -789,6 +792,7 @@ struct hot_cold_file_global
 	unsigned long kswapd_free_page_count;
 	unsigned long async_thread_free_page_count;
 	unsigned long kswapd_file_area_refault_file;
+	//atomic_t   kswapd_file_area_refault_file;
 	
 	unsigned int refault_file_area_scan_dx;
 	unsigned int reclaim_page_print_level;
@@ -818,7 +822,9 @@ enum file_area_status{
 	F_file_area_in_cache,
 	F_file_area_in_mmap,
 	F_file_area_in_init,/*新分配file_area后立即设置该标记*/
-	F_file_area_in_free_kswapd,/*file_area的page被kswapd进程内存回收，不是被异步内存回收线程回收*/
+	/*file_area第一次被访问设置access bit，第2次被访问只是ahead bit，第3次被访问设置hot bit*/
+	F_file_area_in_access,
+	//F_file_area_in_free_kswapd,/*file_area的page被kswapd进程内存回收，不是被异步内存回收线程回收*/
 	//F_file_area_in_cache,//file_area保存在ile_stat->hot_file_area_cache[]数组里
 };
 //不能使用 clear_bit_unlock、test_and_set_bit_lock、test_bit，因为要求p_file_area->file_area_state是64位数据，但实际只是u8型数据
@@ -885,7 +891,8 @@ FILE_AREA_LIST_STATUS(mapcount_list)
 	FILE_AREA_STATUS(init)
 	FILE_AREA_STATUS(ahead)
 	FILE_AREA_STATUS(read)
-FILE_AREA_LIST_STATUS(free_kswapd)
+	FILE_AREA_STATUS(access)
+//FILE_AREA_LIST_STATUS(free_kswapd)
 
 
 #define file_area_in_temp_list_not_have_hot_status (1 << F_file_area_in_temp_list)
@@ -1190,6 +1197,8 @@ extern int open_file_area_printk_important;
 #define WRITEBACK_MARK_IN_FILE_AREA_BASE (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA*2)
 #define DIRTY_MARK_IN_FILE_AREA_BASE     (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA*3)
 #define TOWRITE_MARK_IN_FILE_AREA_BASE   (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA*4)
+/*page shadow bit15~bit12*/
+#define SHADOW_IN_FILE_AREA_BASE   (sizeof(unsigned int)*8 - PAGE_COUNT_IN_AREA*5)
 
 #if 0
 #define FILE_AREA_PRINT(fmt,...) \
@@ -1221,11 +1230,11 @@ panic("%s xas:0x%llx file_area:0x%llx folio:0x%llx folio_from_file_area:0x%llx p
 #else
 
 #define CHECK_FOLIO_FROM_FILE_AREA_VALID(xas,mapping,folio,p_file_area,page_offset_in_file_area,folio_index_from_xa_index) \
-	if((folio)->index != ((p_file_area)->start_index + page_offset_in_file_area) || (folio)->index != folio_index_from_xa_index || (folio)->mapping != mapping)\
+	if((folio)->index != (((p_file_area)->start_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area) || (folio)->index != folio_index_from_xa_index || (folio)->mapping != mapping)\
 panic("%s xas:0x%llx file_area:0x%llx folio:0x%llx page_offset_in_file_area:%d mapping:0x%llx_0x%llx\n",__func__,(u64)xas,(u64)p_file_area,(u64)folio,page_offset_in_file_area,(u64)mapping,(u64)((folio)->mapping));
 
 #define CHECK_FOLIO_FROM_FILE_AREA_VALID_MARK(xas,mapping,folio,folio_from_file_area,p_file_area,page_offset_in_file_area,folio_index_from_xa_index) \
-	if(folio->index != ((p_file_area)->start_index + page_offset_in_file_area) || folio->index != folio_index_from_xa_index || folio != folio_from_file_area || (folio)->mapping != mapping)\
+	if(folio->index != (((p_file_area)->start_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area) || folio->index != folio_index_from_xa_index || folio != folio_from_file_area || (folio)->mapping != mapping)\
 panic("%s xas:0x%llx file_area:0x%llx folio:0x%llx folio_from_file_area:0x%llx page_offset_in_file_area:%d mapping:0x%llx_0x%llx\n",__func__,(u64)xas,(u64)p_file_area,(u64)folio,(u64)folio_from_file_area,page_offset_in_file_area,(u64)mapping,(u64)((folio)->mapping));
 
 #endif
@@ -1272,6 +1281,21 @@ static inline int file_area_have_page(struct file_area *p_file_area)
 {
 	return  (READ_ONCE(p_file_area->file_area_state) & ~((1 << PAGE_BIT_OFFSET_IN_FILE_AREA_BASE) - 1));//0XF000 0000
 }
+
+static inline void clear_file_area_page_shadow_bit(struct file_area *p_file_area,unsigned char page_offset_in_file_area)
+{	
+	clear_bit(SHADOW_IN_FILE_AREA_BASE + page_offset_in_file_area , (unsigned long *)&p_file_area->file_area_state);
+}
+static inline void set_file_area_page_shadow_bit(struct file_area *p_file_area,unsigned char page_offset_in_file_area)
+{
+	if(test_and_set_bit(SHADOW_IN_FILE_AREA_BASE + page_offset_in_file_area,(unsigned long *)&p_file_area->file_area_state))
+		panic("shadow %s file_area:0x%llx file_area_state:0x%x page_offset_in_file_area:%d already set\n",__func__,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area);
+}
+static inline int is_file_area_page_shadow(struct file_area *p_file_area,unsigned char page_offset_in_file_area)
+{
+	return (test_bit(SHADOW_IN_FILE_AREA_BASE + page_offset_in_file_area,(unsigned long *)&p_file_area->file_area_state));
+}
+
 
 /*探测file_area里的page是读还是写*/
 static inline void set_file_area_page_read(struct file_area *p_file_area/*,unsigned char page_offset_in_file_area*/)
@@ -2404,7 +2428,8 @@ static inline struct file_area *file_area_alloc_and_init(unsigned int area_index
 	list_add(&p_file_area->file_area_list,&p_file_stat_base->file_area_temp);
 #ifndef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY	
 	//保存该file_area对应的起始page索引，一个file_area默认包含8个索引挨着依次增大page，start_index保存其中第一个page的索引
-	p_file_area->start_index = area_index_for_page << PAGE_COUNT_IN_AREA_SHIFT;//area_index_for_page * PAGE_COUNT_IN_AREA;
+	//p_file_area->start_index = area_index_for_page << PAGE_COUNT_IN_AREA_SHIFT;//area_index_for_page * PAGE_COUNT_IN_AREA;
+	p_file_area->start_index = area_index_for_page;//area_index_for_page * PAGE_COUNT_IN_AREA;
 #endif	
 	p_file_stat_base->file_area_count ++;//文件file_stat的file_area个数加1
 	set_file_area_in_temp_list(p_file_area);//新分配的file_area必须设置in_temp_list链表
@@ -2583,6 +2608,8 @@ static int inline file_area_access_count_get(struct file_area *p_file_area)
 	return atomic_read(&p_file_area->access_count);
 }
 #else
+
+#ifdef FILE_AREA_IN_FREE_KSWAPD_AND_SHADOW
 static void inline file_area_access_count_clear(struct file_area *p_file_area)
 {
 	p_file_area->file_area_hot_ahead.hot_ready_count = 0;
@@ -2597,6 +2624,19 @@ static int inline file_area_access_count_get(struct file_area *p_file_area)
 {
 	return p_file_area->file_area_hot_ahead.hot_ready_count;
 }
+#else
+static void inline file_area_access_count_clear(struct file_area *p_file_area)
+{
+}
+static void inline file_area_access_count_add(struct file_area *p_file_area,int count)
+{
+}
+static int inline file_area_access_count_get(struct file_area *p_file_area)
+{
+	return 0;
+}
+
+#endif
 #endif
 /*head代表一段链表，first~tail是这个链表尾的几个连续成员，该函数是把first~tail指向的几个成员移动到链表头*/
 //void list_move_enhance(struct list_head *head,struct list_head *first,struct list_head *tail)

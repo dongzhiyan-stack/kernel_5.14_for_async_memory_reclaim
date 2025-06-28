@@ -69,7 +69,12 @@
 #define MMAP_FILE_REFAULT_TO_TEMP_AGE_DX 8
 #define MMAP_FILE_COLD_TO_FREE_AGE_DX    5
 #define MMAP_FILE_WARM_TO_TEMP_AGE_DX  20
-
+/*mmap file_area设置in_access标记后，过了10个周期没有被访问，就要清理掉in_access标记*/
+#define MMAP_AHEAD_FILE_AREA_ACCESS_TO_COLD_AGE_DX  10
+/*mmap file_area设置in_ahead标记后，过了30个周期没有被访问，就要清理掉in_ahead标记*/
+#define MMAP_AHEAD_FILE_AREA_AHEAD_TO_COLD_AGE_DX  50
+/*cache file_area设置in_ahead标记后，过了25个周期没有被访问，就要清理掉in_ahead标记*/
+#define AHEAD_FILE_AREA_TO_COLD_AGE_DX  25
 #define TINY_SMALL_TO_TINY_SMALL_ONE_AREA_LEVEL 3
 #define TINY_SMALL_ONE_AREA_TO_TINY_SMALL_LEVEL 6
 
@@ -132,7 +137,8 @@ static inline int cold_file_area_delete_lock(struct hot_cold_file_global *p_hot_
 #ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY	
 	XA_STATE(xas, &((struct address_space *)(p_file_stat_base->mapping))->i_pages, -1);
 #else	
-	XA_STATE(xas, &((struct address_space *)(p_file_stat_base->mapping))->i_pages, p_file_area->start_index >> PAGE_COUNT_IN_AREA_SHIFT);
+	//XA_STATE(xas, &((struct address_space *)(p_file_stat_base->mapping))->i_pages, p_file_area->start_index >> PAGE_COUNT_IN_AREA_SHIFT);
+	XA_STATE(xas, &((struct address_space *)(p_file_stat_base->mapping))->i_pages, p_file_area->start_index);
 #endif
 	void *old_file_area;
 
@@ -1100,9 +1106,44 @@ void hot_file_update_file_status(struct address_space *mapping,struct file_stat_
 			p_file_stat_base->file_area_move_to_head_count = 0;
 
 
+#ifndef FILE_AREA_IN_FREE_KSWAPD_AND_SHADOW
+		/*在第一个AHEAD_FILE_AREA_TO_COLD_AGE_DX个周期内，file_area被访问两次，设置了in_ahead标记。在随后的
+		 * 一个AHEAD_FILE_AREA_TO_COLD_AGE_DX个周期内，file_area被第一次访问设置in_access标记，再被访问一次则设置in_hot标记*/
+		if(file_area_in_temp_list(p_file_area) || file_area_in_warm_list(p_file_area)){
+
+			/*上个周期file_area设置了in_access标记，但是下次该file_area再被访问已经过了FILE_AREA_MOVE_HEAD_DX周期，那就清理掉in_access标记*/
+			if(file_area_in_access(p_file_area) && age_dx > FILE_AREA_MOVE_HEAD_DX)
+				clear_file_area_in_access(p_file_area);
+
+			/*如果in_ahead的file_area超过AHEAD_FILE_AREA_TO_COLD_AGE_DX个周期才被访问，就因长时间没访问而清理掉ahead标记*/
+			if(file_area_in_ahead(p_file_area) && age_dx > AHEAD_FILE_AREA_TO_COLD_AGE_DX)
+				clear_file_area_in_ahead(p_file_area);
+
+			/*3.1 再再过一个周期，该file_area再被访问则设置in_access标记  3.2 再再再过一个周期，该file_area再被访问，file_area
+			 * 的in_access标记和in_ahead标记都有，说明file_area连续两个FILE_AREA_MOVE_HEAD_DX周期file_area都被访问两次，则判定file_area是hot*/
+			if(file_area_in_access(p_file_area) && file_area_in_ahead(p_file_area)){
+				clear_file_area_in_access(p_file_area);
+				clear_file_area_in_ahead(p_file_area);
+				file_area_move_list_head_or_hot = HOT_READY;
+				goto bypass;
+			}
+
+			/*2:下一个周期有in_access标记但没有in_ahead的file_area再被访问，设置file_area的in_ahead。但要清理掉in_access*/
+			if(file_area_in_access(p_file_area) && !file_area_in_ahead(p_file_area)){
+				clear_file_area_in_access(p_file_area);
+				set_file_area_in_ahead(p_file_area);
+				file_area_move_list_head_or_hot = AHEAD_READY;
+				hot_cold_file_global_info.update_file_area_move_to_head_count ++;
+				goto bypass;
+			}
+
+			/*1:第一个周期该file_area被访问，设置file_area的in_access标记*/
+			if(!file_area_in_access(p_file_area))
+				set_file_area_in_access(p_file_area);
+		}
+#else		
 		/* 如果连续FILE_AREA_CHECK_HOT_DX个周期，file_area都被访问，则判定为hot file_area。
 		 * 如果在FILE_AREA_MOVE_HEAD_DX个周期内，file_area被访问两次，则判定为ahead file_area。*/
-
 		 /*hot_ready_count只是unsigned char的一半，只有4个bit位，最大只能16*/
 		if((file_area_in_temp_list(p_file_area) || file_area_in_warm_list(p_file_area)) && p_file_area->file_area_hot_ahead.hot_ready_count < 0xF){
 			/* 第1次进来，下边的两个if...else if都不成立，只会执行hot_ready_count ++。后续如果每个周期file_area都被访问，
@@ -1115,13 +1156,13 @@ void hot_file_update_file_status(struct address_space *mapping,struct file_stat_
 					file_area_move_list_head_or_hot = HOT_READY;
 					/*hot_ready_count及时清零否则影响下个周期热file_area的判定*/
 					p_file_area->file_area_hot_ahead.hot_ready_count = 0;
-					goto baypass;
+					goto bypass;
 				}
 			}else{
 				if(p_file_area->file_area_hot_ahead.hot_ready_count > 0){
 					/*一旦不是两个周期连续访问，则对hot_ready_count清0*/
 					p_file_area->file_area_hot_ahead.hot_ready_count = 0;
-					goto baypass;
+					goto bypass;
 				}
 			}
 
@@ -1145,20 +1186,21 @@ void hot_file_update_file_status(struct address_space *mapping,struct file_stat_
 						p_file_area->file_area_hot_ahead.ahead_ready_count = 0;
 						file_area_move_list_head_or_hot = AHEAD_READY;
 						hot_cold_file_global_info.update_file_area_move_to_head_count ++;
-						goto baypass;
+						goto bypass;
 					}
 				}else{
 					/*超过了FILE_AREA_MOVE_HEAD_DX个周期，file_area才被二次访问，就不能判定为ahead file_area了*/
 					p_file_area->file_area_hot_ahead.ahead_ready_count = 0;
-					goto baypass;
+					goto bypass;
 				}
 			}
 
 			p_file_area->file_area_hot_ahead.ahead_ready_count ++;
 		}
+#endif		
 	}
 
-baypass:
+bypass:
 
 	/*file_area的page是被读，则标记file_read读，内存回收时跳过这种file_area的page，优先回收write的*/
 	if(!file_area_page_is_read(p_file_area) && (FILE_AREA_PAGE_IS_READ == read_or_write)){
@@ -1283,10 +1325,9 @@ static inline void check_hot_file_area_and_file_stat(struct hot_cold_file_global
 {
 	struct file_stat *p_file_stat = NULL;
 	unsigned int file_stat_list_type;
-
 	//被判定为热file_area后，对file_area的access_count清0，防止干扰后续file_area冷热判断
 	file_area_access_count_clear(p_file_area);
-
+	
 	/*小文件只是设置一个hot标记就return，不再把file_area移动到file_area_hot链表*/
 	if(FILE_STAT_TINY_SMALL == file_type){
 		clear_file_area_in_temp_list(p_file_area);
@@ -1320,6 +1361,7 @@ static inline void check_hot_file_area_and_file_stat(struct hot_cold_file_global
 		p_file_stat_base->file_area_count_in_temp_list --;
 		clear_file_area_in_temp_list(p_file_area);
 	}
+	/*in_warm的file_area移动到file_stat->hot链表，不用spin_lock加锁优化点???????????????*/
 	else if(file_area_in_warm_list(p_file_area))
 		clear_file_area_in_warm_list(p_file_area);
 	else
@@ -1650,6 +1692,7 @@ void get_file_area_age_mmap(struct file_stat_base *p_file_stat_base,struct file_
 	unsigned char mmap_page_count = 0,mapcount_file_area = 0;
 	int scan_page_interval = SCAN_PAGE_INTERVAL_IN_FILE_AREA;
 	int scan_page_count = 0;
+	unsigned int age_dx;
 
 #if 0
 	/* 只有cache文件的file_area有mmap page时，才会设置file_area_in_mmap标记。这种情况可能吗？存在的，
@@ -1737,8 +1780,9 @@ next_folio:
 	}
 
 	if(1 == scan_page_interval && (scan_page_count != PAGE_COUNT_IN_AREA) && (0 == mapcount_file_area)){
-	    printk("%s file_area:0x%llx status:0x%x has init flag,but scan_page_count=%d\n",__func__,(u64)p_file_area,p_file_area->file_area_state,scan_page_count);
+		printk("%s file_area:0x%llx status:0x%x has init flag,but scan_page_count=%d\n",__func__,(u64)p_file_area,p_file_area->file_area_state,scan_page_count);
 	}
+	age_dx = p_hot_cold_file_global->global_age - p_file_area->file_area_age;
 
 	/*file_area里有至少一个mmap page，且pte access bit置1了，判定为被访问了，赋值global_age*/
 	if(ret > 0){
@@ -1751,6 +1795,41 @@ next_folio:
 	 * 函数接口。in_hot、in_mapcount、in_free等链表上的file_area也会执行该函数获取file_area_age，必须要屏蔽掉它们*/
 	if(file_stat_in_mmap_file_base(p_file_stat_base) && (file_area_in_temp_list(p_file_area) || file_area_in_warm_list(p_file_area))){
 		/*mmap文件，热file_area、热文件的处理*/
+#ifndef FILE_AREA_IN_FREE_KSWAPD_AND_SHADOW
+		if(ret > 0){
+			/*连续第3次遍历到该file_area的pte access被访问则设置in_hot标记。或者，有了in_ahead标记后，在MMAP_AHEAD_FILE_AREA_TO_COLD_AGE_DX个周期内，file_area又被访问一次，也设置file_area的in_hot标记*/
+			if(file_area_in_ahead(p_file_area)){
+				clear_file_area_in_ahead(p_file_area);
+				check_hot_file_area_and_file_stat(p_hot_cold_file_global,p_file_stat_base,p_file_area,file_type);
+				p_hot_cold_file_global->mmap_file_shrink_counter.scan_hot_file_area_count += 1;
+				/* file_area由in_temp或in_warm状态变为in_hot，必须标记file_stat_changed=1，因为file_area已经移动到in_hot链表了
+				 * ，不再处于in_temp或in_warm链表*/
+				*file_stat_changed = 1;
+				
+				goto mmap_bypass;
+			}
+
+			/*连续第2次遍历到该file_area的pte access被访问则设置in_ahead标记*/
+			if(file_area_in_access(p_file_area) && !file_area_in_ahead(p_file_area)){
+				clear_file_area_in_access(p_file_area);
+				set_file_area_in_ahead(p_file_area);
+				goto mmap_bypass;
+			}
+
+			/*第1次遍历到该file_area的pte access被访问则设置in_access标记*/
+			if(!file_area_in_access(p_file_area))
+				set_file_area_in_access(p_file_area);
+		}else{
+			/*如果file_area有in_access标记后，下次再遍历到该file_area的page后，该page没有被访问了，且过了规定时间，则清理掉in_access标记*/
+			if(file_area_in_access(p_file_area) && age_dx > MMAP_AHEAD_FILE_AREA_ACCESS_TO_COLD_AGE_DX)
+				clear_file_area_in_access(p_file_area);
+
+			/*file_area有in_ahead标记后，过了很长时间都没有被访问，则要清理掉in_ahead标记。目的是该file_area有变in_hot的潜力，不要轻易清理掉in_ahead标记*/
+			if(file_area_in_ahead(p_file_area) &&  age_dx > MMAP_AHEAD_FILE_AREA_AHEAD_TO_COLD_AGE_DX)
+				clear_file_area_in_ahead(p_file_area);
+		}
+mmap_bypass:	
+#else		
 		if(ret > 0){
 			file_area_access_count_add(p_file_area,1);
 			/* 如果file_area的page连续3次检测到pte access bit置1了，判定该file_area是热file_area*/
@@ -1762,16 +1841,19 @@ next_folio:
 		}
 		else
 			file_area_access_count_clear(p_file_area);
+#endif		
 
 		/* mmap文件，mapcountfile_area、mapcount文件的处理*/
 		if(mapcount_file_area){
 			check_mapcount_file_area_and_file_stat(p_hot_cold_file_global,p_file_stat_base,p_file_area,file_type);
 			p_hot_cold_file_global->mmap_file_shrink_counter.scan_mapcount_file_area_count += 1;
+			/* file_area由in_temp或in_warm状态变为in_mapcount，必须标记file_stat_changed=1，因为file_area已经移动到in_mapcount链表了
+			 * ，不再处于in_temp或in_warm链表*/
 			*file_stat_changed = 1;
 		}
 	}
 
-	/*file_area没有一个file_area*/
+	/*file_area没有一个mmap page*/
 	if(0 == mmap_page_count){
 		/*cache文件的file_area，但是有in_mmap标记，说明之前有mmap file_area，现在没了，于是清理掉in_mmap标记*/
 		if(file_stat_in_cache_file_base(p_file_stat_base) && file_area_in_mmap(p_file_area))
@@ -1897,8 +1979,8 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 	list_for_each_entry_safe(p_file_area,tmp_file_area,file_area_free,file_area_list){
 
 		/*现在把有in_kswapd标记的file_area，不再单独处理了。这种标记只有被异步内存回收线程内存回收，才能清理掉in_kswapd标记，其他时间都留着*/
-		if(file_area_in_free_kswapd(p_file_area))
-			clear_file_area_in_free_kswapd(p_file_area);
+		/*if(file_area_in_free_kswapd(p_file_area))
+			clear_file_area_in_free_kswapd(p_file_area);*/
 
 		/*每遍历一个file_area，都要先对mmap_page_count清0，然后下边遍历到file_area的每一个mmap page再加1*/
 		mmap_page_count = 0;
@@ -2914,8 +2996,8 @@ static void file_stat_other_list_file_area_solve_common(struct hot_cold_file_glo
 						set_file_area_in_temp_list(p_file_area);
 						p_file_stat_base->file_area_count_in_temp_list ++;
 					}else{
-						if(!file_area_in_free_kswapd(p_file_area))
-				            printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_area_type:0x%x not in free_kswapd\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,file_area_type);
+						/*if(!file_area_in_free_kswapd(p_file_area))
+				            printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_area_type:0x%x not in free_kswapd\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,file_area_type);*/
 						set_file_area_in_free_list(p_file_area);
 					}
 				}
@@ -2932,8 +3014,8 @@ static void file_stat_other_list_file_area_solve_common(struct hot_cold_file_glo
 						list_move_tail(&p_file_area->file_area_list,&p_file_stat_base->file_area_temp);
 						spin_unlock(&p_file_stat_base->file_stat_lock); 
 					}else{
-						if(!file_area_in_free_kswapd(p_file_area))
-				            printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_area_type:0x%x not in free_kswapd\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,file_area_type);
+						/*if(!file_area_in_free_kswapd(p_file_area))
+				            printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_area_type:0x%x not in free_kswapd\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,file_area_type);*/
 						set_file_area_in_free_list(p_file_area);
 					}
 				}
@@ -2954,8 +3036,8 @@ static void file_stat_other_list_file_area_solve_common(struct hot_cold_file_glo
 						//printk("3 %s:file_stat:0x%llx file_area:0x%llx status:0x%x age:%d hot to warm\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,p_file_area->file_area_age);
 						//spin_unlock(&p_file_stat->file_stat_lock);	    
 					}else{
-						if(!file_area_in_free_kswapd(p_file_area))
-				            printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_area_type:0x%x not in free_kswapd\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,file_area_type);
+						/*if(!file_area_in_free_kswapd(p_file_area))
+				            printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_area_type:0x%x not in free_kswapd\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,file_area_type);*/
 						set_file_area_in_free_list(p_file_area);
 						list_move(&p_file_area->file_area_list,&p_file_stat->file_area_free);
 					}
@@ -2999,8 +3081,8 @@ static void file_stat_other_list_file_area_solve_common(struct hot_cold_file_glo
 						p_file_stat_base->file_area_count_in_temp_list ++;
 
 					}else{
-						if(!file_area_in_free_kswapd(p_file_area))
-				            printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_area_type:0x%x not in free_kswapd\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,file_area_type);
+						/*if(!file_area_in_free_kswapd(p_file_area))
+				            printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_area_type:0x%x not in free_kswapd\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,file_area_type);*/
 
 						set_file_area_in_free_list(p_file_area);
 					}
@@ -3017,8 +3099,8 @@ static void file_stat_other_list_file_area_solve_common(struct hot_cold_file_glo
 						list_move(&p_file_area->file_area_list,&p_file_stat_base->file_area_temp);
 						spin_unlock(&p_file_stat_base->file_stat_lock); 
 					}else{
-						if(!file_area_in_free_kswapd(p_file_area))
-				            printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_area_type:0x%x not in free_kswapd\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,file_area_type);
+						/*if(!file_area_in_free_kswapd(p_file_area))
+				            printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_area_type:0x%x not in free_kswapd\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,file_area_type);*/
 						set_file_area_in_free_list(p_file_area);
 					}
 				}
@@ -3039,8 +3121,8 @@ static void file_stat_other_list_file_area_solve_common(struct hot_cold_file_glo
 						//printk("4 %s:file_stat:0x%llx file_area:0x%llx status:0x%x age:%d refault to warm\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,p_file_area->file_area_age);
 						//spin_unlock(&p_file_stat->file_stat_lock);	    
 					}else{
-						if(!file_area_in_free_kswapd(p_file_area))
-				            printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_area_type:0x%x not in free_kswapd\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,file_area_type);
+						/*if(!file_area_in_free_kswapd(p_file_area))
+				            printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_area_type:0x%x not in free_kswapd\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,file_area_type);*/
 						list_move(&p_file_area->file_area_list,&p_file_stat->file_area_free);
 						set_file_area_in_free_list(p_file_area);
 					}
@@ -3240,8 +3322,8 @@ static void file_stat_other_list_file_area_solve_common(struct hot_cold_file_glo
 					    set_file_area_in_temp_list(p_file_area);
 					    p_file_stat_base->file_area_count_in_temp_list ++;
 					}else{
-						if(!file_area_in_free_kswapd(p_file_area))
-				            printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_area_type:0x%x not in free_kswapd\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,file_area_type);
+						/*if(!file_area_in_free_kswapd(p_file_area))
+				            printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_area_type:0x%x not in free_kswapd\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,file_area_type);*/
                         set_file_area_in_free_list(p_file_area);
 					}
 				}else if(FILE_STAT_SMALL == file_type){
@@ -3254,8 +3336,8 @@ static void file_stat_other_list_file_area_solve_common(struct hot_cold_file_glo
 						p_file_stat_base->file_area_count_in_temp_list ++;
 						spin_unlock(&p_file_stat_base->file_stat_lock);
 					}else{
-						if(!file_area_in_free_kswapd(p_file_area))
-				            printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_area_type:0x%x not in free_kswapd\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,file_area_type);
+						/*if(!file_area_in_free_kswapd(p_file_area))
+				            printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_area_type:0x%x not in free_kswapd\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,file_area_type);*/
                         set_file_area_in_free_list(p_file_area);
 					}
 				}
@@ -3275,8 +3357,8 @@ static void file_stat_other_list_file_area_solve_common(struct hot_cold_file_glo
 						//在file_stat->file_area_mapcount链表的file_area个数减1
 						p_file_stat->mapcount_file_area_count --;
 					}else{
-						if(!file_area_in_free_kswapd(p_file_area))
-				            printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_area_type:0x%x not in free_kswapd\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,file_area_type);
+						/*if(!file_area_in_free_kswapd(p_file_area))
+				            printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_area_type:0x%x not in free_kswapd\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,file_area_type);*/
 					    set_file_area_in_free_list(p_file_area);
 						list_move(&p_file_area->file_area_list,&p_file_stat->file_area_free);
 					}
@@ -3445,10 +3527,10 @@ static int kswapd_file_area_solve(struct hot_cold_file_global *p_hot_cold_file_g
 	/* 如果file_area没有page，说明file_area被内存回收后没有page再被访问，没有发生refault，
 	 * 此时按照file_stat->temp的file_area正常处理流程处理，移动到file_stat->free链表，然后被释放掉。
 	 * 改了，现在改为，果没有page了则直接移动到in_free链表，否则当成普通的file_area处理*/
-	if(file_area_have_page(p_file_area)){
+	/*if(file_area_have_page(p_file_area)){
 		p_hot_cold_file_global->check_refault_file_area_kswapd_count ++;
 		return 0;
-	}
+	}*/
 
 	if(file_stat_in_test_base(p_file_stat_base))
 		printk("%s:file_stat:0x%llx file_stat_status:0x%x file_area:0x%llx status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,(u64)p_file_area,p_file_area->file_area_state);
@@ -3692,8 +3774,13 @@ static inline int file_stat_temp_list_file_area_solve(struct hot_cold_file_globa
 		 * 否则当成普通的file_area处理。并且，在file_stat->mapcount、hot、refault上的file_area，如果有
 		 * in_kswapd标记，或者file_area没有page了，直接移动到file_stat->free链表，不再按照老的逻辑处理
 		 */ 
-		 /* 如果被判定为refault file_area，直接continue，不再按照in_temp属性的file_area处理*/
-		if(file_area_in_free_kswapd(p_file_area))
+		 /* 如果被判定为refault file_area，直接continue，不再按照in_temp属性的file_area处理
+		  *
+		  * 最新改动，file_area_in_free_kswapd()不再使用了，没什么用，鸡肋，舍弃掉。因为这种file_area
+		  * 可以用if(!file_area_have_page(p_file_area))代替，还占据了file_area->file_area_state一个宝贵的bit位
+		  * */
+		//if(file_area_in_free_kswapd(p_file_area))
+		if(!file_area_have_page(p_file_area))
 			if(kswapd_file_area_solve(p_hot_cold_file_global,p_file_stat_base,p_file_area,file_type))
 				continue;
 
@@ -3880,7 +3967,8 @@ static noinline unsigned int file_stat_warm_list_file_area_solve(struct hot_cold
 		if(file_stat_in_test_base(p_file_stat_base))
 			printk("%s:1 file_stat:0x%llx status:0x%x file_area:0x%llx status:0x%x age:%d global_age:%d\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,(u64)p_file_area,p_file_area->file_area_state,p_file_area->file_area_age,p_hot_cold_file_global->global_age);
 
-		if(file_area_in_free_kswapd(p_file_area))
+		//if(file_area_in_free_kswapd(p_file_area))
+		if(!file_area_have_page(p_file_area))
 			if(kswapd_file_area_solve(p_hot_cold_file_global,p_file_stat_base,p_file_area,file_type))
 				continue;
 

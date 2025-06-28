@@ -246,12 +246,26 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
 	//clear_file_area_page_bit(p_file_area,page_offset_in_file_area);
 	//smp_wmb();
 #ifndef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
-	/* 如果是异步内存回收线程回收的page，strncmp(current->comm,"hot_cold",8) == 0成立,传入的shadow是NULL，
-	 * 此时是否有必要向file_area->pages[]写入一个非0值呢？表示该page被回收了，将来被访问则判定为refault
-	 * 完全可以我直接执行shadow = workingset_eviction(folio, target_memcg)计算shadow值呀，先不搞了，后续再说吧?????????????????????????*/
-	//if(shadow || strncmp(current->comm,"hot_cold",8) == 0)
-	/*1:kswapd进程内存回收 2:进程直接内存回收*/
+#ifndef FILE_AREA_IN_FREE_KSWAPD_AND_SHADOW
+	/*1:kswapd进程内存回收 2:进程直接内存回收 shadow非NULL。 3:shadow是NULL，但current->mm非NULL，说明是文件截断
+	 * 剩下的就是异步内存回收线程，该if才成立*/
 	if(shadow)
+		hot_cold_file_global_info.kswapd_free_page_count ++;
+	else if(!current->mm){
+		/*在file_area->file_area_state里标记file_area的这个page被释放了*/
+		set_file_area_page_shadow_bit(p_file_area,page_offset_in_file_area);
+		hot_cold_file_global_info.async_thread_free_page_count ++;
+
+		//shadow = (void *)(0x1); bit0置1表示是shadow，暂时不需要
+		if(strncmp(current->comm,"async_memory",12))
+			printk("%s %s %d async memory errror!!!!!!!!!\n",__func__,current->comm,current->pid);
+	}
+	rcu_assign_pointer(p_file_area->pages[page_offset_in_file_area], shadow);
+#else
+	/* 如果是异步内存回收线程回收的page，传入的shadow是NULL，此时是否有必要向file_area->pages[]写入一个非0值呢？
+	 * 表示该page被回收了，将来被访问则判定为refault。完全可以我直接执行shadow = workingset_eviction(folio, target_memcg)
+	 * 计算shadow值呀，先不搞了，异步内存回收线程回收page 跟 kswapd内存回收page，完全是两码事*/
+	if(shadow)/*1:kswapd进程内存回收 2:进程直接内存回收*/
 		/*bit1清0表示是kswapd内存回收的该page。将来该page将来再被访问发生refault，在workingset_refault()函数要依照shadow值
 		  决定是否把该page移动到active lru链表。但是我这里将shadow的bit1清0了，破坏了原生shadow值，有问题????????但只是bit1，影响不大吧??????????????????*/
 		//shadow = shadow & ~(1 << 1);
@@ -268,6 +282,8 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
 			shadow = NULL;
 	}
 	rcu_assign_pointer(p_file_area->pages[page_offset_in_file_area], shadow);
+#endif
+
 #else
 	//if(shadow || strncmp(current->comm,"hot_cold",8) == 0)
 	if(shadow)
@@ -369,12 +385,14 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
 	 * 遍历和移动都不加锁，遵循历史设计吧。最终决策，这里标记file_stat的in_free_kswaped标记，异步内存回收线程
 	 * 针对有in_free_kswaped标记的file_area，特殊处理*/
 
+#ifdef FILE_AREA_IN_FREE_KSWAPD_AND_SHADOW
 	/*可能一个file_area被异步内存回收线程回收标记in_free后，然后 kswapd再回收它里边的新读写产生的page，此时就不用再标记file_area in_free_kswaped了*/
 	if(/*shadow && !file_area_in_free_list(p_file_area) &&*/ !file_area_in_free_kswapd(p_file_area) && shadow){
 		set_file_area_in_free_kswapd(p_file_area);
 		hot_cold_file_global_info.kswapd_free_page_count ++;
 	}else if(file_area_in_free_list(p_file_area))
 		hot_cold_file_global_info.async_thread_free_page_count ++;
+#endif	
 }
 #endif
 static void page_cache_delete(struct address_space *mapping,
@@ -1587,6 +1605,7 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 	struct file_stat_base *p_file_stat_base;
 	struct file_area *p_file_area;
 	struct folio *folio_temp;
+	gfp_t gfp_ori = gfp;
 	
 	//令page索引与上0x3得到它在file_area的pages[]数组的下标
 	unsigned int page_offset_in_file_area = index & PAGE_COUNT_IN_AREA_MASK;
@@ -1628,6 +1647,7 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 		nr = folio_nr_pages(folio);
 	}
 
+	/*这里会去掉gfp的__GFP_WRITE标记*/
 	gfp &= GFP_RECLAIM_MASK;
 	folio_ref_add(folio, nr);
 	folio->mapping = mapping;
@@ -1703,13 +1723,47 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 					xas_set_err(&xas, -EEXIST);
 					goto unlock;
 				}
+#ifndef FILE_AREA_IN_FREE_KSWAPD_AND_SHADOW
+				/*只有read的refault page才计入refault统计*/
+				//if(!(gfp_ori & __GFP_WRITE))
+				{
+					/*如果该page被异步内存回收线程回收而做了shadow标记，*/
+					if(is_file_area_page_shadow(p_file_area,page_offset_in_file_area)){
+						/*必须清理掉该page在file_area_state的shadow标记*/
+						clear_file_area_page_shadow_bit(p_file_area,page_offset_in_file_area);
+						/* 只有read的refault page才计入refault统计。这个判断不能放到外边，因为这会导致write refault的folio无法执行
+						 * clear_file_area_page_shadow_bit()清理shadow位，导致再发生refault而set_file_area_page_shadow_bit时，发现已经置位而crash*/
+						if(!(gfp_ori & __GFP_WRITE)){
+							//atomic_long_add(1, &vm_node_stat[WORKINGSET_REFAULT_FILE]);
+							hot_cold_file_global_info.file_area_refault_file ++;
+							if(p_file_stat_base->refault_page_count < USHRT_MAX - 2)
+								p_file_stat_base->refault_page_count ++;
+						}
+					}else{
+						/*否则folio_temp非NULL，说明是kswapd内存的page保存的shadow。如果是文件截断回收的page则folio_temp是NULL*/
+						if(folio_temp){
+							if(shadowp)
+								*shadowp = folio_temp;
 
+							if(!(gfp_ori & __GFP_WRITE)){
+								/* kswapd_file_area_refault_file存在多进程并发加1的情况，会导致统计的kswapd_file_area_refault_file不准。
+								 * 这只是一个粗略的统计值，只要跟WORKINGSET_REFAULT_FILE统计的refault别偏差太大就行*/
+								hot_cold_file_global_info.kswapd_file_area_refault_file ++;
+								//atomic_add(1, &hot_cold_file_global_info.kswapd_file_area_refault_file);
+								if(p_file_stat_base->refault_page_count_last < USHRT_MAX - 2)
+									p_file_stat_base->refault_page_count_last ++;
+							}
+						}
+					}
+				}
+#else				
 				/*如果folio之前被内存回收，则此时folio_temp保存的就是shadow值。否则folio_temp是NULL*/
 				if((u64)folio_temp & (1 << 1))////异步内存回收线程回收，shadow值是1
 					hot_cold_file_global_info.file_area_refault_file ++; 
+				atomic_long_add(1, &vm_node_stat[WORKINGSET_REFAULT_FILE]); 
 				else//kswap内存回收 或者 进程截断文件，shadow的bit1是0
 					*shadowp = folio_temp;
-
+#endif
 				//file_area已经添加到xarray tree，但是page还没有赋值到file_area->pages[]数组
 				goto find_file_area;
 			}
@@ -1760,6 +1814,7 @@ find_file_area:
 		 * hot_cold_file_global_info.file_area_refault_file ++。*/
 
 		/*filemap_add_folio()函数增加refault次数有限制条件，就是gfp没有__GFP_WRITE标记，即folio不是write的，而是read的*/
+#ifdef FILE_AREA_IN_FREE_KSWAPD_AND_SHADOW
 		if(!(gfp & __GFP_WRITE)){
 
 #ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
@@ -1769,7 +1824,6 @@ find_file_area:
 				folio_set_active(folio);
 			}
 #endif
-
 			/*file_area可能同时具备in_free_kswapd和in_free标记，in_free_kswapd优先级更高，因为这是kswapd或直接内存回收造成的，不是我的异步内存回收线程造成的*/
 			if(file_area_in_free_kswapd(p_file_area)){
 				if(file_stat_in_test_base(p_file_stat_base))
@@ -1794,6 +1848,7 @@ find_file_area:
 					p_file_stat_base->refault_page_count ++;
 			}
 		}
+#endif		
 
 		set_file_area_page_bit(p_file_area,page_offset_in_file_area);
 		FILE_AREA_PRINT1("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx index:%ld page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,index,page_offset_in_file_area);
@@ -1861,7 +1916,7 @@ unlock:
 		goto error;
      
 	trace_mm_filemap_add_to_page_cache(folio);
-
+	    
 	rcu_read_unlock();
 	return 0;
 error:
@@ -2016,9 +2071,7 @@ int filemap_add_folio(struct address_space *mapping, struct folio *folio,
 		 * data from the working set, only to cache data that will
 		 * get overwritten with something else, is a waste of memory.
 		 */
-#ifndef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
 		WARN_ON_ONCE(folio_test_active(folio));
-#endif		
 		if (!(gfp & __GFP_WRITE) && shadow)
 			workingset_refault(folio, shadow);
 		folio_add_lru(folio);
@@ -3588,7 +3641,8 @@ retry:
 			panic("%s file_area:0x%llx pages[] error\n",__func__,(u64)p_file_area);
 		}
 #else		
-		XA_STATE(xas_del, &mapping->i_pages, (*p_file_area)->start_index >> PAGE_COUNT_IN_AREA_SHIFT);
+		//XA_STATE(xas_del, &mapping->i_pages, (*p_file_area)->start_index >> PAGE_COUNT_IN_AREA_SHIFT);
+		XA_STATE(xas_del, &mapping->i_pages, (*p_file_area)->start_index);
 #endif		
 		/*需要用文件xarray tree的lock加锁，因为xas_store()操作必须要xarray tree加锁*/
 		xas_lock_irq(&xas_del);
@@ -4912,7 +4966,12 @@ retry:
 		/*又有一个bug，必须要把当前父节点node的其实page索引赋值给xa_node_cache_base_index，而不是当前查找的起始page索引*/
 	    //p_file_stat->xa_node_cache_base_index = index & (~FILE_AREA_PAGE_COUNT_MASK);
         //p_file_stat->xa_node_cache_base_index = p_file_area->start_index & (~FILE_AREA_PAGE_COUNT_MASK);
+	#ifdef FILE_AREA_IN_FREE_KSWAPD_AND_SHADOW
         p_file_stat_base->xa_node_cache_base_index = p_file_area->start_index & (~FILE_AREA_PAGE_COUNT_MASK);
+	#else
+    #error "not spport !!!!!!!!!!!!!! ,must p_file_stat_base->xa_node_cache_base_index = p_file_area->start_index << PAGE_COUNT_IN_AREA_SHIFT & (~FILE_AREA_PAGE_COUNT_MASK);"
+	#endif
+
 	}
 #endif
 
