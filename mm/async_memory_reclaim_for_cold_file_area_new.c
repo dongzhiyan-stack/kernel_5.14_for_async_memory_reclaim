@@ -57,6 +57,11 @@
 
 
 
+#define AGE_DX_CHANGE_REFAULT_SLIGHT 0 
+#define AGE_DX_CHANGE_REFAULT_SERIOUS 1
+#define AGE_DX_CHANGE_REFAULT_CRITIAL 2
+#define AGE_DX_CHANGE_WRITEONLY 3
+
 
 /*当一个文件file_area个数超过FILE_AREA_MOVE_TO_HEAD_LEVEL，才允许一个周期内file_stat->temp链表上file_area移动到file_stat->temp链表头*/
 #define FILE_AREA_MOVE_TO_HEAD_LEVEL 32
@@ -105,8 +110,18 @@ unsigned int xarray_tree_node_cache_hit;
 int open_file_area_printk = 0;
 int open_file_area_printk_important = 0;
 
-static void change_memory_reclaim_age_dx(struct hot_cold_file_global *p_hot_cold_file_global);
+static void change_global_age_dx(struct hot_cold_file_global *p_hot_cold_file_global);
+static void change_global_age_dx_for_mmap_file(struct hot_cold_file_global *p_hot_cold_file_global);
 extern void deactivate_file_folio(struct folio *folio);
+
+struct age_dx_param{
+    unsigned int file_area_temp_to_cold_age_dx;
+    unsigned int file_area_hot_to_temp_age_dx;
+    unsigned int file_area_refault_to_temp_age_dx;
+	unsigned int file_area_reclaim_ahead_age_dx;
+	unsigned int file_area_reclaim_read_age_dx;
+
+};
 
 /*****file_area、file_stat、inode 的delete*********************************************************************************/
 static void i_file_area_callback(struct rcu_head *head)
@@ -1062,7 +1077,7 @@ static int inline is_mmap_file_stat_mapcount_file(struct hot_cold_file_global *p
 	return ret;
 }
 
-static int inline is_file_stat_file_type(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base* p_file_stat_base)
+static int inline is_file_stat_file_type_ori(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base* p_file_stat_base)
 {
 	if(p_file_stat_base->file_area_count < hot_cold_file_global_info.file_area_level_for_middle_file)
 		return TEMP_FILE;
@@ -1070,6 +1085,43 @@ static int inline is_file_stat_file_type(struct hot_cold_file_global *p_hot_cold
 		return MIDDLE_FILE;
 	else
 		return LARGE_FILE;
+}
+static int inline is_file_stat_file_type(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base* p_file_stat_base,unsigned int file_stat_list_type)
+{
+	/* 普通文件按照正常的流程走，只有write page的文件，异步内存回收时就应该多回收这种文件。这种文件称为writeonly文件，
+	 * 这种文件file_stat要尽可能快的转成large或middle文件，尽管file_area个数没有达到阈值。并且这种文件一旦转成
+	 * large或middle文件，尽管file_area个数减少了，也要减少更多的file_area才能转为temp_file*/
+	if(!file_stat_in_writeonly_base(p_file_stat_base)){
+		return is_file_stat_file_type_ori(p_hot_cold_file_global,p_file_stat_base);
+	}else{
+		switch (file_stat_list_type){
+			case F_file_stat_in_file_stat_temp_head_list:
+				/*temp文件更容易变为large文件*/
+				if(p_file_stat_base->file_area_count > (hot_cold_file_global_info.file_area_level_for_middle_file >> 2))
+					return LARGE_FILE;
+				else
+					return TEMP_FILE;
+				break;
+			case F_file_stat_in_file_stat_middle_file_head_list:
+				if(p_file_stat_base->file_area_count > hot_cold_file_global_info.file_area_level_for_large_file >> 2)
+					return LARGE_FILE;
+				else if(p_file_stat_base->file_area_count < hot_cold_file_global_info.file_area_level_for_middle_file >> 2)
+					return TEMP_FILE;
+				else
+					return MIDDLE_FILE;
+				break;
+			case F_file_stat_in_file_stat_large_file_head_list:
+				/*large文件只有file_area个数 很少很少才会降级middel或temp文件*/
+				if(p_file_stat_base->file_area_count < (hot_cold_file_global_info.file_area_level_for_middle_file >> 2))
+					return MIDDLE_FILE;
+				else
+					return LARGE_FILE;
+
+				break;
+			default:
+				panic("%s p_file_stat_base:0x%llx file_stat_list_type:%d error\n",__func__,(u64)p_file_stat_base,file_stat_list_type);
+		}
+	}
 }
 
 /**************************************************************************************/
@@ -1204,6 +1256,9 @@ bypass:
 
 	/*file_area的page是被读，则标记file_read读，内存回收时跳过这种file_area的page，优先回收write的*/
 	if(!file_area_page_is_read(p_file_area) && (FILE_AREA_PAGE_IS_READ == read_or_write)){
+		if(file_stat_in_writeonly_base(p_file_stat_base))
+			clear_file_stat_in_writeonly_base(p_file_stat_base);
+
 		set_file_area_page_read(p_file_area);
 	}
 
@@ -2663,7 +2718,7 @@ file_stat_access:
 					case FILE_STAT_NORMAL:
 						/*当mormal file_stat移动到zero链表后，就会清理掉file_stat的in_temp、middle、large等属性，
 						 *于是当这些file_stat再移动回global temp、middle、large链表时，要根据file_area个数决定移动到哪个链表*/
-						file_stat_type = is_file_stat_file_type(p_hot_cold_file_global,p_file_stat_base);
+						file_stat_type = is_file_stat_file_type_ori(p_hot_cold_file_global,p_file_stat_base);
 						//file_stat_type = get_file_stat_normal_type(p_file_stat_base);
 						if(TEMP_FILE == file_stat_type){
 							/*file_stat移动到global zero链表时，不再清理file_stat的in_temp状态，故这里不再清理*/
@@ -2925,7 +2980,7 @@ static noinline int file_stat_status_change_solve(struct hot_cold_file_global *p
 			spin_unlock(&p_hot_cold_file_global->mmap_file_global_lock);
 	}else{
 		/*根据file_stat的file_area个数判断文件是普通文件、中型文件、大文件*/
-		unsigned int file_type = is_file_stat_file_type(p_hot_cold_file_global,p_file_stat_base);
+		unsigned int file_type = is_file_stat_file_type(p_hot_cold_file_global,p_file_stat_base,file_stat_list_type);
 
 		file_stat_temp_middle_large_file_change(p_hot_cold_file_global,p_file_stat_base,file_stat_list_type,file_type,is_cache_file);
 	}
@@ -2943,12 +2998,13 @@ static void file_stat_other_list_file_area_solve_common(struct hot_cold_file_glo
 	//unsigned int file_area_in_list_type = -1;
 	struct file_stat *p_file_stat = NULL;
 	char file_stat_changed;
-	//unsigned int file_area_age;
+	unsigned int file_area_age_dx;
 
 	//mapcount的file_area降级到file_stat->warm链表，不看file_area_age
 	if(file_area_type != (1 << F_file_area_in_mapcount_list)){
 		//get_file_area_age()函数里，会把file_area转换成hot、mapcount file_area需要特别注意!!!!!!!!!!!!
 		get_file_area_age(p_file_stat_base,p_file_area,/*file_area_age,*/p_hot_cold_file_global,file_stat_changed,file_type);
+		file_area_age_dx = p_hot_cold_file_global->global_age - p_file_area->file_area_age;
 
 		if(file_stat_changed)
 			panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x file_stat_changed error\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
@@ -2972,19 +3028,21 @@ static void file_stat_other_list_file_area_solve_common(struct hot_cold_file_glo
 			//if(-1 == file_area_in_list_type)
 			//	file_area_in_list_type = F_file_area_in_hot_list;
 
-			if(file_stat_in_cache_file_base(p_file_stat_base))
+			/*现在针对mmap的age_dx，在内存回收最开头执行的change_global_age_dx_for_mmap_file()函数里调整了，这里不再重复*/
+			file_area_hot_to_temp_age_dx = p_hot_cold_file_global->file_area_hot_to_temp_age_dx;
+			/*if(file_stat_in_cache_file_base(p_file_stat_base))
                 file_area_hot_to_temp_age_dx = p_hot_cold_file_global->file_area_hot_to_temp_age_dx;
 			else
-				file_area_hot_to_temp_age_dx = p_hot_cold_file_global->file_area_hot_to_temp_age_dx + MMAP_FILE_HOT_TO_TEMP_AGE_DX;
+				file_area_hot_to_temp_age_dx = p_hot_cold_file_global->file_area_hot_to_temp_age_dx + MMAP_FILE_HOT_TO_TEMP_AGE_DX;*/
 
 			//file_stat->file_area_hot尾巴上长时间未被访问的file_area再降级移动回file_stat->file_area_temp链表头
 			//if(p_hot_cold_file_global->global_age - p_file_area->file_area_age > p_hot_cold_file_global->file_area_hot_to_temp_age_dx){
-			if(p_hot_cold_file_global->global_age - p_file_area->file_area_age > file_area_hot_to_temp_age_dx){
+			if(file_area_age_dx > file_area_hot_to_temp_age_dx){
 				/*有ahead标记的file_area，即便长时间没访问也不处理，而是仅仅清理file_area的ahead标记且跳过，等到下次遍历到该file_area再处理*/
 				if(file_area_in_ahead(p_file_area)){
 					clear_file_area_in_ahead(p_file_area);
 					/*内存不紧缺时，禁止回收有ahead标记的file_area的page*/
-					if(IS_MEMORY_ENOUGH(p_hot_cold_file_global))
+					if(IS_MEMORY_ENOUGH(p_hot_cold_file_global) || file_area_age_dx < p_hot_cold_file_global->file_area_reclaim_ahead_age_dx)
 						break;
 				}
 				//spin_lock(&p_file_stat->file_stat_lock); 
@@ -3057,19 +3115,21 @@ static void file_stat_other_list_file_area_solve_common(struct hot_cold_file_glo
 			//if(-1 == file_area_in_list_type)
 			//	file_area_in_list_type = F_file_area_in_refault_list;
 
-			if(file_stat_in_cache_file_base(p_file_stat_base))
+			/*现在针对mmap的age_dx，在内存回收最开头执行的change_global_age_dx_for_mmap_file()函数里调整了，这里不再重复*/
+			file_area_refault_to_temp_age_dx = p_hot_cold_file_global->file_area_refault_to_temp_age_dx;
+			/*if(file_stat_in_cache_file_base(p_file_stat_base))
 				file_area_refault_to_temp_age_dx = p_hot_cold_file_global->file_area_refault_to_temp_age_dx;
 			else
-				file_area_refault_to_temp_age_dx = p_hot_cold_file_global->file_area_refault_to_temp_age_dx + MMAP_FILE_REFAULT_TO_TEMP_AGE_DX;
+				file_area_refault_to_temp_age_dx = p_hot_cold_file_global->file_area_refault_to_temp_age_dx + MMAP_FILE_REFAULT_TO_TEMP_AGE_DX;*/
 
 			//file_stat->file_area_hot尾巴上长时间未被访问的file_area再降级移动回file_stat->file_area_temp链表头
 			//if(p_hot_cold_file_global->global_age - p_file_area->file_area_age >  p_hot_cold_file_global->file_area_refault_to_temp_age_dx){
-			if(p_hot_cold_file_global->global_age - p_file_area->file_area_age >  file_area_refault_to_temp_age_dx){
+			if(file_area_age_dx >  file_area_refault_to_temp_age_dx){
 				/*有ahead标记的file_area，即便长时间没访问也不处理，而是仅仅清理file_area的ahead标记且跳过，等到下次遍历到该file_area再处理*/
 				if(file_area_in_ahead(p_file_area)){
 					clear_file_area_in_ahead(p_file_area);
 					/*内存不紧缺时，禁止回收有ahead标记的file_area的page*/
-					if(IS_MEMORY_ENOUGH(p_hot_cold_file_global))
+					if(IS_MEMORY_ENOUGH(p_hot_cold_file_global) || file_area_age_dx < p_hot_cold_file_global->file_area_reclaim_ahead_age_dx)
 						break;
 				}
 
@@ -3142,13 +3202,16 @@ static void file_stat_other_list_file_area_solve_common(struct hot_cold_file_glo
 			if(!file_area_in_free_list(p_file_area) || file_area_in_temp_list(p_file_area) || file_area_in_warm_list(p_file_area) || file_area_in_mapcount_list(p_file_area))
 				panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x error in_free\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
 
-			if(file_stat_in_cache_file_base(p_file_stat_base)){
+			/*现在针对mmap的age_dx，在内存回收最开头执行的change_global_age_dx_for_mmap_file()函数里调整了，这里不再重复*/
+			file_area_free_age_dx = p_hot_cold_file_global->file_area_free_age_dx;
+			file_area_temp_to_cold_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
+			/*if(file_stat_in_cache_file_base(p_file_stat_base)){
                 file_area_free_age_dx = p_hot_cold_file_global->file_area_free_age_dx;
 				file_area_temp_to_cold_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
 			}else{
                 file_area_free_age_dx = p_hot_cold_file_global->file_area_free_age_dx + MMAP_FILE_COLD_TO_FREE_AGE_DX;
 				file_area_temp_to_cold_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx + MMAP_FILE_TEMP_TO_COLD_AGE_DX;
-			}
+			}*/
 			/*在遍历file_stat->temp和file_stat->warm链表上的file_area时，判断是是冷file_area而要参与内存回收，于是
 			 * clear_file_area_in_temp_list(p_file_area);//这里file_area被频繁访问了，清理的in_temp还没有生效，file_area在update函数又被设置了in_hot标记
 			 * set_file_area_in_free_list(p_file_area); //到这里，file_area将同时具备in_hot和in_free标记
@@ -3225,12 +3288,12 @@ static void file_stat_other_list_file_area_solve_common(struct hot_cold_file_glo
 
 			//else if(p_hot_cold_file_global->global_age - p_file_area->file_area_age > 
 			//		(p_hot_cold_file_global->file_area_free_age_dx + p_hot_cold_file_global->file_area_temp_to_cold_age_dx)){
-			else if(p_hot_cold_file_global->global_age - p_file_area->file_area_age > file_area_free_age_dx + file_area_temp_to_cold_age_dx){
+			else if(file_area_age_dx > file_area_free_age_dx + file_area_temp_to_cold_age_dx){
 				/*有ahead标记的file_area，即便长时间没访问也不处理，而是仅仅清理file_area的ahead标记且跳过，等到下次遍历到该file_area再处理*/
 				if(file_area_in_ahead(p_file_area)){
 					clear_file_area_in_ahead(p_file_area);
 					/*内存不紧缺时，禁止回收有ahead标记的file_area的page*/
-					if(IS_MEMORY_ENOUGH(p_hot_cold_file_global))
+					if(IS_MEMORY_ENOUGH(p_hot_cold_file_global) || file_area_age_dx < p_hot_cold_file_global->file_area_reclaim_ahead_age_dx)
 						break;
 				}
 				//file_area_free_count ++;
@@ -3607,15 +3670,17 @@ static inline int file_stat_temp_list_file_area_solve(struct hot_cold_file_globa
 	unsigned int file_area_type;
 	//unsigned int file_area_age;
 	unsigned int file_area_temp_to_warm_age_dx,file_area_temp_to_cold_age_dx;
-    char file_stat_changed;
+	char file_stat_changed;
 
-	if(file_stat_in_cache_file_base(p_file_stat_base)){
-        file_area_temp_to_warm_age_dx = p_hot_cold_file_global->file_area_temp_to_warm_age_dx;
-		file_area_temp_to_cold_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
-	}else{
-        file_area_temp_to_warm_age_dx = p_hot_cold_file_global->file_area_temp_to_warm_age_dx + MMAP_FILE_TEMP_TO_WARM_AGE_DX;
-		file_area_temp_to_cold_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx + MMAP_FILE_TEMP_TO_COLD_AGE_DX;
-	}
+	/*现在针对mmap的file_area_temp_to_cold_age_dx，在内存回收最开头执行的change_global_age_dx_for_mmap_file()函数里调整了，这里不再重复*/
+	file_area_temp_to_cold_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
+	/*if(file_stat_in_cache_file_base(p_file_stat_base)){
+	  file_area_temp_to_warm_age_dx = p_hot_cold_file_global->file_area_temp_to_warm_age_dx;
+	  file_area_temp_to_cold_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
+	  }else{
+	  file_area_temp_to_warm_age_dx = p_hot_cold_file_global->file_area_temp_to_warm_age_dx + MMAP_FILE_TEMP_TO_WARM_AGE_DX;
+	  file_area_temp_to_cold_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx + MMAP_FILE_TEMP_TO_COLD_AGE_DX;
+	  }*/
 	//从链表尾开始遍历，链表尾的成员更老，链表头的成员是最新添加的
 	list_for_each_entry_safe_reverse(p_file_area,p_file_area_temp,&p_file_stat_base->file_area_temp,file_area_list){
 
@@ -3806,7 +3871,7 @@ static inline int file_stat_temp_list_file_area_solve(struct hot_cold_file_globa
 					clear_file_area_in_ahead(p_file_area);
 					scan_ahead_file_area_count ++;
 					/*内存不紧缺时，禁止回收有ahead标记的file_area的page*/
-					if(IS_MEMORY_ENOUGH(p_hot_cold_file_global))
+					if(IS_MEMORY_ENOUGH(p_hot_cold_file_global) || file_area_age_dx < p_hot_cold_file_global->file_area_reclaim_ahead_age_dx)
 						continue;
 				}
 				/* 当前内存不紧张且内存回收不困难，则遇到read文件页的file_area先跳过，不回收。目的是尽可能回收write文件页，
@@ -3942,17 +4007,20 @@ static noinline unsigned int file_stat_warm_list_file_area_solve(struct hot_cold
 	unsigned int warm_to_hot_file_area_count = 0;
 	//unsigned int file_area_age;
 	char file_stat_changed;
-	unsigned int file_area_warm_to_temp_age_dx,file_area_temp_to_cold_age_dx;
+	unsigned int /*file_area_warm_to_temp_age_dx,*/file_area_temp_to_cold_age_dx;
 
 	p_file_stat_base = &p_file_stat->file_stat_base;
-	if(file_stat_in_cache_file_base(p_file_stat_base)){
+
+	/*现在针对mmap的file_area_temp_to_cold_age_dx，在内存回收最开头执行的change_global_age_dx_for_mmap_file()函数里调整了，这里不再重复*/
+	file_area_temp_to_cold_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
+	/*if(file_stat_in_cache_file_base(p_file_stat_base)){
 		file_area_warm_to_temp_age_dx = p_hot_cold_file_global->file_area_warm_to_temp_age_dx;
 		file_area_temp_to_cold_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
 	}
 	else{
 		file_area_warm_to_temp_age_dx = p_hot_cold_file_global->file_area_warm_to_temp_age_dx + MMAP_FILE_WARM_TO_TEMP_AGE_DX;
 		file_area_temp_to_cold_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx + MMAP_FILE_TEMP_TO_COLD_AGE_DX;
-	}
+	}*/
 
 	//从链表尾开始遍历，链表尾的成员更老，链表头的成员是最新添加的
 	list_for_each_entry_safe_reverse(p_file_area,p_file_area_temp,&p_file_stat->file_area_warm,file_area_list){
@@ -4030,7 +4098,7 @@ static noinline unsigned int file_stat_warm_list_file_area_solve(struct hot_cold
 				clear_file_area_in_ahead(p_file_area);
 				scan_ahead_file_area_count ++;
 				/*内存不紧缺时，禁止回收有ahead标记的file_area的page*/
-				if(IS_MEMORY_ENOUGH(p_hot_cold_file_global))
+				if(IS_MEMORY_ENOUGH(p_hot_cold_file_global) || file_area_age_dx < p_hot_cold_file_global->file_area_reclaim_ahead_age_dx)
 					continue;
 			}
 
@@ -4252,7 +4320,7 @@ static noinline int hot_file_stat_solve(struct hot_cold_file_global *p_hot_cold_
 				if(file_area_in_ahead(p_file_area)){
 					clear_file_area_in_ahead(p_file_area);
 					/*内存不紧缺时，禁止回收有ahead标记的file_area的page*/
-					if(IS_MEMORY_ENOUGH(p_hot_cold_file_global))
+					if(IS_MEMORY_ENOUGH(p_hot_cold_file_global) || file_area_age_dx < p_hot_cold_file_global->file_area_reclaim_ahead_age_dx)
 						continue;
 				}
 				file_area_hot_to_warm_list_count ++;
@@ -4303,7 +4371,7 @@ static noinline int hot_file_stat_solve(struct hot_cold_file_global *p_hot_cold_
 				 * 做个总结：凡是file_stat在global temp、hot、large、middle、zero链表之间相互移动，都必须要
 				 * global lock加锁，然后判断file_stat是否被iput()释放inode并标记delete!!!!!!!!!!!!!!!!!!!
 				 */
-				file_stat_type = is_file_stat_file_type(p_hot_cold_file_global,p_file_stat_base);
+				file_stat_type = is_file_stat_file_type_ori(p_hot_cold_file_global,p_file_stat_base);
 				if(TEMP_FILE == file_stat_type){
 					set_file_stat_in_file_stat_temp_head_list_base(p_file_stat_base);
 					if(is_cache_file)
@@ -4600,22 +4668,22 @@ static noinline unsigned int cache_file_stat_move_to_mmap_head(struct hot_cold_f
 		/*现在改为把file_stat_base结构体添加到global temp/hot/large/midlde/tiny small/small file链表，不再是file_stat或file_stat_small或file_stat_tiny_small结构体*/
 		if(FILE_STAT_TINY_SMALL == file_type){
 			if(file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base))
-				list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_tiny_small_file_head);
+				list_move_tail(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_tiny_small_file_head);
 			else if(file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base))
-				list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_tiny_small_file_one_area_head);
+				list_move_tail(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_tiny_small_file_one_area_head);
 			else
 				BUG();
 		}
 		else if(FILE_STAT_SMALL == file_type){
-			list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_small_file_head);
+			list_move_tail(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_small_file_head);
 		}
 		else if(FILE_STAT_NORMAL == file_type){
 			if(file_stat_in_file_stat_temp_head_list_base(p_file_stat_base))
-				list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_temp_head);
+				list_move_tail(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_temp_head);
 			else if(file_stat_in_file_stat_middle_file_head_list_base(p_file_stat_base))
-				list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_middle_file_head);
+				list_move_tail(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_middle_file_head);
 			else if(file_stat_in_file_stat_large_file_head_list_base(p_file_stat_base))
-				list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_large_file_head);
+				list_move_tail(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_large_file_head);
 			else
 				BUG();
 		}else
@@ -4626,6 +4694,9 @@ static noinline unsigned int cache_file_stat_move_to_mmap_head(struct hot_cold_f
 	spin_unlock(&p_hot_cold_file_global->mmap_file_global_lock);
 	spin_unlock(&p_hot_cold_file_global->global_lock);
 
+	/*之前该文件是cache文件，默认有writeonly标记，现在转成mmap文件必须去除writeonly标记，否则很容易触发该mmap文件页被异步进程内存回收*/
+	if(file_stat_in_writeonly_base(p_file_stat_base))
+		clear_file_stat_in_writeonly_base(p_file_stat_base);
 	return 0;
 }
 #endif
@@ -4980,6 +5051,10 @@ void can_tiny_small_file_change_to_small_normal_file(struct hot_cold_file_global
 {
 	struct file_stat_base *p_file_stat_base_tiny_small = &p_file_stat_tiny_small->file_stat_base;
 
+	/*file_area_alloc_and_init()中因该文件的file_area个数超过阈值而设置了in_tiny_small_to_tail标记，然后移动到链表尾，这里清理掉标记*/
+	if(file_stat_in_tiny_small_to_tail_base(p_file_stat_base_tiny_small))
+		clear_file_stat_in_tiny_small_to_tail_base(p_file_stat_base_tiny_small);
+
 	/*file_stat_tiny_small的file_area个数超过普通文件file_area个数的阀值，直接转换成普通文件file_stat*/
 	if(p_file_stat_base_tiny_small->file_area_count > NORMAL_TEMP_FILE_AREA_COUNT_LEVEL){
 		struct file_stat *p_file_stat;
@@ -5306,6 +5381,10 @@ static inline unsigned int one_file_area_file_stat_tiny_small_solve(struct hot_c
 	else if(file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base)){
 		if(p_file_stat_base->file_area_count > TINY_SMALL_ONE_AREA_TO_TINY_SMALL_LEVEL){
 
+			/*file_area_alloc_and_init()中因该文件的file_area个数超过阈值而设置了in_tiny_small_to_tail标记，然后移动到链表尾，这里清理掉标记*/
+			if(file_stat_in_tiny_small_to_tail_base(p_file_stat_base))
+				clear_file_stat_in_tiny_small_to_tail_base(p_file_stat_base);
+
 			spin_lock(p_global_lock);
 			if(!file_stat_in_delete_base(p_file_stat_base)){
 				clear_file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base);
@@ -5326,7 +5405,62 @@ static inline unsigned int one_file_area_file_stat_tiny_small_solve(struct hot_c
 
 	return ret;
 }
-static unsigned int check_scan_file_area_max(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,unsigned int file_stat_list_type,char is_cache_file)
+/*针对refault较多的文件，增大age_dx以减少内存回收。针对writeonly文件，减少age_dx，以增大内存回收。是否有必要，针对mmap文件再增大age_dx？不用了，在内存回收最开始的位置已经在change_global_age_dx_for_mmap_file函数增大过age_dx*/
+static inline void reclaim_file_area_age_dx_change(struct hot_cold_file_global *p_hot_cold_file_global,/*struct file_stat_base *p_file_stat_base,unsigned int file_stat_list_type,char is_cache_file,*/struct age_dx_param *p_age_dx_param,unsigned int age_dx_type)
+{
+	/*保存原始age_dx*/
+	p_age_dx_param->file_area_temp_to_cold_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx;
+	p_age_dx_param->file_area_hot_to_temp_age_dx = p_hot_cold_file_global->file_area_hot_to_temp_age_dx;
+	p_age_dx_param->file_area_refault_to_temp_age_dx = p_hot_cold_file_global->file_area_refault_to_temp_age_dx;
+	p_age_dx_param->file_area_reclaim_ahead_age_dx  = p_hot_cold_file_global->file_area_reclaim_ahead_age_dx;
+	p_age_dx_param->file_area_reclaim_read_age_dx = p_hot_cold_file_global->file_area_reclaim_read_age_dx;
+
+	switch (age_dx_type){
+		case AGE_DX_CHANGE_WRITEONLY:
+			p_hot_cold_file_global->file_area_temp_to_cold_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx >> 2;
+			p_hot_cold_file_global->file_area_hot_to_temp_age_dx = p_hot_cold_file_global->file_area_hot_to_temp_age_dx >> 2;
+			p_hot_cold_file_global->file_area_refault_to_temp_age_dx = p_hot_cold_file_global->file_area_refault_to_temp_age_dx >> 1;
+			p_hot_cold_file_global->file_area_reclaim_ahead_age_dx = p_hot_cold_file_global->file_area_reclaim_ahead_age_dx >> 2;
+			p_hot_cold_file_global->file_area_reclaim_read_age_dx = p_hot_cold_file_global->file_area_reclaim_read_age_dx >> 1;
+			break;
+		case AGE_DX_CHANGE_REFAULT_SLIGHT:
+			p_hot_cold_file_global->file_area_temp_to_cold_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx << 1;
+			p_hot_cold_file_global->file_area_hot_to_temp_age_dx = p_hot_cold_file_global->file_area_hot_to_temp_age_dx << 1;
+			p_hot_cold_file_global->file_area_refault_to_temp_age_dx = p_hot_cold_file_global->file_area_refault_to_temp_age_dx << 1;
+			p_hot_cold_file_global->file_area_reclaim_ahead_age_dx = p_hot_cold_file_global->file_area_reclaim_ahead_age_dx << 1;
+			p_hot_cold_file_global->file_area_reclaim_read_age_dx = p_hot_cold_file_global->file_area_reclaim_read_age_dx << 1;
+			break;
+		case AGE_DX_CHANGE_REFAULT_SERIOUS:
+			p_hot_cold_file_global->file_area_temp_to_cold_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx << 2;
+			p_hot_cold_file_global->file_area_hot_to_temp_age_dx = p_hot_cold_file_global->file_area_hot_to_temp_age_dx << 2;
+			p_hot_cold_file_global->file_area_refault_to_temp_age_dx = p_hot_cold_file_global->file_area_refault_to_temp_age_dx << 3;
+			p_hot_cold_file_global->file_area_reclaim_ahead_age_dx = p_hot_cold_file_global->file_area_reclaim_ahead_age_dx << 2;
+			p_hot_cold_file_global->file_area_reclaim_read_age_dx = p_hot_cold_file_global->file_area_reclaim_read_age_dx << 2;
+			break;
+		case AGE_DX_CHANGE_REFAULT_CRITIAL:
+			p_hot_cold_file_global->file_area_temp_to_cold_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx << 3;
+			p_hot_cold_file_global->file_area_hot_to_temp_age_dx = p_hot_cold_file_global->file_area_hot_to_temp_age_dx << 2;
+			p_hot_cold_file_global->file_area_refault_to_temp_age_dx = p_hot_cold_file_global->file_area_refault_to_temp_age_dx << 3;
+			p_hot_cold_file_global->file_area_reclaim_ahead_age_dx = p_hot_cold_file_global->file_area_reclaim_ahead_age_dx << 2;
+			p_hot_cold_file_global->file_area_reclaim_read_age_dx = p_hot_cold_file_global->file_area_reclaim_read_age_dx << 3;
+			break;
+		default:
+			panic("reclaim_file_area_age_dx_change age_dx_type:%d error\n",age_dx_type);
+	}
+}
+static inline void reclaim_file_area_age_dx_restore(struct hot_cold_file_global *p_hot_cold_file_global,/*struct file_stat_base *p_file_stat_base,unsigned int file_stat_list_type,char is_cache_file,*/struct age_dx_param *p_age_dx_param)
+{
+	if(0 == p_age_dx_param->file_area_temp_to_cold_age_dx)
+		panic("reclaim_file_area_age_dx_restore file_area_temp_to_cold_age_dx == 0 error\n");
+
+	p_hot_cold_file_global->file_area_temp_to_cold_age_dx = p_age_dx_param->file_area_temp_to_cold_age_dx;
+	p_hot_cold_file_global->file_area_hot_to_temp_age_dx = p_age_dx_param->file_area_hot_to_temp_age_dx;
+	p_hot_cold_file_global->file_area_refault_to_temp_age_dx = p_age_dx_param->file_area_refault_to_temp_age_dx;
+	p_hot_cold_file_global->file_area_reclaim_ahead_age_dx = p_age_dx_param->file_area_reclaim_ahead_age_dx;
+	p_hot_cold_file_global->file_area_reclaim_read_age_dx = p_age_dx_param->file_area_reclaim_read_age_dx;
+}
+
+static unsigned int check_file_area_refault_and_scan_max(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,unsigned int file_stat_list_type,char is_cache_file,unsigned int *age_dx_change_type)
 {
 	unsigned int  scan_file_area_max;
 	unsigned int  refault_file_area_scan_dx = p_hot_cold_file_global->refault_file_area_scan_dx;
@@ -5337,12 +5471,19 @@ static unsigned int check_scan_file_area_max(struct hot_cold_file_global *p_hot_
 			//struct file_stat_tiny_small *p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
 
 			scan_file_area_max = 32;
-			if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx + 64)
-				scan_file_area_max -= 30 ;
-			else if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx + 32)
+			if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx + 64){
+				scan_file_area_max -= 30;
+				*age_dx_change_type = AGE_DX_CHANGE_REFAULT_CRITIAL;
+			}
+			else if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx + 32){
 				scan_file_area_max -= 20;
-			else if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx)
+				*age_dx_change_type = AGE_DX_CHANGE_REFAULT_SERIOUS;
+
+			}
+			else if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx){
 				scan_file_area_max -= 10;
+				*age_dx_change_type = AGE_DX_CHANGE_REFAULT_SLIGHT;
+			}
 
 			break;
 
@@ -5350,13 +5491,19 @@ static unsigned int check_scan_file_area_max(struct hot_cold_file_global *p_hot_
 			//struct file_stat_small *p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
 
 			scan_file_area_max = 100;
-			if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx + 64)
+			if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx + 64){
 				scan_file_area_max -= 80;
-			else if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx + 32)
+				*age_dx_change_type = AGE_DX_CHANGE_REFAULT_CRITIAL;
+			}
+			else if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx + 32){
 				scan_file_area_max -= 50;
-			else if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx)
-				scan_file_area_max -= 30;
+				*age_dx_change_type = AGE_DX_CHANGE_REFAULT_SERIOUS;
+			}
+			else if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx){
 
+				*age_dx_change_type = AGE_DX_CHANGE_REFAULT_SLIGHT;
+				scan_file_area_max -= 30;
+            }
 			break;
 
 		case F_file_stat_in_file_stat_temp_head_list:
@@ -5366,13 +5513,18 @@ static unsigned int check_scan_file_area_max(struct hot_cold_file_global *p_hot_
 
 			/*refault_page_count越大说明内存回收发生refault概率更大，要减少扫描的file_area个数*/
 			scan_file_area_max = 200;
-			if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx + 64)
+			if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx + 64){
+				*age_dx_change_type = AGE_DX_CHANGE_REFAULT_CRITIAL;
 				scan_file_area_max -= 160;
-			else if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx + 32)
+			}
+			else if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx + 32){
+				*age_dx_change_type = AGE_DX_CHANGE_REFAULT_SERIOUS;
 				scan_file_area_max -= 100;
-			else if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx)
+			}
+			else if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx){
+				*age_dx_change_type = AGE_DX_CHANGE_REFAULT_SLIGHT;
 				scan_file_area_max -= 50;
-
+            }
 			/* reclaim_pages_last_period越大，说明文件file_stat上个周期内存回收的page数越多，增大扫描的file_area个数。
 			 * 这个功能先不加了，因为该文件虽然内存回收了很多page，但是很多都热fault了，本次就不能再加大扫描了*/
 			/*if(p_file_stat->reclaim_pages_last_period > 128)
@@ -5407,6 +5559,9 @@ static unsigned int get_file_area_from_file_stat_list_common(struct hot_cold_fil
 	LIST_HEAD(file_area_free_temp);
 
 	unsigned int scan_file_area_count  = 0;
+	int file_area_age_dx_changed = 0;
+	struct age_dx_param age_dx_param;
+	unsigned int age_dx_change_type = -1;
 	//unsigned int scan_move_to_mmap_head_file_stat_count  = 0;
 	//unsigned int scan_file_stat_count  = 0;
 	//unsigned int real_scan_file_stat_count  = 0;
@@ -5438,6 +5593,7 @@ static unsigned int get_file_area_from_file_stat_list_common(struct hot_cold_fil
 	/*if(scan_file_area_count > scan_file_area_max || scan_file_stat_count ++ > scan_file_stat_max)
 	  return scan_file_area_count;*/
 
+	memset(&age_dx_param,0,sizeof(struct age_dx_param));
 	/*file_stat和file_type不匹配则主动crash*/
 	is_file_stat_match_error(p_file_stat_base,file_type);
 
@@ -5595,8 +5751,22 @@ static unsigned int get_file_area_from_file_stat_list_common(struct hot_cold_fil
 	/*file_area_free_temp现在不是file_stat->file_area_free_temp全局，而是一个临时链表，故每次向该链表添加file_area前必须要初始化*/
 	INIT_LIST_HEAD(&file_area_free_temp);
 
+	/* 针对refault多的文件，减少scan_file_area_max个数。并且把refault程度记录到age_dx_change_type。后续还要根据文件的
+	 * recliam_pages、nr_pages进一步更改scan_file_area_max、age_dx_change_type*/
 	//scan_file_area_max = 64;
-	scan_file_area_max = check_scan_file_area_max(p_hot_cold_file_global,p_file_stat_base,file_stat_list_type,is_cache_file);
+	scan_file_area_max = check_file_area_refault_and_scan_max(p_hot_cold_file_global,p_file_stat_base,file_stat_list_type,is_cache_file,&age_dx_change_type);
+
+	/*在内存紧张时，如果检测到是writeonly文件，则在reclaim_file_area_age_dx_change()里调小age_dx，以加快回收该文件的文件页*/
+	if(!IS_MEMORY_ENOUGH(p_hot_cold_file_global) && file_stat_in_writeonly_base(p_file_stat_base))
+		age_dx_change_type = AGE_DX_CHANGE_WRITEONLY;
+
+
+	/* 针对refault较多的文件，增大age_dx以减少内存回收。针对writeonly文件，减少age_dx，以增大内存回收。
+	 * 是否有必要，针对mmap文件再增大age_dx？不用了，在内存回收最开始的位置已经执行change_global_age_dx_for_mmap_file函数增大过age_dx*/
+	if(-1 != age_dx_change_type){
+		reclaim_file_area_age_dx_change(p_hot_cold_file_global,&age_dx_param,age_dx_change_type);
+		file_area_age_dx_changed = 1;
+	}
 
 	/*file_stat->temp链表上的file_area的处理，冷file_area且要内存回收的移动到file_area_free_temp临时链表，下边回收该链表上的file_area的page*/
 	scan_file_area_count += file_stat_temp_list_file_area_solve(p_hot_cold_file_global,p_file_stat_base,scan_file_area_max,&file_area_free_temp,file_type);
@@ -5629,14 +5799,16 @@ static unsigned int get_file_area_from_file_stat_list_common(struct hot_cold_fil
 		free_page_from_file_area(p_hot_cold_file_global,p_file_stat_base,&file_area_free_temp,file_type);
 
 		if(FILE_STAT_SMALL ==  file_type){
-		    p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
+			p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
 			/*small文件file_stat->file_area_other链表上的file_area的处理*/
-		    scan_file_area_max = 32;
+			scan_file_area_max = 32;
 			scan_file_area_count += file_stat_small_other_list_file_area_solve(p_hot_cold_file_global,&p_file_stat_small->file_stat_base,&p_file_stat_small->file_area_other,scan_file_area_max,-1,FILE_STAT_SMALL);
 		}
 
-    }
+	}
 
+	if(file_area_age_dx_changed)
+		reclaim_file_area_age_dx_restore(p_hot_cold_file_global,&age_dx_param);
 	//}
 
 	//p_hot_cold_file_global->hot_cold_file_shrink_counter.scan_delete_file_stat_count += scan_delete_file_stat_count;
@@ -6166,7 +6338,7 @@ static noinline int walk_throuth_all_file_area(struct hot_cold_file_global *p_ho
 
 	memset(&memory_reclaim_param,0,sizeof(struct memory_reclaim_param));
 	/*根据当前的内存状态调整各个内存回收age差参数*/
-	change_memory_reclaim_age_dx(p_hot_cold_file_global);
+	change_global_age_dx(p_hot_cold_file_global);
 
 	memory_reclaim_param_slolve(p_hot_cold_file_global,&memory_reclaim_param,is_cache_file);
 
@@ -6195,6 +6367,10 @@ static noinline int walk_throuth_all_file_area(struct hot_cold_file_global *p_ho
 		scan_cold_file_area_count += get_file_area_from_file_stat_list(p_hot_cold_file_global,param->scan_tiny_small_file_area_max,param->scan_tiny_small_file_stat_max,
 				&p_hot_cold_file_global->file_stat_tiny_small_file_one_area_head,F_file_stat_in_file_stat_tiny_small_file_one_area_head_list,FILE_STAT_TINY_SMALL,is_cache_file);
 	}else{
+	    
+        /*在change_global_age_dx()基础上，针对mmap文件增大age_dx，以使mmap的文件页page更不容易回收*/
+		change_global_age_dx_for_mmap_file(p_hot_cold_file_global);
+
 		scan_cold_file_area_count += get_file_area_from_file_stat_list(p_hot_cold_file_global,param->scan_large_file_area_max,param->scan_large_file_stat_max, 
 				&p_hot_cold_file_global->mmap_file_stat_large_file_head,F_file_stat_in_file_stat_large_file_head_list,FILE_STAT_NORMAL,is_cache_file);
 
@@ -6488,10 +6664,22 @@ int async_memory_reclaim_main_thread(void *p){
 	}
 	return 0;
 }
-/*根据当前的内存状态调整各个内存回收参数*/
-static void change_memory_reclaim_age_dx(struct hot_cold_file_global *p_hot_cold_file_global)
+/*在change_global_age_dx()基础上，针对mmap文件增大age_dx，以使mmap的文件页page更不容易回收*/
+static void change_global_age_dx_for_mmap_file(struct hot_cold_file_global *p_hot_cold_file_global)
 {
+	p_hot_cold_file_global->file_area_temp_to_cold_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx << 1;
+	p_hot_cold_file_global->file_area_hot_to_temp_age_dx = p_hot_cold_file_global->file_area_hot_to_temp_age_dx << 1;
+	p_hot_cold_file_global->file_area_refault_to_temp_age_dx = p_hot_cold_file_global->file_area_refault_to_temp_age_dx << 1;
+	//p_hot_cold_file_global->file_area_temp_to_warm_age_dx = p_hot_cold_file_global->file_area_temp_to_warm_age_dx;
+	//p_hot_cold_file_global->file_area_warm_to_temp_age_dx = p_hot_cold_file_global->file_area_warm_to_temp_age_dx;
+	p_hot_cold_file_global->file_area_reclaim_read_age_dx = p_hot_cold_file_global->file_area_reclaim_read_age_dx << 1;
+	p_hot_cold_file_global->file_area_reclaim_ahead_age_dx = p_hot_cold_file_global->file_area_reclaim_ahead_age_dx << 1;
 
+	p_hot_cold_file_global->file_area_free_age_dx = p_hot_cold_file_global->file_area_free_age_dx << 1;
+}
+/*根据当前的内存状态调整各个内存回收参数*/
+static void change_global_age_dx(struct hot_cold_file_global *p_hot_cold_file_global)
+{
 	switch(p_hot_cold_file_global->memory_pressure_level){
 		/*内存非常紧缺*/
 		case MEMORY_EMERGENCY_RECLAIM:
@@ -6501,6 +6689,9 @@ static void change_memory_reclaim_age_dx(struct hot_cold_file_global *p_hot_cold
 			p_hot_cold_file_global->file_area_temp_to_warm_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx_ori << 1;
 			p_hot_cold_file_global->file_area_warm_to_temp_age_dx = p_hot_cold_file_global->file_area_warm_to_temp_age_dx_ori << 2;
 			p_hot_cold_file_global->file_area_reclaim_read_age_dx = p_hot_cold_file_global->file_area_reclaim_read_age_dx_ori >> 2;
+			p_hot_cold_file_global->file_area_reclaim_ahead_age_dx = p_hot_cold_file_global->file_area_reclaim_ahead_age_dx_ori >> 2;
+
+			p_hot_cold_file_global->file_area_free_age_dx = p_hot_cold_file_global->file_area_free_age_dx_ori >> 2;
 
 			break;
 			/*内存紧缺*/
@@ -6511,6 +6702,9 @@ static void change_memory_reclaim_age_dx(struct hot_cold_file_global *p_hot_cold
 			p_hot_cold_file_global->file_area_temp_to_warm_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx_ori << 1;
 			p_hot_cold_file_global->file_area_warm_to_temp_age_dx = p_hot_cold_file_global->file_area_warm_to_temp_age_dx_ori << 1;
 			p_hot_cold_file_global->file_area_reclaim_read_age_dx = p_hot_cold_file_global->file_area_reclaim_read_age_dx_ori >> 1;
+			p_hot_cold_file_global->file_area_reclaim_ahead_age_dx = p_hot_cold_file_global->file_area_reclaim_ahead_age_dx_ori >> 1;
+
+			p_hot_cold_file_global->file_area_free_age_dx = p_hot_cold_file_global->file_area_free_age_dx_ori >> 1;
 			break;
 			/*内存碎片有点多，或者前后两个周期分配的内存数太多*/		
 		case MEMORY_LITTLE_RECLAIM:
@@ -6522,6 +6716,9 @@ static void change_memory_reclaim_age_dx(struct hot_cold_file_global *p_hot_cold
 			p_hot_cold_file_global->file_area_temp_to_warm_age_dx = p_hot_cold_file_global->file_area_temp_to_cold_age_dx_ori;
 			p_hot_cold_file_global->file_area_warm_to_temp_age_dx = p_hot_cold_file_global->file_area_warm_to_temp_age_dx_ori;
 			p_hot_cold_file_global->file_area_reclaim_read_age_dx = p_hot_cold_file_global->file_area_reclaim_read_age_dx_ori;
+			p_hot_cold_file_global->file_area_reclaim_ahead_age_dx = p_hot_cold_file_global->file_area_reclaim_ahead_age_dx_ori;
+
+			p_hot_cold_file_global->file_area_free_age_dx = p_hot_cold_file_global->file_area_free_age_dx_ori;
 
 			break;
 	}

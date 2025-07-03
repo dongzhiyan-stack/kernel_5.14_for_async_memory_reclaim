@@ -690,8 +690,11 @@ struct hot_cold_file_global
 	/*正常情况不会回收read属性的file_area的page，但是如果该file_area确实很长很长很长时间没访问，也参与回收*/
 	unsigned int file_area_reclaim_read_age_dx;
 	unsigned int file_area_reclaim_read_age_dx_ori;
+	unsigned int file_area_reclaim_ahead_age_dx;
+	unsigned int file_area_reclaim_ahead_age_dx_ori;
 	//一个冷file_area，如果经过file_area_free_age_dx_fops个周期，仍然没有被访问，则释放掉file_area结构
 	unsigned int file_area_free_age_dx;
+	unsigned int file_area_free_age_dx_ori;
 	//当一个文件file_stat长时间不被访问，释放掉了所有的file_area，再过file_stat_delete_age_dx个周期，则释放掉file_stat结构
 	unsigned int file_stat_delete_age_dx;
 	/*一个周期内，运行一个文件file_stat->temp链表头向前链表头移动的file_area个数*/
@@ -788,6 +791,7 @@ struct hot_cold_file_global
 	
 	unsigned long tiny_small_file_stat_to_one_area_count;
 	unsigned long file_stat_tiny_small_one_area_move_tail_count;
+	unsigned long file_stat_tiny_small_move_tail_count;
 	
 	unsigned long kswapd_free_page_count;
 	unsigned long async_thread_free_page_count;
@@ -802,8 +806,8 @@ struct hot_cold_file_global
 
 /*******file_area状态**********************************************************/
 
-/* file_area_state是char类型，只有8个bit位可设置。现在修改了 bit31~bit16 这16个bit位分别用于
- * file_area_have_page、writeback、dirty、towrite 的bit位，剩下的只有16个bit还能使用
+/* file_area_state是char类型，只有8个bit位可设置。现在修改了 bit31~bit16 这16个bit位分别用于。file_area_have_page、
+ * writeback、dirty、towrite 的bit位，剩下的只有16个bit还能使用。现在bit15~bit12又用于shadow bit了，只剩下12个bit位可用了
  * !!!!!!!!!!!!!!!!!!!!!!!!!!!*/
 enum file_area_status{
 	F_file_area_in_temp_list,
@@ -918,17 +922,21 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	F_file_stat_in_from_cache_file,//mmap文件是从cache文件的global temp链表移动过来的
 
 	F_file_stat_in_test,
+	F_file_stat_in_blacklist,//设置文件黑名单，不扫描内存回收
+    F_file_stat_in_writeonly,//该文件只有write 的page，没有读page，这种文件即便file_area个数少也要移动到middel或large文件，内存回收优先回收这种文件。
+	/* tiny small文件如果file_area个数超过阈值，则在file_area_alloc_and_init()函数把file_stat_tiny_small移动到链表尾，
+	 * 并设置in_tiny_small_to_tail标记。后续file_area_alloc_and_init()中就不会再移动到file_stat_tiny_small移动到链表尾*/
+	F_file_stat_in_tiny_small_to_tail,
+
 	F_file_stat_invalid_start_index,
 	F_file_stat_in_delete_file,//标识该file_stat被移动到了global delete链表	
 	F_file_stat_in_delete,//仅仅表示该file_stat被触发delete了，并不能说明file_stat被移动到了global delete链表
-
 	//F_file_stat_in_drop_cache,
 	//F_file_stat_in_free_page,//正在遍历file_stat的file_area的page，尝试释放page
 	//F_file_stat_in_free_page_done,//正在遍历file_stat的file_area的page，完成了page的内存回收,
 	//F_file_stat_in_large_file,
 	//F_file_stat_in_from_small_file,//该文件是从small文件的global small_temp链表移动过来的
 	F_file_stat_in_replaced_file,//file_stat_tiny_small或file_stat_small转成更大的文件时，老的file_stat被标记replaced
-	F_file_stat_in_blacklist,//设置文件黑名单，不扫描内存回收
 	F_file_stat_max_index,
 	//F_file_stat_lock,
 	//F_file_stat_lock_not_block,//这个bit位置1，说明inode在删除的，但是获取file_stat锁失败
@@ -1079,6 +1087,8 @@ FILE_STATUS_BASE(from_cache_file)
 //FILE_STATUS_BASE(from_small_file)
 FILE_STATUS_BASE(replaced_file)
 FILE_STATUS_BASE(blacklist)
+FILE_STATUS_BASE(writeonly)
+FILE_STATUS_BASE(tiny_small_to_tail)
 
 
 /*设置/清除file_stat状态使用test_and_set_bit/clear_bit，是异步内存回收1.0版本的产物，现在不再需要。
@@ -2196,7 +2206,9 @@ static inline void file_stat_base_init(struct address_space *mapping,struct file
 	//设置文件是mmap文件状态，有些mmap文件可能还会被读写，要与cache文件互斥，要么是cache文件要么是mmap文件，不能两者都是
 	if(is_cache_file){
 		set_file_stat_in_cache_file_base(p_file_stat_base);
-		hot_cold_file_global_info.mmap_file_stat_tiny_small_count++;
+		hot_cold_file_global_info.file_stat_tiny_small_count++;
+		/*只有cache文件才设置writeonly标记*/
+		set_file_stat_in_writeonly_base(p_file_stat_base);
 	}
 	else{
 		set_file_stat_in_mmap_file_base(p_file_stat_base);
@@ -2451,7 +2463,12 @@ static inline struct file_area *file_area_alloc_and_init(unsigned int area_index
 	 * 如果file_area个数大于阀值，则把该file_stat_tiny_small_one_area移动到global file_stat_tiny_small链表，
 	 * 这样if判断条件就很少了，也不用判断file_stat_tiny_small_file_one_area是否处于链表头。移动链表后，
 	 * if(file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base))就不成立了*/
-	if(file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base) && p_file_stat_base->file_area_count > SMALL_FILE_AREA_COUNT_LEVEL){
+	if(file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base) && p_file_stat_base->file_area_count > SMALL_FILE_AREA_COUNT_LEVEL &&
+			!file_stat_in_tiny_small_to_tail_base(p_file_stat_base)){
+		
+		/*设置in_tiny_small_to_tail标记，保证上边的if只成立一次*/
+		set_file_stat_in_tiny_small_to_tail_base(p_file_stat_base);
+
 		if(file_stat_in_cache_file_base(p_file_stat_base)){
 			spin_lock(&hot_cold_file_global_info.global_lock);
 			/* 1：一切把file_stat移动到global temp、small、tiny_small链表的的操作，加锁后都要判断file_stat是否被iput释放了
@@ -2460,24 +2477,55 @@ static inline struct file_area *file_area_alloc_and_init(unsigned int area_index
 			 * 必须再判断一次file_stat状态!!!!!!!!!!!!!!!!!!!*
 			 * 3：还要再判断一次file_stat是否还是in_cache_file状态，因为异步内存回收线程可能把cache file转成mmap file了。
 			 *    mmap文件不判断转成cache文件，故mmap文件不做这个判断*/
-			if( !file_stat_in_delete_base(p_file_stat_base) && file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base) &&
+			if(!file_stat_in_delete_base(p_file_stat_base) && file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base) &&
 					file_stat_in_cache_file_base(p_file_stat_base)){
-				clear_file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base);
+				/*clear_file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base);
 				set_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
-				list_move_tail(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_tiny_small_file_head);
+				list_move_tail(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_tiny_small_file_head);*/
+				
+				/*最后决定还是不要跨链表移动了，只是移动到本链表的链表尾，怕出现并发问题*/
+				list_move_tail(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_tiny_small_file_one_area_head);
 			}
 			spin_unlock(&hot_cold_file_global_info.global_lock);
 		}
 		else{
 			spin_lock(&hot_cold_file_global_info.mmap_file_global_lock);
 			if(!file_stat_in_delete_base(p_file_stat_base) && file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base)){
-				clear_file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base);
+				/*clear_file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base);
 				set_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
-				list_move_tail(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_tiny_small_file_head);
+				list_move_tail(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_tiny_small_file_head);*/
+
+				list_move_tail(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_tiny_small_file_one_area_head);
 			}
 			spin_unlock(&hot_cold_file_global_info.mmap_file_global_lock);
 		}
 		hot_cold_file_global_info.file_stat_tiny_small_one_area_move_tail_count ++;
+	}
+
+	/* 1:该文件可能被并发iput()释放掉  2:异步内存回收线程正把该文件并发由cache文件转成mmap文件 3:异步内存回收线程正把该文件并发由tiny small转成small或normal文件
+	 * 还要考虑一点，如果异步内存回收线程，正在使用的file_stat正好是该p_file_stat_base，会有并发问题吗？想想不会的*/
+	if(file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base) && p_file_stat_base->file_area_count > NORMAL_TEMP_FILE_AREA_COUNT_LEVEL &&
+			!file_stat_in_tiny_small_to_tail_base(p_file_stat_base)){
+         
+		/*设置in_tiny_small_to_tail标记，保证上边的if只成立一次*/
+		set_file_stat_in_tiny_small_to_tail_base(p_file_stat_base);
+		if(file_stat_in_cache_file_base(p_file_stat_base)){
+			spin_lock(&hot_cold_file_global_info.global_lock);
+			if( !file_stat_in_delete_base(p_file_stat_base) && file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base) &&
+					file_stat_in_cache_file_base(p_file_stat_base)){
+				list_move_tail(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_tiny_small_file_head);
+			}
+			spin_unlock(&hot_cold_file_global_info.global_lock);
+		}
+		else{
+			spin_lock(&hot_cold_file_global_info.mmap_file_global_lock);
+			if(!file_stat_in_delete_base(p_file_stat_base) && file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base)){
+				list_move_tail(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_tiny_small_file_head);
+			}
+			spin_unlock(&hot_cold_file_global_info.mmap_file_global_lock);
+		}
+
+		hot_cold_file_global_info.file_stat_tiny_small_move_tail_count ++;
 	}
 
 out:
