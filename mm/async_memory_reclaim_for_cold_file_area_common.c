@@ -56,6 +56,75 @@
 #include "async_memory_reclaim_for_cold_file_area.h"
 
 /*****proc文件系统**********************************************************************************************************************/
+
+//file_area_reclaim_read_age_dx
+static int file_area_reclaim_read_age_dx_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "%d\n", hot_cold_file_global_info.file_area_reclaim_read_age_dx_ori);
+	return 0;
+}
+static int file_area_reclaim_read_age_dx_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, file_area_reclaim_read_age_dx_show, NULL);
+}
+static ssize_t file_area_reclaim_read_age_dx_write(struct file *file,
+				const char __user *buffer, size_t count, loff_t *ppos)
+{
+	int rc;
+	unsigned int val;
+	rc = kstrtouint_from_user(buffer, count, 10,&val);
+	if (rc)
+		return rc;
+
+	if(val < 1000)
+		hot_cold_file_global_info.file_area_reclaim_read_age_dx_ori = val;
+	else
+		return -EINVAL;
+
+	return count;
+}
+static const struct proc_ops file_area_reclaim_read_age_dx_fops = {
+	.proc_open		= file_area_reclaim_read_age_dx_open,
+	.proc_read		= seq_read,
+	.proc_lseek     = seq_lseek,
+	.proc_release	= single_release,
+	.proc_write		= file_area_reclaim_read_age_dx_write,
+};
+
+//writeonly_file_age_dx
+static int writeonly_file_age_dx_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "%d\n", hot_cold_file_global_info.writeonly_file_age_dx_ori);
+	return 0;
+}
+static int writeonly_file_age_dx_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, writeonly_file_age_dx_show, NULL);
+}
+static ssize_t writeonly_file_age_dx_write(struct file *file,
+				const char __user *buffer, size_t count, loff_t *ppos)
+{
+	int rc;
+	unsigned int val;
+	rc = kstrtouint_from_user(buffer, count, 10,&val);
+	if (rc)
+		return rc;
+
+	if(val < 1000)
+		hot_cold_file_global_info.writeonly_file_age_dx_ori = val;
+	else
+		return -EINVAL;
+
+	return count;
+}
+static const struct proc_ops writeonly_file_age_dx_fops = {
+	.proc_open		= writeonly_file_age_dx_open,
+	.proc_read		= seq_read,
+	.proc_lseek     = seq_lseek,
+	.proc_release	= single_release,
+	.proc_write		= writeonly_file_age_dx_write,
+};
+
 //reclaim_page_print_level
 static int reclaim_page_print_level_show(struct seq_file *m, void *v)
 {
@@ -1225,15 +1294,21 @@ noinline int hot_cold_file_print_all_file_stat(struct hot_cold_file_global *p_ho
 		return 0;
 	all_pages += file_stat_pages;
 
+	file_stat_pages = print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********cache file middle ",&p_hot_cold_file_global->file_stat_middle_file_head,&p_hot_cold_file_global->file_stat_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_middle_file_head_list,FILE_STAT_NORMAL,print_file_stat_info_or_update_refault);
+	if(file_stat_pages < 0)
+		return 0;
+	all_pages  += file_stat_pages;
+
 	file_stat_pages = print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********cache file large ",&p_hot_cold_file_global->file_stat_large_file_head,&p_hot_cold_file_global->file_stat_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_large_file_head_list,FILE_STAT_NORMAL,print_file_stat_info_or_update_refault);
 	if(file_stat_pages < 0)
 		return 0;
 	all_pages += file_stat_pages;
 
-	file_stat_pages = print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********cache file middle ",&p_hot_cold_file_global->file_stat_middle_file_head,&p_hot_cold_file_global->file_stat_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_middle_file_head_list,FILE_STAT_NORMAL,print_file_stat_info_or_update_refault);
+    file_stat_pages = print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********cache writeonly file ",&p_hot_cold_file_global->file_stat_writeonly_file_head,&p_hot_cold_file_global->file_stat_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_writeonly_file_head_list,FILE_STAT_NORMAL,print_file_stat_info_or_update_refault);
 	if(file_stat_pages < 0)
 		return 0;
-	all_pages  += file_stat_pages;
+	all_pages += file_stat_pages;
+
 
 	file_stat_pages = print_one_list_file_stat(p_hot_cold_file_global,m,is_proc_print,"*********mmap file tiny small one area ",&p_hot_cold_file_global->mmap_file_stat_tiny_small_file_one_area_head,&p_hot_cold_file_global->mmap_file_stat_tiny_small_delete_head,&file_stat_one_file_area_count,&file_stat_many_file_area_count,&file_stat_one_file_area_pages,F_file_stat_in_file_stat_tiny_small_file_one_area_head_list,FILE_STAT_TINY_SMALL,print_file_stat_info_or_update_refault);
 	if(file_stat_pages < 0)
@@ -1453,6 +1528,19 @@ int hot_cold_file_proc_init(struct hot_cold_file_global *p_hot_cold_file_global)
 		printk("refault_page_print_level fail\n");
 		return -1;
 	}
+
+	p = proc_create("writeonly_file_age_dx", S_IRUGO | S_IWUSR, hot_cold_file_proc_root,&writeonly_file_age_dx_fops);
+	if (!p){
+		printk("writeonly_file_age_dx fail\n");
+		return -1;
+	}
+
+	p = proc_create("file_area_reclaim_read_age_dx", S_IRUGO | S_IWUSR, hot_cold_file_proc_root,&file_area_reclaim_read_age_dx_fops);
+	if (!p){
+		printk("file_area_reclaim_read_age_dx fail\n");
+		return -1;
+	}
+
 	return 0;
 }
 int hot_cold_file_proc_exit(struct hot_cold_file_global *p_hot_cold_file_global)
@@ -1478,6 +1566,8 @@ int hot_cold_file_proc_exit(struct hot_cold_file_global *p_hot_cold_file_global)
 	remove_proc_entry("reclaim_page_print_level",p_hot_cold_file_global->hot_cold_file_proc_root);
 	remove_proc_entry("refault_page_print_level",p_hot_cold_file_global->hot_cold_file_proc_root);
 
+	remove_proc_entry("writeonly_file_age_dx",p_hot_cold_file_global->hot_cold_file_proc_root);
+	remove_proc_entry("file_area_reclaim_read_age_dx",p_hot_cold_file_global->hot_cold_file_proc_root);
 	remove_proc_entry("async_memory_reclaime",NULL);
 	return 0;
 }
@@ -1498,6 +1588,7 @@ static int __init hot_cold_file_init(void)
 	INIT_LIST_HEAD(&hot_cold_file_global_info.file_stat_temp_head);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.file_stat_large_file_head);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.file_stat_middle_file_head);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.file_stat_writeonly_file_head);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.cold_file_head);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.file_stat_delete_head);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.file_stat_small_delete_head);
@@ -1577,6 +1668,8 @@ static int __init hot_cold_file_init(void)
 
 
 	hot_cold_file_global_info.refault_file_area_scan_dx = 32;
+	hot_cold_file_global_info.writeonly_file_age_dx_ori = 3;
+	hot_cold_file_global_info.writeonly_file_age_dx = hot_cold_file_global_info.writeonly_file_age_dx_ori;
 
 	hot_cold_file_global_info.async_memory_reclaim = kthread_run(async_memory_reclaim_main_thread,&hot_cold_file_global_info, "async_memory_reclaim");
 	if (IS_ERR(hot_cold_file_global_info.async_memory_reclaim)) {

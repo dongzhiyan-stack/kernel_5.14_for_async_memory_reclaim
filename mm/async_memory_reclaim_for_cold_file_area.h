@@ -29,9 +29,10 @@
 /*file_area个数小于64是极小文件，在64~640是小文件。现在改为file_area个数小于32是极小文件，在32~640是小文件*/
 //#define SMALL_FILE_AREA_COUNT_LEVEL 64
 #define SMALL_FILE_AREA_COUNT_LEVEL 32
-/*file_area个数在大于640，且小于1920是普通文件*/
-#define NORMAL_TEMP_FILE_AREA_COUNT_LEVEL 640
-/*file_area个数在大于1920，且小于6400是普通文件*/
+/*file_area个数在大于640(现改为128，pagecache 2M)，且小于1920是temp文件*/
+//#define NORMAL_TEMP_FILE_AREA_COUNT_LEVEL 640
+#define NORMAL_TEMP_FILE_AREA_COUNT_LEVEL 128
+/*file_area个数在大于1920，且小于6400是middle文件*/
 #define NORMAL_MIDDLE_FILE_AREA_COUNT_LEVEL 1920
 /*file_area个数在大于6400是大型文件*/
 #define NORMAL_LARGE_FILE_AREA_COUNT_LEVEL  6400
@@ -606,6 +607,7 @@ struct hot_cold_file_global
 	/*如果文件file_stat上的page cache数太多，被判定为大文件，则把file_stat移动到这个链表。将来内存回收时，优先遍历这种file_stat，
 	 *因为file_area足够多，能遍历到更多的冷file_area，回收到内存page*/
 	struct list_head file_stat_large_file_head;
+	struct list_head file_stat_writeonly_file_head;
 	struct list_head cold_file_head;
 	//inode被删除的文件的file_stat移动到这个链表
 	struct list_head file_stat_delete_head;
@@ -801,6 +803,9 @@ struct hot_cold_file_global
 	unsigned int refault_file_area_scan_dx;
 	unsigned int reclaim_page_print_level;
 	unsigned int refault_page_print_level;
+	unsigned int writeonly_file_age_dx_ori;
+	unsigned int writeonly_file_age_dx;
+	unsigned int in_writeonly_list_file_count;
 };
 
 
@@ -914,20 +919,21 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	F_file_stat_in_file_stat_temp_head_list,//3
 	F_file_stat_in_file_stat_middle_file_head_list,
 	F_file_stat_in_file_stat_large_file_head_list,
+    F_file_stat_in_file_stat_writeonly_file_head_list,//该文件只有write 的page，没有读page。如果是normal文件则移动到writeonly_normal链表，加快遍历到
+	
 	F_file_stat_in_mapcount_file_area_list,//文件file_stat是mapcount文件
-
 	F_file_stat_in_zero_file_area_list,//7
 	F_file_stat_in_cache_file,//cache文件，sysctl读写产生pagecache。有些cache文件可能还会被mmap映射，要与mmap文件互斥
 	F_file_stat_in_mmap_file,//mmap文件，有些mmap文件可能也会被sysctl读写产生pagecache，要与cache文件互斥
-	F_file_stat_in_from_cache_file,//mmap文件是从cache文件的global temp链表移动过来的
 
+	F_file_stat_in_from_cache_file,//mmap文件是从cache文件的global temp链表移动过来的
 	F_file_stat_in_test,
 	F_file_stat_in_blacklist,//设置文件黑名单，不扫描内存回收
-    F_file_stat_in_writeonly,//该文件只有write 的page，没有读page，这种文件即便file_area个数少也要移动到middel或large文件，内存回收优先回收这种文件。
 	/* tiny small文件如果file_area个数超过阈值，则在file_area_alloc_and_init()函数把file_stat_tiny_small移动到链表尾，
 	 * 并设置in_tiny_small_to_tail标记。后续file_area_alloc_and_init()中就不会再移动到file_stat_tiny_small移动到链表尾*/
 	F_file_stat_in_tiny_small_to_tail,
 
+    F_file_stat_in_writeonly,//该文件只有write 的page，没有读page，这种文件即便file_area个数少也要移动到middel或large文件，内存回收优先回收这种文件。
 	F_file_stat_invalid_start_index,
 	F_file_stat_in_delete_file,//标识该file_stat被移动到了global delete链表	
 	F_file_stat_in_delete,//仅仅表示该file_stat被触发delete了，并不能说明file_stat被移动到了global delete链表
@@ -1016,6 +1022,7 @@ FILE_STAT_STATUS_BASE(file_stat_small_file_head)
 FILE_STAT_STATUS_BASE(file_stat_tiny_small_file_head)
 FILE_STAT_STATUS_BASE(file_stat_tiny_small_file_one_area_head)
 FILE_STAT_STATUS_BASE(zero_file_area)
+FILE_STAT_STATUS_BASE(file_stat_writeonly_file_head)
 FILE_STAT_STATUS_BASE(mapcount_file_area)
 
 
@@ -1723,6 +1730,7 @@ static inline long get_file_stat_type(struct file_stat_base *file_stat_base)
 		case 1 << F_file_stat_in_file_stat_middle_file_head_list:
 		case 1 << F_file_stat_in_file_stat_large_file_head_list:
 		case 1 << F_file_stat_in_mapcount_file_area_list:
+		case 1 << F_file_stat_in_file_stat_writeonly_file_head_list:
 			return FILE_STAT_NORMAL;
 
 		default:
@@ -2276,7 +2284,7 @@ static inline struct file_stat_base *file_stat_alloc_and_init_tiny_small(struct 
 out:
 	return p_file_stat_base;
 }
-static inline struct file_stat_base *file_stat_alloc_and_init_other(struct address_space *mapping,unsigned int file_type,char free_old_file_stat,char is_cache_file)
+static inline struct file_stat_base *file_stat_alloc_and_init_other(struct address_space *mapping,unsigned int file_type,char free_old_file_stat,char is_cache_file,char is_writeonly_file)
 {
 	struct file_stat_base *p_file_stat_base = NULL;
 	spinlock_t *p_global_lock;
@@ -2332,7 +2340,11 @@ static inline struct file_stat_base *file_stat_alloc_and_init_other(struct addre
 
 		if(is_cache_file){
 			hot_cold_file_global_info.file_stat_small_count++;
-			list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_small_file_head);
+			/*writeonly文件要移动到链表尾，这样写个周期就可以被异步内存回收线程遍历到*/
+			if(0 == is_writeonly_file)
+				list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_small_file_head);
+			else
+				list_add_tail(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_small_file_head);
 		}
 		else{
 			hot_cold_file_global_info.mmap_file_stat_count++;
@@ -2393,7 +2405,11 @@ static inline struct file_stat_base *file_stat_alloc_and_init_other(struct addre
 		//spin_lock_init(&p_file_stat_base->file_stat_lock);
 		if(is_cache_file){
 			hot_cold_file_global_info.file_stat_count++;
-			list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_temp_head);
+			/*writeonly文件要移动到链表尾，这样写个周期就可以被异步内存回收线程遍历到*/
+			if(0 == is_writeonly_file)
+				list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_temp_head);
+			else
+				list_add_tail(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_temp_head);
 		}
 		else{
 			hot_cold_file_global_info.mmap_file_stat_count++;
