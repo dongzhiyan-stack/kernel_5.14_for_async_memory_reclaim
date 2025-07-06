@@ -5716,24 +5716,47 @@ static inline void reclaim_file_area_age_dx_restore(struct hot_cold_file_global 
 	p_hot_cold_file_global->file_area_reclaim_ahead_age_dx = p_age_dx_param->file_area_reclaim_ahead_age_dx;
 	p_hot_cold_file_global->file_area_reclaim_read_age_dx = p_age_dx_param->file_area_reclaim_read_age_dx;
 }
-
-static unsigned int check_file_area_refault_and_scan_max(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,unsigned int file_stat_list_type,char is_cache_file,unsigned int *age_dx_change_type)
+static int scan_file_area_max_base(unsigned int file_type,char is_cache_file,unsigned int memory_pressure_level)
 {
-	unsigned int  scan_file_area_max;
+	int scan_file_area_max = 0;
+
+	switch(file_type){
+		case FILE_STAT_TINY_SMALL:
+			scan_file_area_max =  16 + ((1 << memory_pressure_level) << FILE_STAT_TINY_SMALL);
+			break;
+		case FILE_STAT_SMALL:
+			scan_file_area_max = 64 + ((1 << memory_pressure_level) << FILE_STAT_SMALL);
+			break;
+		case  FILE_STAT_NORMAL:
+			scan_file_area_max = 256 + ((1 << memory_pressure_level) << FILE_STAT_NORMAL);
+			break;
+		default:
+			BUG();
+	}
+
+	/*mmap减去一半*/
+	if(!is_cache_file)
+		scan_file_area_max -= (scan_file_area_max >> 1);
+
+	return scan_file_area_max;
+}
+static int check_file_area_refault_and_scan_max(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,unsigned int file_stat_list_type,unsigned int file_type,char is_cache_file,unsigned int *age_dx_change_type)
+{
 	unsigned int  refault_file_area_scan_dx = p_hot_cold_file_global->refault_file_area_scan_dx;
+	unsigned scan_file_area_max = scan_file_area_max_base(file_type,is_cache_file,p_hot_cold_file_global->memory_pressure_level);
 
 	switch (file_stat_list_type){
 		case F_file_stat_in_file_stat_tiny_small_file_one_area_head_list:
 		case F_file_stat_in_file_stat_tiny_small_file_head_list:
 			//struct file_stat_tiny_small *p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
 
-			scan_file_area_max = 32;
+			//scan_file_area_max = 32;
 			if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx + 64){
-				scan_file_area_max -= 30;
+				scan_file_area_max = 5;
 				*age_dx_change_type = AGE_DX_CHANGE_REFAULT_CRITIAL;
 			}
 			else if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx + 32){
-				scan_file_area_max -= 20;
+				scan_file_area_max = 5;
 				*age_dx_change_type = AGE_DX_CHANGE_REFAULT_SERIOUS;
 
 			}
@@ -5747,30 +5770,30 @@ static unsigned int check_file_area_refault_and_scan_max(struct hot_cold_file_gl
 		case F_file_stat_in_file_stat_small_file_head_list:
 			//struct file_stat_small *p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
 
-			scan_file_area_max = 100;
+			//scan_file_area_max = 100;
 			if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx + 64){
-				scan_file_area_max -= 80;
+				scan_file_area_max = 6;
 				*age_dx_change_type = AGE_DX_CHANGE_REFAULT_CRITIAL;
 			}
 			else if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx + 32){
-				scan_file_area_max -= 50;
+				scan_file_area_max = 6;
 				*age_dx_change_type = AGE_DX_CHANGE_REFAULT_SERIOUS;
 			}
 			else if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx){
 
 				*age_dx_change_type = AGE_DX_CHANGE_REFAULT_SLIGHT;
 				scan_file_area_max -= 30;
-            }
+			}
 			break;
 
-		case F_file_stat_in_file_stat_temp_head_list:
-			scan_file_area_max = 200;
-			fallthrough;
-		case F_file_stat_in_file_stat_middle_file_head_list:
+		case F_file_stat_in_file_stat_large_file_head_list:
 			scan_file_area_max += 200;
 			fallthrough;
-		case F_file_stat_in_file_stat_large_file_head_list:
-			scan_file_area_max += 300;
+		case F_file_stat_in_file_stat_middle_file_head_list:
+			scan_file_area_max += 100;
+			fallthrough;
+		case F_file_stat_in_file_stat_temp_head_list:
+			scan_file_area_max += 50;
 			fallthrough;
 		case F_file_stat_in_file_stat_writeonly_file_head_list:
 			//struct file_stat *p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
@@ -5778,7 +5801,7 @@ static unsigned int check_file_area_refault_and_scan_max(struct hot_cold_file_gl
 			/*refault_page_count越大说明内存回收发生refault概率更大，要减少扫描的file_area个数*/
 			if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx + 64){
 				*age_dx_change_type = AGE_DX_CHANGE_REFAULT_CRITIAL;
-				scan_file_area_max =  10;
+				scan_file_area_max  = 10;
 			}
 			else if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx + 32){
 				*age_dx_change_type = AGE_DX_CHANGE_REFAULT_SERIOUS;
@@ -5786,16 +5809,16 @@ static unsigned int check_file_area_refault_and_scan_max(struct hot_cold_file_gl
 			}
 			else if(p_file_stat_base->refault_page_count > refault_file_area_scan_dx){
 				*age_dx_change_type = AGE_DX_CHANGE_REFAULT_SLIGHT;
-				scan_file_area_max = 80;
-            }
+				scan_file_area_max -= 80;
+			}
 			/* reclaim_pages_last_period越大，说明文件file_stat上个周期内存回收的page数越多，增大扫描的file_area个数。
 			 * 这个功能先不加了，因为该文件虽然内存回收了很多page，但是很多都热fault了，本次就不能再加大扫描了*/
 			/*if(p_file_stat->reclaim_pages_last_period > 128)
-				scan_file_area_max += 128;
-			else if(p_file_stat->reclaim_pages_last_period > 64)
-				scan_file_area_max += 64;
-			else if(p_file_stat->reclaim_pages_last_period > 32)
-				scan_file_area_max += 16;*/
+			  scan_file_area_max += 128;
+			  else if(p_file_stat->reclaim_pages_last_period > 64)
+			  scan_file_area_max += 64;
+			  else if(p_file_stat->reclaim_pages_last_period > 32)
+			  scan_file_area_max += 16;*/
 
 			break;
 
@@ -5809,6 +5832,11 @@ static unsigned int check_file_area_refault_and_scan_max(struct hot_cold_file_gl
 	 * 扫描该文件的file_area*/
 	if(p_file_stat_base->refault_page_count && p_hot_cold_file_global->global_age - p_file_stat_base->recent_access_age > FILE_STAT_REFAULT_PAGE_COUNT_CLEAR_AGE_DX)
 		p_file_stat_base->refault_page_count = 0;
+
+	if(scan_file_area_max < 0){
+		printk("%s p_file_stat:0x%llx file_stat_list_type:%d scan_file_area_max:%d ====== zero!!!!!!!\n",__func__,(u64)p_file_stat_base,file_stat_list_type,scan_file_area_max);
+		scan_file_area_max = 0;
+	}
 
 	return scan_file_area_max;
 }
@@ -6026,7 +6054,7 @@ static unsigned int get_file_area_from_file_stat_list_common(struct hot_cold_fil
 	/* 针对refault多的文件，减少scan_file_area_max个数。并且把refault程度记录到age_dx_change_type。后续还要根据文件的
 	 * recliam_pages、nr_pages进一步更改scan_file_area_max、age_dx_change_type*/
 	//scan_file_area_max = 64;
-	scan_file_area_max = check_file_area_refault_and_scan_max(p_hot_cold_file_global,p_file_stat_base,file_stat_list_type,is_cache_file,&age_dx_change_type);
+	scan_file_area_max = check_file_area_refault_and_scan_max(p_hot_cold_file_global,p_file_stat_base,file_stat_list_type,file_type,is_cache_file,&age_dx_change_type);
 
 	/* 在内存紧张时，如果检测到是writeonly文件，则在reclaim_file_area_age_dx_change()里调小age_dx，以加快回收该文件的文件页。
 	 * 注意，在writeonly_list链表上的文件，可能因为读被清理了writeonly标记*/
@@ -6960,17 +6988,31 @@ int hot_cold_file_thread(void *p){
 }
 int async_memory_reclaim_main_thread(void *p){
 	struct hot_cold_file_global *p_hot_cold_file_global = (struct hot_cold_file_global *)p;
+    int memory_pressure_emergecy = 0;
 
 	while(!kthread_should_stop()){
 		/*清空上一轮内存回收统计参数*/
 		//memset(&p_hot_cold_file_global->hot_cold_file_shrink_counter,0,sizeof(struct hot_cold_file_shrink_counter));
 		//memset(&p_hot_cold_file_global->mmap_file_shrink_counter,0,sizeof(struct mmap_file_shrink_counter));
 
+repeat_reclaim:
+		memory_pressure_emergecy = IS_IN_MEMORY_EMERGENCY_RECLAIM(p_hot_cold_file_global); 
 		/*回收cache文件页*/
 		walk_throuth_all_file_area(p_hot_cold_file_global,1);
 		/*回收mmap文件页*/
 		//walk_throuth_all_mmap_file_area(p_hot_cold_file_global);
 		walk_throuth_all_file_area(p_hot_cold_file_global,0);
+
+		msleep(1000);
+		/*内存回收前内存紧张，内存回收后内存依然紧张，不休眠，直接进行下次内存回收*/
+		if(memory_pressure_emergecy && (MEMORY_EMERGENCY_RECLAIM == check_memory_reclaim_necessary(p_hot_cold_file_global))){
+			printk("memory still tiny,repeat_reclaim!!!!!!!!\n");
+			/*只重复一次*/
+			memory_pressure_emergecy = 0;
+			/*内存回收前，必须对p_hot_cold_file_global->memory_pressure_level赋值*/
+			p_hot_cold_file_global->memory_pressure_level = MEMORY_EMERGENCY_RECLAIM;
+			goto repeat_reclaim;
+		}
 
 		set_current_state(TASK_INTERRUPTIBLE);
 		schedule();
