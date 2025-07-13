@@ -765,6 +765,7 @@ struct hot_cold_file_global
 
 	unsigned int normal_zone_free_pages_last;
 	unsigned int dma32_zone_free_pages_last;
+	unsigned int dma_zone_free_pages_last;
 	unsigned int highmem_zone_free_pages_last;
 	unsigned int normal1_zone_free_pages_last;
 	/*内存紧张等级，越大表示内存越紧张，并且还会回收有read标记和ahead标记的file_area的page*/
@@ -843,17 +844,17 @@ enum file_area_status{
 //清理file_area的状态，在哪个链表
 #define CLEAR_FILE_AREA_LIST_STATUS(list_name) \
 	static inline void clear_file_area_in_##list_name(struct file_area *p_file_area)\
-{clear_bit_unlock(F_file_area_in_##list_name,(unsigned long *)&p_file_area->file_area_state);}
+{clear_bit_unlock(F_file_area_in_##list_name,(unsigned long *)(&p_file_area->file_area_state));}
 //{ p_file_area->file_area_state &= ~(1 << F_file_area_in_##list_name);}
 //设置file_area在哪个链表的状态
 #define SET_FILE_AREA_LIST_STATUS(list_name) \
 	static inline void set_file_area_in_##list_name(struct file_area *p_file_area)\
-{set_bit(F_file_area_in_##list_name,(unsigned long *)&p_file_area->file_area_state);}
+{set_bit(F_file_area_in_##list_name,(unsigned long *)(&p_file_area->file_area_state));}
 //{ p_file_area->file_area_state |= (1 << F_file_area_in_##list_name);}
 //测试file_area在哪个链表
 #define TEST_FILE_AREA_LIST_STATUS(list_name) \
 	static inline int file_area_in_##list_name(struct file_area *p_file_area)\
-{return test_bit(F_file_area_in_##list_name,(unsigned long *)&p_file_area->file_area_state);}
+{return test_bit(F_file_area_in_##list_name,(unsigned long *)(&p_file_area->file_area_state));}
 //{return p_file_area->file_area_state & (1 << F_file_area_in_##list_name);}
 
 /*这个测试file_area_state的error状态，无法使用set_bit/clear_bit形式，需要特别注意!!!!!!!!!*/
@@ -877,17 +878,17 @@ FILE_AREA_LIST_STATUS(mapcount_list)
 	//清理file_area的状态，在哪个链表
 #define CLEAR_FILE_AREA_STATUS(status) \
 		static inline void clear_file_area_in_##status(struct file_area *p_file_area)\
-{clear_bit_unlock(F_file_area_in_##status,(unsigned long *)&p_file_area->file_area_state);}
+{clear_bit_unlock(F_file_area_in_##status,(unsigned long *)(&p_file_area->file_area_state));}
 //{ p_file_area->file_area_state &= ~(1 << F_file_area_in_##status);}
 	//设置file_area在哪个链表的状态
 #define SET_FILE_AREA_STATUS(status) \
 		static inline void set_file_area_in_##status(struct file_area *p_file_area)\
-{set_bit(F_file_area_in_##status,(unsigned long *)&p_file_area->file_area_state);}
+{set_bit(F_file_area_in_##status,(unsigned long *)(&p_file_area->file_area_state));}
 //{ p_file_area->file_area_state |= (1 << F_file_area_in_##status);}
 	//测试file_area在哪个链表
 #define TEST_FILE_AREA_STATUS(status) \
 		static inline int file_area_in_##status(struct file_area *p_file_area)\
-{return test_bit(F_file_area_in_##status,(unsigned long *)&p_file_area->file_area_state);}
+{return test_bit(F_file_area_in_##status,(unsigned long *)(&p_file_area->file_area_state));}
 //{return p_file_area->file_area_state & (1 << F_file_area_in_##status);}
 
 #define FILE_AREA_STATUS(status)     \
@@ -916,13 +917,14 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	F_file_stat_in_file_stat_tiny_small_file_head_list,
 	F_file_stat_in_file_stat_small_file_head_list,
 
-	F_file_stat_in_file_stat_temp_head_list,//3
+	F_file_stat_in_file_stat_temp_head_list,//
 	F_file_stat_in_file_stat_middle_file_head_list,
 	F_file_stat_in_file_stat_large_file_head_list,
     F_file_stat_in_file_stat_writeonly_file_head_list,//该文件只有write 的page，没有读page。如果是normal文件则移动到writeonly_normal链表，加快遍历到
 	
 	F_file_stat_in_mapcount_file_area_list,//文件file_stat是mapcount文件
-	F_file_stat_in_zero_file_area_list,//7
+	F_file_stat_in_zero_file_area_list,//
+	F_file_stat_in_file_area_list_end = F_file_stat_in_zero_file_area_list,
 	F_file_stat_in_cache_file,//cache文件，sysctl读写产生pagecache。有些cache文件可能还会被mmap映射，要与mmap文件互斥
 	F_file_stat_in_mmap_file,//mmap文件，有些mmap文件可能也会被sysctl读写产生pagecache，要与cache文件互斥
 
@@ -955,7 +957,7 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 
 #define FILE_STAT_STATUS_INVALID_MASK (((1 << F_file_stat_max_index) - 1) & (~((1 << (F_file_stat_invalid_start_index + 1)) - 1)))
 /*检测file_stat是否有异常状态，有的话就不能执行list_move_enhance()把本次遍历过的file_stat移动到链表头*/
-#define file_stat_status_invalid_check(file_stat_status) (file_stat_status & FILE_STAT_STATUS_INVALID_MASK)
+#define file_stat_status_invalid_check(file_stat_status) (READ_ONCE(file_stat_status) & FILE_STAT_STATUS_INVALID_MASK)
 
 #if 0
 //清理file_stat的状态，在哪个链表
@@ -991,17 +993,17 @@ FILE_STAT_STATUS(mapcount_file_area)
 	//清理file_stat的状态，在哪个链表
 #define CLEAR_FILE_STAT_STATUS_BASE(name)\
 		static inline void clear_file_stat_in_##name##_list_base(struct file_stat_base *p_file_stat_base)\
-{clear_bit_unlock(F_file_stat_in_##name##_list,(unsigned long *)&p_file_stat_base->file_stat_status);}
+{clear_bit_unlock(F_file_stat_in_##name##_list,(unsigned long *)(&p_file_stat_base->file_stat_status));}
 //{p_file_stat_base->file_stat_status &= ~(1 << F_file_stat_in_##name##_list);}
 	//设置file_stat在哪个链表的状态
 #define SET_FILE_STAT_STATUS_BASE(name)\
 		static inline void set_file_stat_in_##name##_list_base(struct file_stat_base *p_file_stat_base)\
-{set_bit(F_file_stat_in_##name##_list,(unsigned long *)&p_file_stat_base->file_stat_status);}
+{set_bit(F_file_stat_in_##name##_list,(unsigned long *)(&p_file_stat_base->file_stat_status));}
 //{p_file_stat_base->file_stat_status |= (1 << F_file_stat_in_##name##_list);}
 	//测试file_stat在哪个链表
 #define TEST_FILE_STAT_STATUS_BASE(name)\
 		static inline int file_stat_in_##name##_list_base(struct file_stat_base *p_file_stat_base)\
-{return test_bit(F_file_stat_in_##name##_list,(unsigned long *)&p_file_stat_base->file_stat_status);}
+{return test_bit(F_file_stat_in_##name##_list,(unsigned long *)(&p_file_stat_base->file_stat_status));}
 //{return (p_file_stat_base->file_stat_status & (1 << F_file_stat_in_##name##_list));}
 #define TEST_FILE_STAT_STATUS_ERROR_BASE(name)\
 		static inline int file_stat_in_##name##_list##_error_base(struct file_stat_base *p_file_stat_base)\
@@ -1062,17 +1064,17 @@ FILE_STATUS(replaced_file)
 	//清理文件的状态，大小文件等
 #define CLEAR_FILE_STATUS_BASE(name)\
 		static inline void clear_file_stat_in_##name##_base(struct file_stat_base *p_file_stat_base)\
-{clear_bit_unlock(F_file_stat_in_##name,(unsigned long *)&p_file_stat_base->file_stat_status);}
+{clear_bit_unlock(F_file_stat_in_##name,(unsigned long *)(&p_file_stat_base->file_stat_status));}
 //{p_file_stat_base->file_stat_status &= ~(1 << F_file_stat_in_##name);}
 	//设置文件的状态，大小文件等
 #define SET_FILE_STATUS_BASE(name)\
 		static inline void set_file_stat_in_##name##_base(struct file_stat_base *p_file_stat_base)\
-{set_bit(F_file_stat_in_##name,(unsigned long *)&p_file_stat_base->file_stat_status);}
+{set_bit(F_file_stat_in_##name,(unsigned long *)(&p_file_stat_base->file_stat_status));}
 //{p_file_stat_base->file_stat_status |= (1 << F_file_stat_in_##name);}
 	//测试文件的状态，大小文件等
 #define TEST_FILE_STATUS_BASE(name)\
 		static inline int file_stat_in_##name##_base(struct file_stat_base *p_file_stat_base)\
-{return test_bit(F_file_stat_in_##name,(unsigned long *)&p_file_stat_base->file_stat_status);}
+{return test_bit(F_file_stat_in_##name,(unsigned long *)(&p_file_stat_base->file_stat_status));}
 //{return (p_file_stat_base->file_stat_status & (1 << F_file_stat_in_##name));}
 #define TEST_FILE_STATUS_ERROR_BASE(name)\
 		static inline int file_stat_in_##name##_error_base(struct file_stat_base *p_file_stat_base)\
@@ -3049,7 +3051,7 @@ extern void can_small_file_change_to_normal_file(struct hot_cold_file_global *p_
 extern int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,unsigned int file_area_type,unsigned int file_type,struct list_head *file_area_list);
 
 extern void hot_file_update_file_status(struct address_space *mapping,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,int access_count,int read_or_write/*,unsigned long index*/);
-extern void get_file_name(char *file_name_path,struct file_stat_base *p_file_stat_base);
+extern char *get_file_name(char *file_name_path,struct file_stat_base *p_file_stat_base);
 //extern unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_free,struct list_head *file_area_have_mmap_page_head);
 extern unsigned int cold_mmap_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base * p_file_stat_base,struct file_area *p_file_area,struct page *page_buf[],int cold_page_count);
 extern unsigned long shrink_inactive_list_async(unsigned long nr_to_scan, struct lruvec *lruvec,struct hot_cold_file_global *p_hot_cold_file_global,int is_mmap_file, enum lru_list lru);
