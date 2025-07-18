@@ -117,6 +117,7 @@ int open_file_area_printk_important = 0;
 static void change_global_age_dx(struct hot_cold_file_global *p_hot_cold_file_global);
 static void change_global_age_dx_for_mmap_file(struct hot_cold_file_global *p_hot_cold_file_global);
 extern void deactivate_file_folio(struct folio *folio);
+static noinline int check_memory_reclaim_necessary(struct hot_cold_file_global *p_hot_cold_file_global);
 
 struct age_dx_param{
 	unsigned int file_area_temp_to_cold_age_dx;
@@ -2026,6 +2027,7 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 	int ret;
 	unsigned int free_pages = 0;
 	int j,page_count;
+	unsigned int scan_page_count = 0,zero_page_file_area_count = 0;
 
 	/*使用前必须先对fbatch初始化*/
 	folio_batch_init(&fbatch);
@@ -2068,6 +2070,23 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 		/*if(file_area_in_free_kswapd(p_file_area))
 			clear_file_area_in_free_kswapd(p_file_area);*/
 
+		/*如果扫描到的file_area大部分都没有page，直接return，不浪费性能*/
+		if(scan_page_count ++ > 64){
+			scan_page_count = 0;
+			if(zero_page_file_area_count > 60){
+				/* 注意，之类不能直接return 返回，因为folio_batch_count(&fbatch)可能还包含未释放的page，注意
+				 * cold_file_isolate_lru_pages_and_shrink()函数不管合适都不能中途直接return，必须从函数最后
+				 * return*/
+				goto direct_return;
+			}
+			/*防止for循环耗时太长导致本地cpu没有调度*/
+			cond_resched();
+		}
+		if(!file_area_have_page(p_file_area)){
+			zero_page_file_area_count ++;
+			continue;
+		}
+
 		/*每遍历一个file_area，都要先对mmap_page_count清0，然后下边遍历到file_area的每一个mmap page再加1*/
 		mmap_page_count = 0;
 		//得到file_area对应的page
@@ -2086,6 +2105,13 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 
 				continue;
 			}
+			/* 这里有个bug1，如果到这里，该page正好被kswapd进程回收掉了，于是把page在file_area_state的page bit位清0了，
+			 * 此时is_file_area_page_bit_set(p_file_area,i)就是0了就会触发panic。于是要把
+			 * is_file_area_page_bit_set(p_file_area,i)的判断放到下边的if(unlikely(folio->mapping != mapping)后，
+			 * 因为只有这里才说明该page没有被kswapd等进程释放并重新分配给其他进程用。并且，此时该page如果
+			 * 被kswad释放并重新分配，folio_test_anon(folio)就可能因为page时匿名页而panic，于是下边的
+			 * if (unlikely(folio_test_anon(folio))...)判断也要放到if(unlikely(folio->mapping != mapping)后!!!!!!!!!*/
+		#if 0	
 			if(xa_is_value(folio) || !is_file_area_page_bit_set(p_file_area,i)){
 				panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x page:0x%llx flags:0x%lx xa_is_value or file_area_bit error!!!!!!\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,(u64)folio,folio->flags);
 			}
@@ -2096,6 +2122,7 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 			if (unlikely(folio_test_anon(folio))|| unlikely(PageCompound(&folio->page)) || unlikely(folio_test_swapbacked(folio))){
 				panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x page:0x%llx flags:0x%lx error\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,(u64)folio,folio->flags);
 			}
+        #endif
 
 			/*到这里，page经过第一阶段针对file_area的判断，合法了。下边是针对page是否能参与内存回收的合法性判断。
 			 * 以下函数流程drop_cache释放pagecache执行的invalidate_mapping_pagevec函数，截断pagecache一致
@@ -2141,6 +2168,18 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 				printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x page:0x%llx flags:0x%lx page->mapping:0x%llx != mapping:0x%llx\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,(u64)folio,folio->flags,(u64)folio->mapping,(u64)mapping);
 				continue;
 			}
+
+            /*必须判断page没有kswaspd等进程释放掉后，再判断is_file_area_page_bit_set、folio_test_anon()等等*/
+            if(xa_is_value(folio) || !is_file_area_page_bit_set(p_file_area,i)){
+				panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x page:0x%llx flags:0x%lx xa_is_value or file_area_bit error!!!!!!\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,(u64)folio,folio->flags);
+			}
+			/*如果page映射了也表页目录，这是异常的，要给出告警信息!!!!!!!!!!!!!!!!!!!还有其他异常状态。但实际调试
+			 *遇到过page来自tmpfs文件系统，即PageSwapBacked(page)，最后错误添加到inacitve lru链表，但没有令inactive lru
+			 *链表的page数加1，最后导致隔离page时触发mem_cgroup_update_lru_size()中发现lru链表page个数是负数而告警而crash*/
+			if (unlikely(folio_test_anon(folio))|| unlikely(PageCompound(&folio->page)) || unlikely(folio_test_swapbacked(folio))){
+					panic("%s file_stat:0x%llx file_area:0x%llx status:0x%x page:0x%llx flags:0x%lx error\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,(u64)folio,folio->flags);
+			}
+
 
 			/*5：page是脏页或者writeback页或者不可回收页，不参与内存回收*/
 			if (folio_test_dirty(folio) || folio_test_writeback(folio) || folio_test_unevictable(folio)){
@@ -2211,8 +2250,6 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 #endif				   
 				/*这里真正把fbatch->folios[]保存的folio释放回伙伴系统，并自动把fbatch->nr清0，表示fbatch->folios[]数组空了，后续可以继续向fbatch->folios[]保存page*/
 				folio_batch_release(&fbatch);
-				/*防止for循环耗时太长导致本地cpu没有调度*/
-				cond_resched();
 
 				/*注意，folio_batch_release()里可能会回收page失败，因此真实回收的page数 <= page_count，因此free_pages可能比真实回收的page数大*/
 				free_pages += page_count;
@@ -2256,6 +2293,7 @@ unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global
 	file_inode_unlock(p_file_stat_base);
 #endif
 
+direct_return:
 	/*上边的for循环，存在folio_batch_add(fbatch, folio)向fbatch->folios[]数组保存folio后，后续执行形如
 	 * if(unlikely(folio->mapping != mapping))判断导致for循环提前中断。如此这些fbatch->folios[]数组保存
 	 * folio就没办法回收了，于是这里强制回收掉*/
@@ -5916,6 +5954,48 @@ static int check_file_area_refault_and_scan_max(struct hot_cold_file_global *p_h
 
 	return scan_file_area_max;
 }
+/* mysql低内存场景实际测试表明，writeonly文件在经过第一轮内存后，几乎所有的file_area都移动到了file_stat->free链表。
+ * 后续该文件再被访问，file_area又分配了大量page，但是这些file_area都处于file_stat->free链表，还有少量的file_area
+ * 处于file_stat->refault或hot链表。而此时处于内存紧缺模式，该文件明明有大量的pagecache，但是因为大部分file_area
+ * 都处于file_stat->free链表，而无法从该文件回收大量的pagecache。为了解决这个问题，开发这个函数接口，直接从
+ * file_stat->free等链表的file_area回收pagecache。当然要提防一个page都没有的file_area，如果遇到太多这种file_area
+ * 就要提前遍历*/
+static unsigned int direct_recliam_file_stat_free_refault_hot_file_area(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base)
+{
+	unsigned int free_pages = 0;
+	unsigned int isolate_lru_pages = 0;
+	struct file_stat *p_file_stat;
+
+	/*file_stat必须是normal文件，不能处于tiny_small_one_area、tiny_small、small文件链表*/
+	if(file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base) || 
+			file_stat_in_file_stat_small_file_head_list_base(p_file_stat_base) || 
+			file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base)){
+		panic("%s file_stat:0x%llx status:0x%x error\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+	}
+
+	p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
+	/*每次内存回收前先对free_pages_count清0*/
+	p_hot_cold_file_global->hot_cold_file_shrink_counter.free_pages_count = 0;
+
+	isolate_lru_pages = cold_file_isolate_lru_pages_and_shrink(p_hot_cold_file_global,p_file_stat_base,&p_file_stat->file_area_free);
+	isolate_lru_pages += cold_file_isolate_lru_pages_and_shrink(p_hot_cold_file_global,p_file_stat_base,&p_file_stat->file_area_refault);
+	isolate_lru_pages += cold_file_isolate_lru_pages_and_shrink(p_hot_cold_file_global,p_file_stat_base,&p_file_stat->file_area_hot);
+
+	free_pages = p_hot_cold_file_global->hot_cold_file_shrink_counter.free_pages_count;
+	p_file_stat->reclaim_pages_last_period = free_pages;
+	p_file_stat->reclaim_pages += free_pages;
+
+	//隔离的page个数
+	p_hot_cold_file_global->hot_cold_file_shrink_counter.isolate_lru_pages += isolate_lru_pages;
+	//从系统启动到目前释放的page个数
+	if(file_stat_in_cache_file_base(p_file_stat_base))
+		p_hot_cold_file_global->free_pages += p_hot_cold_file_global->hot_cold_file_shrink_counter.free_pages_count;
+	else
+		p_hot_cold_file_global->free_mmap_pages += p_hot_cold_file_global->hot_cold_file_shrink_counter.free_pages_count;
+
+	printk("%s file_stat:0x%llx writeonly file recliam_pages:%d\n",__func__,(u64)p_file_stat_base,free_pages);
+	return free_pages;
+}
 static unsigned int get_file_area_from_file_stat_list_common(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,unsigned int scan_file_area_max,unsigned int file_stat_list_type,unsigned int file_type,char is_cache_file)
 {
 	struct file_stat *p_file_stat = NULL;
@@ -6163,15 +6243,21 @@ static unsigned int get_file_area_from_file_stat_list_common(struct hot_cold_fil
 		/*回收file_area_free_temp临时链表上的冷file_area的page，回收后的file_area移动到file_stat->free链表头*/
 		free_page_from_file_area(p_hot_cold_file_global,p_file_stat_base,&file_area_free_temp,file_type);
 
-		/*内存回收后，遍历file_stat->hot、refault、free链表上的各种file_area的处理*/
-
-		scan_file_area_max = 16;
-		scan_file_area_count += file_stat_other_list_file_area_solve(p_hot_cold_file_global,&p_file_stat->file_stat_base,&p_file_stat->file_area_hot,scan_file_area_max,F_file_area_in_hot_list,FILE_STAT_NORMAL);
-		scan_file_area_max = 16;
-		scan_file_area_count += file_stat_other_list_file_area_solve(p_hot_cold_file_global,&p_file_stat->file_stat_base,&p_file_stat->file_area_refault,scan_file_area_max,F_file_area_in_refault_list,FILE_STAT_NORMAL);
-		scan_file_area_max = 64;
-		scan_file_area_count += file_stat_other_list_file_area_solve(p_hot_cold_file_global,&p_file_stat->file_stat_base,&p_file_stat->file_area_free,scan_file_area_max,F_file_area_in_free_list,FILE_STAT_NORMAL);
-
+		/* 内存紧缺模式，writeonly文件有文件页page的file_area可能处于file_stat->free链表，因为在此之前经过一次内存回收
+		 * 把这些file_area都移动到了file_stat->free链表。这导致上边从file_stat->temp、warm链表回收到了很少的page，到
+		 * 这里时,该writeonly文件依然还有大量的pagecache,即mapping->nrpages很大,则从file_stat->free链表的file_area回收page*/
+		if(AGE_DX_CHANGE_WRITEONLY_IN_EMERGENCY_RECLAIM == age_dx_change_type){
+			if(file_stat_in_writeonly_base(p_file_stat_base) && p_file_stat_base->mapping->nrpages > 64)
+				direct_recliam_file_stat_free_refault_hot_file_area(p_hot_cold_file_global,p_file_stat_base);
+		}else{
+			/*内存回收后，遍历file_stat->hot、refault、free链表上的各种file_area的处理*/
+			scan_file_area_max = 16;
+			scan_file_area_count += file_stat_other_list_file_area_solve(p_hot_cold_file_global,&p_file_stat->file_stat_base,&p_file_stat->file_area_hot,scan_file_area_max,F_file_area_in_hot_list,FILE_STAT_NORMAL);
+			scan_file_area_max = 16;
+			scan_file_area_count += file_stat_other_list_file_area_solve(p_hot_cold_file_global,&p_file_stat->file_stat_base,&p_file_stat->file_area_refault,scan_file_area_max,F_file_area_in_refault_list,FILE_STAT_NORMAL);
+			scan_file_area_max = 64;
+			scan_file_area_count += file_stat_other_list_file_area_solve(p_hot_cold_file_global,&p_file_stat->file_stat_base,&p_file_stat->file_area_free,scan_file_area_max,F_file_area_in_free_list,FILE_STAT_NORMAL);
+		}
 
 		/*查看文件是否变成了热文件、大文件、普通文件，是的话则file_stat移动到对应global hot、large_file_temp、temp 链表*/
 		file_stat_status_change_solve(p_hot_cold_file_global,p_file_stat,file_stat_list_type,is_cache_file,scan_read_file_area_count_last);
@@ -6761,6 +6847,12 @@ static noinline int walk_throuth_all_file_area(struct hot_cold_file_global *p_ho
 		/*优先回收writeonly文件页*/
 		scan_cold_file_area_count += get_file_area_from_file_stat_list(p_hot_cold_file_global,param->scan_writeonly_file_area_max,param->scan_writeonly_file_stat_max, 
 				&p_hot_cold_file_global->file_stat_writeonly_file_head,F_file_stat_in_file_stat_writeonly_file_head_list,FILE_STAT_NORMAL,is_cache_file);
+
+		/*针对writeonly文件内存回收，内存已经充足，不再继续内存回收。以为只要内存回收就加大内存回收的概率*/
+		if(check_memory_reclaim_necessary(p_hot_cold_file_global) < MEMORY_PRESSURE_RECLAIM){
+			printk("memory enough,do not reclaim\n");
+			return 0;
+		}
 
 		/* 遍历hot_cold_file_global->file_stat_temp_large_file_head链表尾巴上边的文件file_stat，再遍历每一个文件file_stat->temp、warm
 		 * 链表尾上的file_area，判定是冷file_area的话则参与内存回收，内存回收后的file_area移动到file_stat->free链表。然后对

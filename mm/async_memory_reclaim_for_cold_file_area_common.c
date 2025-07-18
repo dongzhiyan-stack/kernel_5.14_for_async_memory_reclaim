@@ -1092,7 +1092,7 @@ char *get_file_name(char *file_name_path,struct file_stat_base *p_file_stat_base
 			dentry = hlist_entry(inode->i_dentry.first, struct dentry, d_u.d_alias);
 			//__dget(dentry);------这里不再__dget,因为全程有spin_lock(&inode->i_lock)加锁
 			if(dentry){
-				snprintf(file_name_path,MAX_FILE_NAME_LEN - 2,"i_count:%d dentry:0x%llx %s",atomic_read(&inode->i_count),(u64)dentry,/*dentry->d_iname*/dentry->d_name.name);
+				snprintf(file_name_path,MAX_FILE_NAME_LEN - 2,"i_count:%d i_size:%lld dentry:0x%llx %s",atomic_read(&inode->i_count),inode->i_size,(u64)dentry,/*dentry->d_iname*/dentry->d_name.name);
 				//snprintf(file_name_path,MAX_FILE_NAME_LEN - 2,"%s",dentry->d_name.name);
 			}
 			//dput(dentry);
