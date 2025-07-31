@@ -253,10 +253,12 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
 		hot_cold_file_global_info.kswapd_free_page_count ++;
 	else if(!current->mm){
 		/*在file_area->file_area_state里标记file_area的这个page被释放了*/
-		set_file_area_page_shadow_bit(p_file_area,page_offset_in_file_area);
+		//set_file_area_page_shadow_bit(p_file_area,page_offset_in_file_area);
 		hot_cold_file_global_info.async_thread_free_page_count ++;
 
-		//shadow = (void *)(0x1); bit0置1表示是shadow，暂时不需要
+		/* 最新方案，异步内存回收page时，file_area_state的shadow bit不再使用。而是把1赋值给file_area->pages[]。这样bit0是1
+		 * 说明是个shadow entry，但是kswapd内存回收的的shadow又远远大于1，依此可以区分该page是被异步内存回收还是kswapd。*/
+		shadow = (void *)(0x1);
 		if(strncmp(current->comm,"async_memory",12))
 			printk("%s %s %d async memory errror!!!!!!!!!\n",__func__,current->comm,current->pid);
 	}
@@ -1728,9 +1730,10 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 				//if(!(gfp_ori & __GFP_WRITE))
 				{
 					/*如果该page被异步内存回收线程回收而做了shadow标记，*/
-					if(is_file_area_page_shadow(p_file_area,page_offset_in_file_area)){
+					//if(is_file_area_page_shadow(p_file_area,page_offset_in_file_area)){
+					if(1 == (u64)folio_temp){
 						/*必须清理掉该page在file_area_state的shadow标记*/
-						clear_file_area_page_shadow_bit(p_file_area,page_offset_in_file_area);
+						//clear_file_area_page_shadow_bit(p_file_area,page_offset_in_file_area);
 						/* 只有read的refault page才计入refault统计。这个判断不能放到外边，因为这会导致write refault的folio无法执行
 						 * clear_file_area_page_shadow_bit()清理shadow位，导致再发生refault而set_file_area_page_shadow_bit时，发现已经置位而crash*/
 						if(!(gfp_ori & __GFP_WRITE)){
@@ -1785,7 +1788,7 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 		//*shadowp = NULL;
 #endif
 		//分配file_area
-		p_file_area  = file_area_alloc_and_init(area_index_for_page,p_file_stat_base);
+		p_file_area  = file_area_alloc_and_init(area_index_for_page,p_file_stat_base,mapping);
 		if(!p_file_area){
 			//xas_unlock_irq(&xas);
 			xas_set_err(&xas, -ENOMEM);
@@ -3586,6 +3589,7 @@ static inline struct folio *find_get_entry_for_file_area(struct xa_state *xas, p
 	//计算要查找的最大page索引对应的file_area索引
 	pgoff_t file_area_max = max >> PAGE_COUNT_IN_AREA_SHIFT;
 	unsigned long folio_index_from_xa_index;
+	void *old_entry;
 
 	/*如果*p_file_area不是NULL，说明上次执行该函数里的xas_find(xas, max)找到的file_area，还有剩余的page没有获取
 	 *先goto find_page_from_file_area分支把这个file_area剩下的page探测完*/
@@ -3643,11 +3647,20 @@ retry:
 #else		
 		//XA_STATE(xas_del, &mapping->i_pages, (*p_file_area)->start_index >> PAGE_COUNT_IN_AREA_SHIFT);
 		XA_STATE(xas_del, &mapping->i_pages, (*p_file_area)->start_index);
-#endif		
+#endif	
+		(*p_file_area)->mapping = 0;
+		smp_wmb();
 		/*需要用文件xarray tree的lock加锁，因为xas_store()操作必须要xarray tree加锁*/
 		xas_lock_irq(&xas_del);
-		xas_store(&xas_del, NULL);
+		old_entry = xas_store(&xas_del, NULL);
 		xas_unlock_irq(&xas_del);
+
+		if(file_stat_in_global_base((struct file_stat_base *)mapping->rh_reserved1) && old_entry){
+			if(file_stat_in_cache_file_base((struct file_stat_base *)mapping->rh_reserved1))
+				list_move(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_file_stat.file_area_delete_list);
+			else
+				list_move(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_list);
+		}
 
 		*page_offset_in_file_area = 0;
 		/*goto retry分支里执行xas_find()，会自动令xas->xa_offset++，进而查找下一个索引的file_area*/

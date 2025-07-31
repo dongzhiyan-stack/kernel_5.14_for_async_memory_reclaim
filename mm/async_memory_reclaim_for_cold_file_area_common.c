@@ -679,11 +679,13 @@ static int file_stat_debug_or_make_backlist(struct seq_file *m,char is_proc_prin
 	}else if(FILE_STAT_NORMAL == file_stat_type){
 		struct file_stat *p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
 
-		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_warm,1 << F_file_area_in_warm_list,"warm list",1);
+		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_refault,1 << F_file_area_in_refault_list,"refault list",1);
 
 		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_hot,1 << F_file_area_in_hot_list,"hot list",1);
-		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_refault,1 << F_file_area_in_refault_list,"refault list",1);
-		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_mapcount,1 << F_file_area_in_mapcount_list,"mapcount list",1);
+		//print_file_stat_one_file_area_info(m,&p_file_stat->file_area_warm,1 << F_file_area_in_warm_list,"warm list",1);
+		//print_file_stat_one_file_area_info(m,&p_file_stat->file_area_mapcount,1 << F_file_area_in_mapcount_list,"mapcount list",1);
+		//print_file_stat_one_file_area_info(m,&p_file_stat->file_area_warm_cold,0,"warm_cold list",1);
+		//print_file_stat_one_file_area_info(m,&p_file_stat->file_area_writeonly_or_cold,0,"writeonly_cold list",1);
 
 		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_free,1 << F_file_area_in_free_list,"free list",1);
 	}
@@ -1578,6 +1580,46 @@ int hot_cold_file_proc_exit(struct hot_cold_file_global *p_hot_cold_file_global)
 	remove_proc_entry("async_memory_reclaime",NULL);
 	return 0;
 }
+static void global_file_stat_init(void)
+{
+	memset(&hot_cold_file_global_info.global_file_stat,0,sizeof(struct global_file_stat));
+	memset(&hot_cold_file_global_info.global_mmap_file_stat,0,sizeof(struct global_file_stat));
+    
+    file_stat_base_struct_init(&hot_cold_file_global_info.global_file_stat.file_stat.file_stat_base,1);
+    file_stat_base_struct_init(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base,0);
+	
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_stat.file_stat_base.file_area_temp);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_stat.file_area_hot);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_stat.file_area_warm);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_stat.file_area_warm_hot);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_stat.file_area_writeonly_or_cold);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_stat.file_area_free);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_stat.file_area_refault);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_area_warm_middle);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_area_warm_middle_hot);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_area_warm_cold);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_area_mapcount);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_area_delete_list);
+
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base.file_area_temp);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_area_hot);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_area_warm);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_area_warm_hot);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_area_writeonly_or_cold);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_area_free);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_area_refault);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_area_warm_middle);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_area_warm_middle_hot);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_area_warm_cold);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_area_mapcount);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_list);
+
+    set_file_stat_in_global_base(&hot_cold_file_global_info.global_file_stat.file_stat.file_stat_base);
+    set_file_stat_in_global_base(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base);
+	
+	spin_lock_init(&hot_cold_file_global_info.global_file_stat.file_stat.file_stat_base.file_stat_lock);
+	spin_lock_init(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base.file_stat_lock);
+}
 static int __init hot_cold_file_init(void)
 {
 	hot_cold_file_global_info.file_area_cachep = kmem_cache_create("file_area",sizeof(struct file_area),0,0,NULL);
@@ -1672,6 +1714,15 @@ static int __init hot_cold_file_init(void)
 	hot_cold_file_global_info.nr_pages_level = 16;
 	/*该函数在setup_cold_file_area_reclaim_support_fs()之后，总是导致hot_cold_file_global_info.support_fs_type = -1，导致总file_area内存回收无效*/
 	//hot_cold_file_global_info.support_fs_type = -1;
+
+	global_file_stat_init();
+
+	INIT_LIST_HEAD(&hot_cold_file_global_info.current_scan_file_stat_info.temp_head);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.current_scan_mmap_file_stat_info.temp_head);
+    hot_cold_file_global_info.current_scan_file_stat_info.traverse_file_stat_type = FILE_STAT_CACHE_FILE;
+    hot_cold_file_global_info.global_mmap_file_stat.traverse_file_stat_type = FILE_STAT_MMAP_FILE;
+	hot_cold_file_global_info.global_file_stat.current_scan_file_stat_info.traverse_file_stat_type = GLOBAL_FILE_STAT_CACHE_FILE;
+	hot_cold_file_global_info.global_mmap_file_stat.current_scan_file_stat_info.traverse_file_stat_type = GLOBAL_FILE_STAT_MMAP_FILE;
 
 
 	hot_cold_file_global_info.refault_file_area_scan_dx = 32;
