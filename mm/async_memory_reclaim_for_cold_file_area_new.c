@@ -5590,10 +5590,16 @@ static noinline int hot_file_stat_solve(struct hot_cold_file_global *p_hot_cold_
 	unsigned int file_area_hot_to_warm_list_count = 0;
 	char file_stat_changed;
 	char is_hot_file,is_global_file_stat;
+	char file_stat_delete_lock = 0;
 
+	file_stat_delete_protect_lock(1);
+	file_stat_delete_lock = 1;
 	/*现在都是file_stat_base添加到global temp、hot等链表，不再是file_stat了*/
 	//list_for_each_entry_safe_reverse(p_file_stat,p_file_stat_temp,&p_hot_cold_file_global->file_stat_hot_head,hot_cold_file_list){
 	list_for_each_entry_safe_reverse(p_file_stat_base,p_file_stat_base_temp,file_stat_hot_head,hot_cold_file_list){
+		file_stat_delete_protect_unlock(1); 
+		file_stat_delete_lock = 0;
+
 		p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
 
 		if(!file_stat_in_file_stat_hot_head_list_base(p_file_stat_base) || file_stat_in_file_stat_hot_head_list_error_base(p_file_stat_base))
@@ -5725,13 +5731,20 @@ static noinline int hot_file_stat_solve(struct hot_cold_file_global *p_hot_cold_
 			else
 				spin_unlock(&p_hot_cold_file_global->mmap_file_global_lock);
 		}
-	
+
+		file_stat_delete_protect_lock(1);
+		file_stat_delete_lock = 1;
+		if(&p_file_stat_base_temp->hot_cold_file_list == file_stat_hot_head  || file_stat_in_delete_file_base(p_file_stat_base_temp))
+			break;
+
 		/* break必须放到这里，不能当道for循环的上边。否则因为scan_file_area_count > scan_file_area_max 而break后，
 		 * 当前的p_file_stat_base对应的文件，就无法遍历，内存回收。并且，如果这个file_stat如果还是链表头的，就会
 		 * 在下边list_move_enhance()失败，因为它是链表头的file_stat。如此导致file_stat长时间无法遍历到，对它内存回收*/
 		if(scan_file_area_count > scan_file_area_max)
 			break;
 	}
+	if(file_stat_delete_lock)
+		file_stat_delete_protect_test_unlock(1);
 
 	/*重点：将链表尾已经遍历过的file_stat移动到p_hot_cold_file_global->file_stat_hot_head链表头。
 	 *下次从链表尾遍历的才是新的未遍历过的file_stat。此时不用加锁!!!!!!!!!真的不用加锁吗????????????
@@ -5774,10 +5787,16 @@ static noinline int scan_mmap_mapcount_file_stat(struct hot_cold_file_global *p_
 	unsigned int mapcount_to_temp_file_area_count_from_mapcount_file = 0;
 	//char file_stat_change = 0;
 	LIST_HEAD(file_stat_list);
+	char file_stat_delete_lock = 0;
 
+	file_stat_delete_protect_lock(1);
+	file_stat_delete_lock = 1;
 	//每次都从链表尾开始遍历
 	//list_for_each_entry_safe_reverse(p_file_stat,p_file_stat_temp,&p_hot_cold_file_global->mmap_file_stat_mapcount_head,hot_cold_file_list){
 	list_for_each_entry_safe_reverse(p_file_stat_base,p_file_stat_base_temp,&p_hot_cold_file_global->mmap_file_stat_mapcount_head,hot_cold_file_list){
+		file_stat_delete_protect_unlock(1); 
+		file_stat_delete_lock = 0;
+
 		if(!file_stat_in_mapcount_file_area_list_base(p_file_stat_base) || file_stat_in_mapcount_file_area_list_error_base(p_file_stat_base))
 			panic("%s file_stat:0x%llx not in_mapcount_file_area_list status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
 
@@ -5832,11 +5851,20 @@ static noinline int scan_mmap_mapcount_file_stat(struct hot_cold_file_global *p_
 		if(0 == file_stat_change)
 			list_move(&p_file_stat->hot_cold_file_list,&file_stat_list);
 #endif
+
+		file_stat_delete_protect_lock(1);
+		file_stat_delete_lock = 1;
+		if(&p_file_stat_base_temp->hot_cold_file_list == &p_hot_cold_file_global->mmap_file_stat_mapcount_head  || file_stat_in_delete_file_base(p_file_stat_base_temp))
+			break;
+
 		//超出扫描的file_area上限，break
 		if(scan_file_area_count > scan_file_area_max){
 			break;
 		}
 	}
+	if(file_stat_delete_lock)
+		file_stat_delete_protect_test_unlock(1);
+
 #if 0
 	//如果file_stat_list临时链表还有file_stat，则把这些file_stat移动到global mmap_file_stat_hot_head链表头，下轮循环就能从链表尾巴扫描还没有扫描的file_stat了
 	if(!list_empty(&file_stat_list)){
