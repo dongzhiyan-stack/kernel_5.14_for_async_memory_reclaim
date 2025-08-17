@@ -1587,38 +1587,44 @@ static void global_file_stat_init(void)
     
     file_stat_base_struct_init(&hot_cold_file_global_info.global_file_stat.file_stat.file_stat_base,1);
     file_stat_base_struct_init(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base,0);
-	
-	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_stat.file_stat_base.file_area_temp);
+
+	/*cache global_file_stat*/
+	//INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_stat.file_stat_base.file_area_temp);
+	//spin_lock_init(&hot_cold_file_global_info.global_file_stat.file_stat.file_stat_base.file_stat_lock);
+    set_file_stat_in_global_base(&hot_cold_file_global_info.global_file_stat.file_stat.file_stat_base);
+
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_stat.file_area_hot);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_stat.file_area_warm);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_stat.file_area_warm_hot);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_stat.file_area_writeonly_or_cold);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_stat.file_area_free);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_stat.file_area_refault);
+
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_area_warm_middle);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_area_warm_middle_hot);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_area_warm_cold);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_area_mapcount);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_area_delete_list);
 
-	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base.file_area_temp);
+
+
+	/*mmap global_mmap_file_stat*/
+	//INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base.file_area_temp);
+	//spin_lock_init(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base.file_stat_lock);
+    set_file_stat_in_global_base(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base);
+
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_area_hot);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_area_warm);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_area_warm_hot);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_area_writeonly_or_cold);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_area_free);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_area_refault);
+
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_area_warm_middle);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_area_warm_middle_hot);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_area_warm_cold);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_area_mapcount);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_list);
-
-    set_file_stat_in_global_base(&hot_cold_file_global_info.global_file_stat.file_stat.file_stat_base);
-    set_file_stat_in_global_base(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base);
-	
-	spin_lock_init(&hot_cold_file_global_info.global_file_stat.file_stat.file_stat_base.file_stat_lock);
-	spin_lock_init(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base.file_stat_lock);
 }
 static int __init hot_cold_file_init(void)
 {
@@ -1721,6 +1727,10 @@ static int __init hot_cold_file_init(void)
 	INIT_LIST_HEAD(&hot_cold_file_global_info.current_scan_mmap_file_stat_info.temp_head);
     hot_cold_file_global_info.current_scan_file_stat_info.traverse_file_stat_type = FILE_STAT_CACHE_FILE;
     hot_cold_file_global_info.global_mmap_file_stat.traverse_file_stat_type = FILE_STAT_MMAP_FILE;
+
+
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.current_scan_file_stat_info.temp_head);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.current_scan_file_stat_info.temp_head);
 	hot_cold_file_global_info.global_file_stat.current_scan_file_stat_info.traverse_file_stat_type = GLOBAL_FILE_STAT_CACHE_FILE;
 	hot_cold_file_global_info.global_mmap_file_stat.current_scan_file_stat_info.traverse_file_stat_type = GLOBAL_FILE_STAT_MMAP_FILE;
 

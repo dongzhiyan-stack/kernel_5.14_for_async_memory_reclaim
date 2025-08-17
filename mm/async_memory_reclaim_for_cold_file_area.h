@@ -688,7 +688,7 @@ struct file_stat
 	//struct list_head file_area_free_temp;
 	/*file_stat回收的总page数*/
 	unsigned int reclaim_pages;
-	char next_warm_list_num;
+	char traverse_warm_list_num;
 	/*上一个周期file_stat回收的总page数*/
 	//unsigned int reclaim_pages_last_period;
 }/*__attribute__((packed))*/;

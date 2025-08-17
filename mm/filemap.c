@@ -3615,6 +3615,17 @@ retry:
 	//if (xas_retry(xas, folio))
 	if (xas_retry(xas, *p_file_area))
 		goto retry;
+
+    /* 突然有个想法，如果上边p_file_area = xas_find(xas, file_area_max) 和异步内存回收线程cold_file_area_delete并发执行。
+	 * 这里先返回了p_file_area。然后下边p_file_area->start_index，p_file_area->mapping = 0这样使用file_area。此时因为该
+	 * file_area没有page，就会被异步内存回收线程cold_file_area_delete()释放掉，那岂不是到这里p_file_area->mapping = 0
+	 * 就是非法内存访问了。郁闷了半天，像当前函数这样使用file_area，在filemap.c文件里随处可见：都是先xrray tree里查找
+	 * p_file_area，然后查找file_area里的page。如果此时file_area被异步内存回收线程cold_file_area_delete了，那就是非法
+	 * 内存访问或者向非法内存赋值了。风险太大了，这个问题太大了，我的file_area异步内存回收方案从一开始的设计就有问题。
+	 * 想了半个小时，根本没事!!!!!!!因为filemap.c从xrray tree查找file_area再使用file_area，全程都有rcu_read_lock防护，
+	 * 异步内存回收线程cold_file_area_delete无法真正释放掉file_area结构体。这个设计思路一开始就有，只是时间长了，
+	 * 记忆不深了，自己吓唬自己!!!!!!!!!!*/
+
 	/*
 	 * A shadow entry of a recently evicted page, a swap
 	 * entry from shmem/tmpfs or a DAX entry.  Return it
@@ -3655,11 +3666,29 @@ retry:
 		old_entry = xas_store(&xas_del, NULL);
 		xas_unlock_irq(&xas_del);
 
-		if(file_stat_in_global_base((struct file_stat_base *)mapping->rh_reserved1) && old_entry){
+		/* 普通的文件file_stat，当iput()释放该文件inode时，会把file_stat移动到global delete链表，然后由异步内存回收线程
+		 * 遍历global delete链表，释放该file_stat的所有file_area。但是针对global_file_stat的file_area，当iput()释放这类
+		 * 文件inode时，因为没有file_stat，就无法再由异步内存回收线程遍历该文件的file_stat释放file_area了。于是想了一个
+		 * 办法，把file_area->pages[0、1]的内存作为file_area_delete链表，把该file_area移动到global_file_stat.file_area_delete_list
+		 * 链表，不用担心并发问题，因为异步内存回收线程只会依照file_area->file_area_list链表把file_area移动到各个file_stat
+		 * 链表。然后由异步内存回收线程遍历global_file_stat.file_area_delete_list，释放该链表上的file_area。但是，此时
+		 * 有个并发问题，如果这里iput()把file_area移动到global_file_stat.file_area_delete_list链表时，正好异步内存回收
+		 * 线程正因为file_area长时间没访问而cold_file_area_delete()释放掉。然后这个已经释放的file_area依然保存在
+		 * global_file_stat.file_area_delete_list链表，之后异步内存回收线程会再释放该file_ara，那就是非法内存访问了。
+		 * 为了防护这个并发问题，主要使用上边的xas_lock_irq()加锁，从xrray tree遍历该file_area，如果返回值old_entry
+		 * 是NULL，说明该file_area已经被异步内存回收线程释放了，那这里就不能再把file_area移动到
+		 * global_file_stat.file_area_delete_list链表了。*/
+		if(old_entry && file_stat_in_global_base((struct file_stat_base *)mapping->rh_reserved1)){
 			if(file_stat_in_cache_file_base((struct file_stat_base *)mapping->rh_reserved1))
 				list_move(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_file_stat.file_area_delete_list);
 			else
 				list_move(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_list);
+		}else{
+			/* 对p_file_area->file_area_delete链表赋值NULL,表示该file_area没有被移动到global_file_stat.file_area_delete_list链表。有问题，
+			 * 到这里就不能再对file_area赋值了，因为file_area可能被异步内存回收线程释放了。错了有rcu_read_lock防护不用担心file_area
+			 * 被释放，这个赋值移动到cold_file_area_delete函数了*/
+            /*(*p_file_area)->file_area_delete.prev = NULL;
+            (*p_file_area)->file_area_delete.next = NULL;*/
 		}
 
 		*page_offset_in_file_area = 0;
