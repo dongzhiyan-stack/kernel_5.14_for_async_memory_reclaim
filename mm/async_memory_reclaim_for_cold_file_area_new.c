@@ -749,6 +749,10 @@ err:
 	/* rcu延迟释放file_stat结构。call_rcu()里有smp_mb()内存屏障。但如果mapping->rh_reserved1是0了，说明上边
 	 * 没有执行list_del_rcu(&p_file_stat_del->hot_cold_file_list)，那这里不能执行call_rcu()*/
 	if(mapping->rh_reserved1){
+			
+		/*file_stat被rcu异步释放了，但是提前rcu_read_lock了，这里置1，等到确定file_stat不会被释放再rcu_read_unlock放开*/
+		rcu_read_lock();
+
 		if(FILE_STAT_NORMAL == file_type){
 			//p_file_stat_del = container_of(p_file_stat_base_del,struct file_stat,file_stat_base);
 			//call_rcu(&p_file_stat_del->i_rcu, i_file_stat_callback);
@@ -3094,6 +3098,7 @@ static noinline void file_stat_has_zero_file_area_manage(struct hot_cold_file_gl
 	unsigned int file_stat_type;
 	char file_stat_dec = 0;
 	char file_stat_delete_lock = 0;
+	char rcu_read_lock_flag = 0;
 	spinlock_t *cache_or_mmap_file_global_lock;
 
 	/*cache文件使用global_lock锁，mmap文件用的mmap_file_global_lock锁*/
@@ -3150,6 +3155,9 @@ static noinline void file_stat_has_zero_file_area_manage(struct hot_cold_file_gl
 			/*这里，到这里有两种情况，1 : file_stat真的被释放了。2 : 在cold_file_stat_delete()里发现file_stat先被iput()
 			 *标记delete标记，这种情况也认为global zero链表上的file_stat个数减少1，因为上边再次遍历这个file_stat时，会把这个
 			 *file_stat移动到global delete链表*/
+
+			/*file_stat被rcu异步释放了，但是提前rcu_read_lock了，这里置1，等到确定file_stat不会被释放再rcu_read_unlock放开*/
+			rcu_read_lock_flag = 1;
 
 			del_file_stat_count ++;
 			//p_hot_cold_file_global->file_stat_count_zero_file_area --;下边统计减1了，这里不再减1
@@ -3251,6 +3259,11 @@ next_file_stat:
 		/*如果遍历到global zero链表头，或者下一次遍历的file_stat被delete了，立即跳出遍历*/
 		if(&p_file_stat_base_temp->hot_cold_file_list == file_stat_zero_list_head  || file_stat_in_delete_file_base(p_file_stat_base_temp))
 			break;
+
+		if(rcu_read_lock_flag){
+			rcu_read_lock_flag = 0;
+			rcu_read_unlock();
+		}
 	}
 
 	if(file_stat_delete_lock)
@@ -3280,6 +3293,11 @@ next_file_stat:
 			list_move_enhance(file_stat_zero_list_head,&p_file_stat_base->hot_cold_file_list);
 	}
 	spin_unlock(cache_or_mmap_file_global_lock);
+
+	if(rcu_read_lock_flag){
+		rcu_read_lock_flag = 0;
+		rcu_read_unlock();
+	}
 
 	if(is_cache_file){
 		p_hot_cold_file_global->hot_cold_file_shrink_counter.del_zero_file_area_file_stat_count += del_file_stat_count;
@@ -6438,8 +6456,9 @@ static inline void old_file_stat_change_to_new(struct file_stat_base *p_file_sta
  *   是该file_area保持in_temp和in_hot属性，将来移动到small_file_stat->temp，就不会再有问题了，
  *   file_stat->temp链表允许file_area有in_temp和in_hot属性。
  *   */
-void can_tiny_small_file_change_to_small_normal_file(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_tiny_small *p_file_stat_tiny_small,char is_cache_file)
+static int  can_tiny_small_file_change_to_small_normal_file(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_tiny_small *p_file_stat_tiny_small,char is_cache_file)
 {
+	int ret = 0;
 	struct file_stat_base *p_file_stat_base_tiny_small = &p_file_stat_tiny_small->file_stat_base;
 
 	/*file_area_alloc_and_init()中因该文件的file_area个数超过阈值而设置了in_tiny_small_to_tail标记，然后移动到链表尾，这里清理掉标记*/
@@ -6543,10 +6562,18 @@ void can_tiny_small_file_change_to_small_normal_file(struct hot_cold_file_global
 		spin_lock(p_global_lock);
 		/*可能此时该文件被iput delete了，要防护,老的和新的file_stat都可能会被并发删除。没有必要再判断新的file_stat的是否delete了。两个文件不应该互相影响*/
 		if(!file_stat_in_delete_base(p_file_stat_base_tiny_small) /*&& !file_stat_in_delete(p_file_stat)*/){
+			/* 这里rcu_read_lock，然后下边call_rcu()就不会释放掉file_stat结构体了，等回到get_file_area_from_file_stat_list()函数，
+			 * 确保该file_stat不会再被使用时再rcu_read_unlock放开*/
+			rcu_read_lock();
+			ret = 1;
+
 			/*该file_stat从老的global链表中剔除，下边call_rcu异步释放掉*/
 
 			/*隐藏bug，如果此时有进程在__filemap_add_folio函数()后期正使用p_file_stat_base_old，这里却把它释放了，而__filemap_add_folio函数没有rcu_read_lock保护，导致__filemap_add_folio函数用的p_file_stat_base_old。__filemap_add_folio()加了rcu_read_lock()防止这种情况*/
 			list_del_rcu(&p_file_stat_base_tiny_small->hot_cold_file_list);
+			/* 隐藏bug，如果这里释放掉file_stat，但是返回到get_file_area_from_file_stat_list()函数后，还要使用这个
+			 * file_stat，那就是非法内存访问了。于是把call_rcu异步释放file_stat的代码放到get_file_area_from_file_stat_list()
+			 * 函数最后，确保该file_stat不会再被使用时再call_rcu异步释放掉。算了，最后决定用提前rcu_read_lock防护就行了*/
 			call_rcu(&p_file_stat_base_tiny_small->i_rcu, i_file_stat_tiny_small_callback);
 		}
 		spin_unlock(p_global_lock);
@@ -6586,12 +6613,21 @@ void can_tiny_small_file_change_to_small_normal_file(struct hot_cold_file_global
 		spin_lock(p_global_lock);
 		/*可能此时该文件被iput delete了，要防护*/
 		if(!file_stat_in_delete_base(p_file_stat_base_tiny_small) /*&& !file_stat_in_delete_base(&p_file_stat_small->file_stat_base)*/){
+			/* 这里rcu_read_lock，然后下边call_rcu()就不会释放掉file_stat结构体了，等回到get_file_area_from_file_stat_list()函数，
+			 * 确保该file_stat不会再被使用时再rcu_read_unlock放开*/
+			rcu_read_lock();
+			ret = 1;
+
 			/*该file_stat从老的global链表中剔除，下边call_rcu异步释放掉*/
 			list_del_rcu(&p_file_stat_base_tiny_small->hot_cold_file_list);
+			/* 隐藏bug，如果这里释放掉file_stat，但是返回到get_file_area_from_file_stat_list()函数后，还要使用这个
+			 * file_stat，那就是非法内存访问了。于是把call_rcu异步释放file_stat的代码放到get_file_area_from_file_stat_list()
+			 * 函数最后，确保该file_stat不会再被使用时再call_rcu异步释放掉。算了，最后决定用提前rcu_read_lock防护就行了*/
 			call_rcu(&p_file_stat_base_tiny_small->i_rcu, i_file_stat_tiny_small_callback);
 		}
 		spin_unlock(p_global_lock);
 	}
+	return ret;
 }
 /*small的file_area个数如果超过阀值则转换成普通文件。这里有个隐藏很深的问题，
  *   本身small文件超过640个就要转换成普通文件。但是，如果small
@@ -6613,8 +6649,9 @@ void can_tiny_small_file_change_to_small_normal_file(struct hot_cold_file_global
  *      超过640个，但只用从file_stat_small->other链表的最多遍历640个file_area，
  *      按照in_refault、in_hot、in_free属性而移动到新的file_stat->refault、hot、free链表.
  */
-void can_small_file_change_to_normal_file(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_small *p_file_stat_small,char is_cache_file)
+static int can_small_file_change_to_normal_file(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_small *p_file_stat_small,char is_cache_file)
 {
+	int ret = 0;
 	struct file_stat_base *p_file_stat_base_small = &p_file_stat_small->file_stat_base;
 
 	/*file_stat_tiny_small的file_area个数超过普通文件file_area个数的阀值，直接转换成普通文件file_stat*/
@@ -6651,13 +6688,26 @@ void can_small_file_change_to_normal_file(struct hot_cold_file_global *p_hot_col
 		spin_lock(p_global_lock);
 		/*可能此时该文件被iput delete了，要防护*/
 		if(!file_stat_in_delete_base(p_file_stat_base_small) /*&& !file_stat_in_delete(p_file_stat)*/){
+			/* 这里rcu_read_lock，然后下边call_rcu()就不会释放掉file_stat结构体了，等回到get_file_area_from_file_stat_list()函数，
+			 * 确保该file_stat不会再被使用时再rcu_read_unlock放开*/
+			rcu_read_lock();
+			ret = 1;
+
 			/*该file_stat从老的global链表中剔除，下边call_rcu异步释放掉*/
 			list_del_rcu(&p_file_stat_base_small->hot_cold_file_list);
+			/* 有个隐藏很深的问题，是否有可能老的file_stat正在update函数里被访问，这里却把file_sata结构体释放了。
+			 * 那就会导致非法内存访问？不可能，一方面update函数里都有rcu_read_lock防护，这里是call_rcu异步释放。
+			 * 并且，上边的old_file_stat_change_to_new()做好了防护：老的file_stat不会再被update函数访问才会退出*/
+
+			/* 隐藏bug，如果这里释放掉file_stat，但是返回到get_file_area_from_file_stat_list()函数后，还要使用这个
+			 * file_stat，那就是非法内存访问了。于是把call_rcu异步释放file_stat的代码放到get_file_area_from_file_stat_list()
+			 * 函数最后，确保该file_stat不会再被使用时再call_rcu异步释放掉。算了，最后决定用提前rcu_read_lock防护就行了*/
 			call_rcu(&p_file_stat_base_small->i_rcu, i_file_stat_small_callback);
 		}
 		spin_unlock(p_global_lock);
 
 	}
+	return ret;
 }
 static inline int cache_file_change_to_mmap_file(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,unsigned int file_type)
 {
@@ -6869,6 +6919,15 @@ static inline unsigned int tiny_small_file_area_move_to_global_file_stat(struct 
 	/*如果老的file_stat时print_file_stat，等待proc用过print_file_stat后再退出*/
 	old_file_stat_wait_print_file_stat(p_file_stat_base);
 
+	/*老的file_stat转成global_file_stat后，必须设置file_stat in_replaced，后续就不会再使用它了*/
+	set_file_stat_in_replaced_file_base(p_file_stat_base);
+	/* 这里rcu_read_lock，然后下边call_rcu()就不会释放掉file_stat结构体了，等回到get_file_area_from_file_stat_list()函数，
+	 * 确保该file_stat不会再被使用时再rcu_read_unlock放开*/
+	rcu_read_lock();
+
+	/* 隐藏bug，如果这里释放掉file_stat，但是返回到get_file_area_from_file_stat_list()函数后，还要使用这个
+	 * file_stat，那就是非法内存访问了。于是把call_rcu异步释放file_stat的代码放到get_file_area_from_file_stat_list()
+	 * 函数最后，确保该file_stat不会再被使用时再call_rcu异步释放掉。算了，最后决定用提前rcu_read_lock防护就行了*/
 	/*释放掉file_stat_base*/
 	call_rcu(&p_file_stat_base->i_rcu, i_file_stat_tiny_small_callback);
 
@@ -7350,6 +7409,10 @@ static unsigned int get_file_area_from_file_stat_list_common(struct hot_cold_fil
 			scan_file_area_count += file_stat_other_list_file_area_solve(p_hot_cold_file_global,&p_file_stat->file_stat_base,&p_file_stat->file_area_refault,scan_file_area_max,F_file_area_in_refault_list,FILE_STAT_NORMAL);
 			scan_file_area_max = 64;
 			scan_file_area_count += file_stat_other_list_file_area_solve(p_hot_cold_file_global,&p_file_stat->file_stat_base,&p_file_stat->file_area_free,scan_file_area_max,F_file_area_in_free_list,FILE_STAT_NORMAL);
+			/* 这里有个隐藏bug，没有遍历file_stat->file_area_mapcount链表上file_area，对mapcount file_area进行降级处理。
+			 * 但是新版本去除了file_stat->file_area_mapcount链表，为了节省内存，mapcount file_area都移动到file_stat->mapcount链表了*/
+			//scan_file_area_count += file_stat_other_list_file_area_solve(p_hot_cold_file_global,&p_file_stat->file_stat_base,&p_file_stat->file_area_mapcount,scan_file_area_max,F_file_area_in_mapcount_list,FILE_STAT_NORMAL);
+			/*这里有个隐藏bug，就是没有遍历file_stat->file_area_mapcount链表上*/
 		}
 
 		/*查看文件是否变成了热文件、大文件、普通文件，是的话则file_stat移动到对应global hot、large_file_temp、temp 链表*/
@@ -7428,6 +7491,7 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 	struct file_stat_base *p_file_stat_base_last = NULL;
 	char file_stat_traverse_warm_list_num = 0;
 	char file_stat_warm_or_writeonly_file_area_check_ok = 0;
+	char rcu_read_lock_flag = 0;
 	
 	//LIST_HEAD(file_area_free_temp);
 	//struct file_area *p_file_area,*p_file_area_temp;
@@ -7549,6 +7613,7 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 		if(cache_file_change_to_mmap_file(p_hot_cold_file_global,p_file_stat_base,file_type))
 			continue;
 #else
+		/*cache file_stat转成mmap file_stat，但是不会释放老的cache file_stat*/
 		if(is_cache_file && cache_file_change_to_mmap_file(p_hot_cold_file_global,p_file_stat_base,file_type))
 			goto next_file_stat_unlock;
 #endif	
@@ -7563,8 +7628,16 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 			goto next_file_stat_unlock;
 		}
 #else
-		if(FILE_STAT_TINY_SMALL == file_type && tiny_small_file_area_move_to_global_file_stat(p_hot_cold_file_global,p_file_stat_base,is_cache_file)){
-			goto next_file_stat_unlock;
+		if(FILE_STAT_TINY_SMALL == file_type /*&& tiny_small_file_area_move_to_global_file_stat(p_hot_cold_file_global,p_file_stat_base,is_cache_file)*/){
+			/*tiny_small_file_area_move_to_global_file_stat()里会把file_stat rcu异步释放掉，这里提前rcu_read_lock，
+			 * 等不再使用它时再rcu_read_unlock，然后该file_stat才会被真正释放掉。最后决定把rcu_read_lock()放到该
+			 * 函数里边的call_rcu()异步释放file_stat前边了，确保rcu_read_lock后不会有休眠*/
+			//rcu_read_lock();
+			//rcu_read_lock_flag = 1;
+			if(tiny_small_file_area_move_to_global_file_stat(p_hot_cold_file_global,p_file_stat_base,is_cache_file)){
+				rcu_read_lock_flag = 1;
+				goto next_file_stat_unlock;
+			}
 		}
 #endif
 
@@ -7572,15 +7645,28 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 		 * 函数里遍历该file_stat的file_area前边，以保证该文件的in_refault、in_hot、in_free属性的file_area都集中在tiny small->temp链表尾的64
 		 * file_area，后续即便大量新增file_area，都只在tiny small->temp链表头，详情见can_tiny_small_file_change_to_small_normal_file()注释*/
 		if(FILE_STAT_TINY_SMALL == file_type && unlikely(p_file_stat_base->file_area_count > SMALL_FILE_AREA_COUNT_LEVEL)){
+			/*can_tiny_small_file_change_to_small_normal_file()里会把file_stat rcu异步释放掉，这里提前rcu_read_lock，
+			 * 等不再使用它时再rcu_read_unlock，然后该file_stat才会被真正释放掉。最后决定把rcu_read_lock()放到该
+			 * 函数里边的call_rcu()异步释放file_stat前边了，确保rcu_read_lock后不会有休眠*/
+			//rcu_read_lock();
+			//rcu_read_lock_flag = 1;
+
 			p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
-			can_tiny_small_file_change_to_small_normal_file(p_hot_cold_file_global,p_file_stat_tiny_small,is_cache_file);
+			if(can_tiny_small_file_change_to_small_normal_file(p_hot_cold_file_global,p_file_stat_tiny_small,is_cache_file))
+				rcu_read_lock_flag = 1;
 		}
 		/* small文件的file_area个数如果超过阀值则转换成normal文件等。这个操作必须放到get_file_area_from_file_stat_list_common()
 		 * 函数里遍历该file_stat的file_area前边，以保证该文件的in_refault、in_hot、in_free属性的file_area都集中在small->other链表尾的640
 		 * 个file_area，后续即便大量新增file_area，都只在small->other链表头，详情见can_small_file_change_to_normal_file()注释*/
 		else if(FILE_STAT_SMALL == file_type && unlikely(p_file_stat_base->file_area_count > NORMAL_TEMP_FILE_AREA_COUNT_LEVEL)){
+			/*can_small_file_change_to_normal_file()里会把file_stat rcu异步释放掉，这里提前rcu_read_lock，
+			 * 等不再使用它时再rcu_read_unlock，然后该file_stat才会被真正释放掉*/
+			//rcu_read_lock();
+			//rcu_read_lock_flag = 1;
+
 			p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
-			can_small_file_change_to_normal_file(p_hot_cold_file_global,p_file_stat_small,is_cache_file);
+			if(can_small_file_change_to_normal_file(p_hot_cold_file_global,p_file_stat_small,is_cache_file))
+				rcu_read_lock_flag = 1;
 		}
 		else{
 			if(FILE_STAT_NORMAL == file_type){
@@ -7615,6 +7701,14 @@ next_file_stat:
 		 * 在下边list_move_enhance()失败，因为它是链表头的file_stat。如此导致file_stat长时间无法遍历到，对它内存回收*/
 		if(scan_file_area_count >= scan_file_area_max || ++scan_file_stat_count > scan_file_stat_max)
 			break;
+
+		/* rcu_read_lock_flag是1，说明tiny_small可能转成normal file_stat而被rcu异步释放掉了。但是由于提前rcu_read_lock了，
+		 * 不用担心file_stat会被立即释放掉。于是这里才rcu_read_unlock，然后file_stat才会被真正释放掉。
+		 * 到这里100%确保file_stat不会再被使用，再放开rcu，然后file_stat才会被真正释放掉*/
+		if(rcu_read_lock_flag){
+			rcu_read_lock_flag = 0;
+			rcu_read_unlock();
+		}
 	}
 	if(file_stat_delete_lock)
 		file_stat_delete_protect_test_unlock(1);
@@ -7711,6 +7805,12 @@ next_file_stat:
 			spin_unlock(&p_hot_cold_file_global->global_lock);
 		else
 			spin_unlock(&p_hot_cold_file_global->mmap_file_global_lock);
+	}
+	/* rcu_read_lock_flag是1，说明上边遍历的最后一个file_stat，可能由于tiny_small可能转成normal file_stat而被rcu异步释放掉了
+	 * 。但是由于提前rcu_read_lock了，不用担心file_stat会被立即释放掉。于是这里才rcu_read_unlock，然后file_stat才会被真正释放掉*/
+	if(rcu_read_lock_flag){
+		rcu_read_lock_flag = 0;
+		rcu_read_unlock();
 	}
 
 
