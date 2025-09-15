@@ -363,8 +363,19 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
      1:file_area的page被释放后，过了很长时间，file_area的page依然没人访问，则异步内存回收线程释放掉file_area结构，并把file_area从xarray tree剔除
      2:该文件被iput()释放inode了，mapping_exiting(maping)成立，此时执行到该函数也要把没有page的file_area从xarray tree剔除
     */
-	if(mapping_exiting(mapping))
-		xas_store(&xas, NULL);
+	if(mapping_exiting(mapping)){
+		void *old_entry = xas_store(&xas, NULL);
+
+		/* 可能存在一个并发，kswapd执行page_cache_delete_for_file_area()释放page，业务进程iput()释放文件执行 find_get_entries_for_file_area()
+		 * 二者都会xas_store(&xas, NULL)把file_area从xarray tree剔除，但是只有成功把file_area从xarry tree剔除，返回值old_entry
+		 * 非NULL，才能把file_area移动到global_file_stat.file_area_delete_list链表，依次防护重复把file_area移动到file_area_delete_list链表*/
+		if(p_file_area->mapping && old_entry && file_stat_in_global_base((struct file_stat_base *)mapping->rh_reserved1)){
+			/*p_file_area->mapping置NULL，表示该文件iput了，马上要释放inode和mapping了*/
+			p_file_area->mapping = 0;
+			//文件iput了，此时file_area一个page都没有，于是把file_area移动到global_file_stat.file_area_delete_list链表
+			move_file_area_to_global_delete_list((struct file_stat_base *)mapping->rh_reserved1,p_file_area);
+		}
+	}
 
 	/*清理xarray tree的dirty、writeback、towrite标记，重点!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!*/
 	xas_init_marks(&xas);
@@ -606,6 +617,9 @@ find_page_from_file_area:
 			goto next_page;
 			//break
 		}
+		if(!file_area_have_page(p_file_area))
+			panic("%s file_area:0x%llx folio:0x%llx page_offset_in_file_area:%d mapping:0x%llx_0x%llx file_area_have_page error\n",__func__,(u64)p_file_area,(u64)folio,page_offset_in_file_area,(u64)mapping,(u64)((folio)->mapping));
+
 		/*检测查找到的page是否正确，不是则crash*/
 		CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,mapping,folio,p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
 
@@ -682,8 +696,22 @@ find_page_from_file_area:
 		//if(!file_area_have_page(p_file_area) && mapping_exiting(mapping))
 		//	xas_store(&xas, NULL);
 		if(!file_area_have_page(p_file_area)){
-			if(mapping_exiting(mapping))
-				xas_store(&xas, NULL);
+			if(mapping_exiting(mapping)){
+				/*page_cache_delete_batch_for_file_area()函数会循环遍历多个file_area。为了不干扰原生的xas，重新定义一个xas_del
+				 *page_cache_delete_for_file_area不需要这样*/
+				XA_STATE(xas_del, &mapping->i_pages, p_file_area->start_index); 
+				void *old_entry = xas_store(&xas_del, NULL);
+
+				/* 可能存在一个并发，kswapd执行page_cache_delete_for_file_area()释放page，业务进程iput()释放文件执行 find_get_entries_for_file_area()
+				 * 二者都会xas_store(&xas, NULL)把file_area从xarray tree剔除，但是只有成功把file_area从xarry tree剔除，返回值old_entry
+				 * 非NULL，才能把file_area移动到global_file_stat.file_area_delete_list链表，依次防护重复把file_area移动到file_area_delete_list链表*/
+				if(p_file_area->mapping && old_entry && file_stat_in_global_base((struct file_stat_base *)mapping->rh_reserved1)){
+					/*p_file_area->mapping置NULL，表示该文件iput了，马上要释放inode和mapping了*/
+					p_file_area->mapping = 0;
+					/*文件iput了，此时file_area一个page都没有，于是把file_area移动到global_file_stat.file_area_delete_list链表*/
+					move_file_area_to_global_delete_list((struct file_stat_base *)mapping->rh_reserved1,p_file_area);
+				}
+			}
 
 #ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
 			/*file_stat tiny模式，为了节省内存把file_area->start_index成员删掉了。但是在file_area的page全释放后，
@@ -709,7 +737,7 @@ next_page:
 
 		/*如果file_area里还有page没遍历到，goto find_page_from_file_area去查找file_area里的下一个page。否则到for循环开头
 		 *xas_for_each()去查找下一个file_area，此时需要find_page_from_file_area清0，这个很关键*/
-		if(page_offset_in_file_area < PAGE_COUNT_IN_AREA){
+		if(page_offset_in_file_area < PAGE_COUNT_IN_AREA && file_area_have_page(p_file_area)){
 			/*page_offset_in_file_area加1不能放到这里，重大逻辑错误。比如，上边判断page_offset_in_file_area是3的folio，
 			 *然后执行到f(page_offset_in_file_area < PAGE_COUNT_IN_AREA)判断时，正常就应该不成立的，因为file_area的最后一个folio已经遍历过了*/
 			//page_offset_in_file_area ++;
@@ -3634,6 +3662,80 @@ retry:
 	//if (!folio || xa_is_value(folio))//注释掉，放到下边判断
 	//	return folio;
 	*p_file_area = entry_to_file_area(*p_file_area);
+
+	/* 重大bug，引入多层warm链表机制后，tiny small文件的file_area全都移动到global_file_stat链表，释放掉文件file_stat，隐患就此
+	 * 引入。这些文件在iput()释放时，因为file_stat早已经释放掉，无法在最后执行的__destroy_inode_handler_post函数里，把file_stat
+	 * 移动到global->delete链表，然后异步内存回收线程再从global->delete链表得到该file_stat，释放掉file_area。于是想了一个办法，
+	 * 在iput()截断文件pagecache必然执行truncate_inode_pages_range->find_lock_entries->find_get_entry_for_file_area 函数里，遇到
+	 * 0个page的file_area，则把file_area按照其file_area_delete成员移动到global_file_stat.file_area_delete_list链表，后续再有异步
+	 * 内存回收线程从global_file_stat.file_area_delete_list链表得到该file_area释放掉。正确情况，file_area都是以其file_area_list
+	 * 成员添加到file_stat->temp、refault、多层warm链表。为什么不按照file_area的file_area_list成员，把file_area移动到
+	 * global_file_stat.file_area_delete_list链表呢，防护并发问题。因此异步内存回收线程同时也会操作file_area的file_area_list成员
+	 * 令file_area在file_stat->temp、refault、多层warm链表之间来回移动。以上的种种思考，看似没有问题，实则埋入了好几大坑
+	 * 1：iput()截断文件pagecache执行到find_get_entry_for_file_area 函数，只把0个page的file_area移动到global_file_stat.file_area_delete_list
+	 * 链表。完全有可能file_area还有page呀，那就无法把file_area移动到global_file_stat.file_area_delete_list了。等该文件iput完成，
+	 * 释放掉inode，这些file_area依然留存在原来的file_stat->temp、refault、多层warm链表，file_area->mapping已无效，文件inode、mapping已经释放了
+	 * 2：即便iput()执行到find_get_entry_for_file_area 函数，遇到的都是0个page的file_area，都把这些file_area按照其file_area_delete成员
+	 * 移动到global_file_stat.file_area_delete_list链表。然后iput()释放掉文件inode。但这些file_area依然按照其file_area_list成员
+	 * 存在于file_stat->temp、refault、多层warm链表呀，但是这些file_area->mapping无效，因为文件inode、mapping已经释放了
+	 *
+	 * 这两种情况都会导致一个严重的后果，就是文件inode、mapping已经释放了，但是之前属于这个文件的file_area依然留存于
+	 * file_stat->temp、refault、多层warm链表，这些file_area->mapping已经无效。等这些file_area因常见没访问而执行cold_file_area_delete()，
+	 * 在该函数里，这些file_area此时肯定一个page都没有，因为该文件已经iput()释放了所有page。于是按照file_area->start_index从
+	 * file_area->mapping指向的radix/xarray tree搜索file_area，然后执行 xas_store(xas，NULL)把搜索到的file_area从radix/xarray tree
+	 * 剔除。就会出大问题，如果此时file_area->mapping指向的mapping内存，已经被其他slab内存分配，比如xfs_inode，dentry，xas_store(xas，NULL)
+	 * 就是完全的无效内存操作了，会篡改xfs_inode，dentry内存里的数据，出现不可预料的问题。它TM容易出非法内存越界了，无语了。
+	 * 如果file_area->mapping指向的mapping内存，比如mapping1，又被新的文件inode2、mapping2分配了。假设file_area->start_index是0。则
+	 * cold_file_area_delete()时，xas_store(xas，NULL)就是按照索引0从xarry tree剔除mapping2的file_area0了。相当于错误把正在使用的
+	 * inode2、mapping2，从xarray tree剔除了索引是0的file_area0。如果该file_area0还有page，如此inode2在iput()文件截断时，就无法从
+	 * xarray tree搜索到file_area0了，也无法释放file_area0里边的page，后果就是iput()执行到evit()->clear_inode()，BUG_ON(inode->i_data.nrpages)
+	 * 因为该inode的还有page，于是报错kernel BUG at fs/inode.c:606 而crash
+	 *
+	 * 怎么解决？
+	 * 1:因为iput()截断文件pagecache执行到find_get_entry_for_file_area 函数，只把0个page的file_area移动到global_file_stat.file_area_delete_list，
+	 * 针对还有page的file_area，最后肯定执行page_cache_delete_batch或page_cache_delete，释放掉page。于是要在这两个函数里
+	 * 把file_area移动到global_file_stat.file_area_delete_list链表，标记file_area->mapping=NULL。不用担心二者会跟异步内存回收
+	 * 线程的cold_file_area_delete()形成并发，因为只有file_area有page时才会执行这两个delete函数，释放page。因为file_area有page，
+	 * 异步内存回收线程执行到cold_file_area_delete()最开头就会return，因为file_area还有page，肯定不能释放掉file_area。并且，两个delete
+	 * 函数，释放file_area的page时，全程xas_lock加锁。而等二者释放掉page，因为此时iput()文件，mapping_exiting成立，会直接
+	 * xas_store(xas,NULL)把file_area从xarray tree剔除，然后把file_area移动到global_file_stat.file_area_delete_list链表，再标记
+	 * file_area->mapping=NULL。。而等异步内存回收线程获得xas_lock锁，xas_store(xas,NULL)返回NULL，就不会在cold_file_area_delete()
+	 * 里释放file_area了。因为file_area已经移动到global_file_stat.file_area_delete_list链表，后续走cold_file_area_delete_quick()释放。
+	 *
+	 * 是否还存在其他并发问题呢？
+	 * 1.1 iput()执行的find_get_entry_for_file_area()可能会跟kswapd内存回收执行的page_cache_delete()并发，把
+	 * file_area移动到global_file_stat.file_area_delete_list链表，因为find_get_entry_for_file_area()里不是全程xas_lock加锁。
+	 * 二者的并发就要靠global_file_stat.file_area_delete_lock加锁防护：先global_file_stat.file_area_delete_lock加锁，然后
+	 * 判断file_area是否有in_mapping_delete标记，没有再把file_area移动到lobal_file_stat.file_area_delete_list链表，接着
+	 * 设置file_area的in_mapping_delete标记。如果已经有了in_mapping_delete标记，就不再移动file_area了。
+	 * 1.2 iput()执行的find_get_entry_for_file_area()标记file_area的in_mapping_delete标记，跟异步内存回收线程里
+	 * cold_file_area_delete()释放该file_area，存在并发。这个没问题，这两个函数原始设计，就考虑了二者的并发，find_get_entry_for_file_area()
+	 * 里标记file_area->mapping=NULL,以及xas_lock加锁后old_entry = xas_store(&xas_del, NULL)，old_entry非NULL才会把file_area
+	 * 移动到global_file_stat.file_area_delete_list链表。cold_file_area_delete()函数里，if(NULL == file_area->mapping)直接return。
+	 * 然后xas_lock加锁后old_entry = xas_store(&xas_del, NULL)，old_entry非NULL才会释放掉file_area结构。详细原理看
+	 * cold_file_area_delete()上方的注释。
+	 *
+	 * 感慨，并发无处不在，并发问题太麻烦了。要发挥想象力，想象潜在的并发问题。
+	 *
+	 * 2:凡是移动到global_file_stat.file_area_delete_list链表的file_area,标记file_area->mapping=NULL后，还要标记file_area的
+	 * in_mapping_delete标记，说明该文件iput了，inode释放了。此时该file_area一方面靠其file_area_delete成员添加到
+	 * global_file_stat.file_area_delete_list链表，还靠file_area的file_area_list成员留存于file_stat->temp、free、warm等链表。
+	 * 一个file_area同时处于两个链表就很危险。一方面，异步内存回收线程遍历global_file_stat.file_area_delete_list链表上的file_area
+	 * 并cold_file_area_delete_quick()释放时，除了要把file_area从global_file_stat.file_area_delete_list链表剔除，还要把file_area
+	 * 从file_stat->temp、free、warm等链表剔除。另一方面，异步内存回收线程从file_stat->temp、free、warm等链表遍历到有
+	 * in_mapping_delete标记的file_area，要直接从file_stat->temp、free、warm等链表剔除，因为这个file_area此时还处于
+	 * global_file_stat.file_area_delete_list链表。
+	 * 
+	 * 总之，一个被iput()的文件的file_area，必须立即被异步内存回收线程感知到，不能再用file_area->mapping的mapping去xas_store(xas,NULL)
+	 * 从xarray tree剔除page。这个mapping可能已经新的文件的，那就错误把新的文件的file_area错误xarray tree剔除了。如果mapping内存
+	 * 被其他slab内存分配走了，那xas_store(xas,NULL)就是内存踩踏了。
+	 *
+	 * 3:最后一点，find_get_entry_for_file_area 把file_area移动到global_file_stat.file_area_delete_list链表时，要先防护
+	 * if(file_area->mapping != NULL)判断file_area->mapping是否是NULL，因为iput()过程，可能会多次执行find_get_entry_for_file_area()，
+	 * 如果不过if(file_area->mapping != NULL)防护，就会把file_area多次list_add到global_file_stat.file_area_delete_list链表，如此就会扰乱该链表上的file_area
+	 *
+	 * */
+
 	/*当文件iput()后，执行该函数，遇到没有file_area的page，则要强制把xarray tree剔除。原因是：
 	 * iput_final->evict->truncate_inode_pages_final->truncate_inode_pages->truncate_inode_pages_range->find_lock_entries
 	 *调用到该函数，mapping_exiting(mapping)成立。当遇到没有page的file_area，要强制执行xas_store(&xas, NULL)把file_area从xarray tree剔除。
@@ -3641,7 +3743,8 @@ retry:
 	 *truncate_inode_pages_range后，因为fbatch->folios[]数组没有保存该file_area的page，则不会执行
 	 *delete_from_page_cache_batch(mapping, &fbatch)->page_cache_delete_batch()，把这个没有page的file_area从xarray tree剔除。于是只能在
 	 *truncate_inode_pages_range->find_lock_entries调用到该函数时，遇到没有page的file_area，强制把file_area从xarray tree剔除了*/
-	if(!file_area_have_page(*p_file_area) && mapping_exiting(mapping)){
+	//if(!file_area_have_page(*p_file_area) && mapping_exiting(mapping)){
+	if((*p_file_area)->mapping && !file_area_have_page(*p_file_area) && mapping_exiting(mapping)){
 		/*为了不干扰原有的xas，重新定义一个xas_del*/
 #ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
 		XA_STATE(xas_del, &mapping->i_pages, get_file_area_start_index(*p_file_area));
@@ -3679,10 +3782,21 @@ retry:
 		 * 是NULL，说明该file_area已经被异步内存回收线程释放了，那这里就不能再把file_area移动到
 		 * global_file_stat.file_area_delete_list链表了。*/
 		if(old_entry && file_stat_in_global_base((struct file_stat_base *)mapping->rh_reserved1)){
-			if(file_stat_in_cache_file_base((struct file_stat_base *)mapping->rh_reserved1))
-				list_move(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_file_stat.file_area_delete_list);
-			else
-				list_move(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_list);
+			/*if(file_stat_in_cache_file_base((struct file_stat_base *)mapping->rh_reserved1)){
+				spin_lock(&hot_cold_file_global_info.global_file_stat.file_area_delete_lock);
+				// 写代码稍微不过脑子就犯了错，file_area->file_area_delete的next和prev来自file_area->page[0/1]，默认是0，
+				// 根本就没有添加到其他链表，故不能用list_move，而是list_add，首次添加到其他链表用list_add
+				//list_move(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_file_stat.file_area_delete_list);
+				list_add(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_file_stat.file_area_delete_list);
+				spin_unlock(&hot_cold_file_global_info.global_file_stat.file_area_delete_lock);
+			}
+			else{
+				spin_lock(&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_lock);
+				//list_move(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_list);
+				list_add(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_list);
+				spin_unlock(&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_lock);
+			}*/
+			move_file_area_to_global_delete_list((struct file_stat_base *)mapping->rh_reserved1,*p_file_area);
 		}else{
 			/* 对p_file_area->file_area_delete链表赋值NULL,表示该file_area没有被移动到global_file_stat.file_area_delete_list链表。有问题，
 			 * 到这里就不能再对file_area赋值了，因为file_area可能被异步内存回收线程释放了。错了有rcu_read_lock防护不用担心file_area

@@ -1605,6 +1605,8 @@ static void global_file_stat_init(void)
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_area_warm_cold);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_area_mapcount);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_area_delete_list);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.file_area_delete_list_temp);
+	spin_lock_init(&hot_cold_file_global_info.global_file_stat.file_area_delete_lock);
 
 
 
@@ -1625,9 +1627,12 @@ static void global_file_stat_init(void)
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_area_warm_cold);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_area_mapcount);
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_list);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_list_temp);
+	spin_lock_init(&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_lock);
 }
 static int __init hot_cold_file_init(void)
 {
+	int i;
 	hot_cold_file_global_info.file_area_cachep = kmem_cache_create("file_area",sizeof(struct file_area),0,0,NULL);
 	
 	hot_cold_file_global_info.file_stat_cachep = kmem_cache_create("file_stat",sizeof(struct file_stat),0,0,NULL);
@@ -1723,10 +1728,13 @@ static int __init hot_cold_file_init(void)
 
 	global_file_stat_init();
 
-	INIT_LIST_HEAD(&hot_cold_file_global_info.current_scan_file_stat_info.temp_head);
-	INIT_LIST_HEAD(&hot_cold_file_global_info.current_scan_mmap_file_stat_info.temp_head);
-    hot_cold_file_global_info.current_scan_file_stat_info.traverse_file_stat_type = FILE_STAT_CACHE_FILE;
-    hot_cold_file_global_info.global_mmap_file_stat.traverse_file_stat_type = FILE_STAT_MMAP_FILE;
+	for(i = 0;i < CURRENT_SCAN_FILE_STAT_INFO_MAX;i ++){
+		INIT_LIST_HEAD(&hot_cold_file_global_info.current_scan_file_stat_info[i].temp_head);
+		INIT_LIST_HEAD(&hot_cold_file_global_info.current_scan_mmap_file_stat_info[i].temp_head);
+
+		hot_cold_file_global_info.current_scan_file_stat_info[i].traverse_file_stat_type = i;
+		hot_cold_file_global_info.current_scan_mmap_file_stat_info[i].traverse_file_stat_type = CURRENT_SCAN_FILE_STAT_INFO_MAX + i;
+	}
 
 
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_file_stat.current_scan_file_stat_info.temp_head);
