@@ -361,7 +361,7 @@ static inline int cold_file_area_delete_lock(struct hot_cold_file_global *p_hot_
 
 	smp_mb();
 	if(0 == p_file_area->mapping){
-        rcu_read_unlock();
+		rcu_read_unlock();
 		return -1;
 	}
 	if(is_global_file_stat)
@@ -403,7 +403,7 @@ static inline int cold_file_area_delete_lock(struct hot_cold_file_global *p_hot_
 	}
 #ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
 	/*p_file_area->pages[0/1]的bit63必须是file_area的索引，非0。而p_file_area->pages[2/3]必须是0，否则crash 
-	* 最新方案，file_area->pages[0/1]不是file_area_inde也不是shadow时，才会触发crash。file_area->pages[2/3]可能是NULL或者shasow，其他情况触发crash*/
+	 * 最新方案，file_area->pages[0/1]不是file_area_inde也不是shadow时，才会触发crash。file_area->pages[2/3]可能是NULL或者shasow，其他情况触发crash*/
 	//if(!folio_is_file_area_index(p_file_area->pages[0]) || !folio_is_file_area_index(p_file_area->pages[1]) || p_file_area->pages[2] || p_file_area->pages[3]){
 	if(!folio_is_file_area_index_or_shadow(p_file_area->pages[0]) || !folio_is_file_area_index_or_shadow(p_file_area->pages[1]) 
 			|| (p_file_area->pages[2] && !(file_area_shadow_bit_set & (u64)(p_file_area->pages[2]))) || (p_file_area->pages[3] && !(file_area_shadow_bit_set & (u64)(p_file_area->pages[3])))){
@@ -453,10 +453,13 @@ static inline int cold_file_area_delete_lock(struct hot_cold_file_global *p_hot_
 	if((NULL == old_file_area))
 	{
 		//if(mapping_exiting(p_file_stat_base->mapping))
-		if(mapping_exiting(mapping))
-		    pr_warn("%s file_stat:0x%llx file_area:0x%llx find folio error:%ld\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,xas.xa_index);
+		if(mapping_exiting(mapping)){
+			pr_warn("%s file_stat:0x%llx file_area:0x%llx find folio error:%ld\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,xas.xa_index);
+			if(NULL != p_file_area->mapping)
+				panic("%s file_stat:0x%llx file_area:0x%llx index:%ld mapping != NULL\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,xas.xa_index);
+		}	
 		else
-		    panic("%s file_stat:0x%llx file_area:0x%llx find folio error:%ld\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,xas.xa_index);
+			panic("%s file_stat:0x%llx file_area:0x%llx find folio error:%ld\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,xas.xa_index);
 	}
 
 	if (xas_error(&xas)){
@@ -496,7 +499,7 @@ static inline int cold_file_area_delete_lock(struct hot_cold_file_global *p_hot_
 	 * 否则会double free。后续异步内存回收线程会cold_file_area_delete_quick()释放该file_area.*/
 	if(old_file_area){
 		call_rcu(&p_file_area->i_rcu, i_file_area_callback);
-	    //set_file_area_in_deleted(p_file_area);
+		//set_file_area_in_deleted(p_file_area);
 	}else
 		printk("%s file_area:0x%llx delete fail !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area);
 
@@ -5765,9 +5768,25 @@ static unsigned int direct_recliam_file_area_for_global_file_stat(struct hot_col
 
 	/* 如果global_file_stat正在遍历file_area_writeonly_or_cold或file_area_warm_cold链表上的file_area，p_traverse_file_area_list_head
 	 * 指向它们，下边cold_file_isolate_lru_pages_and_shrink()会list_move p_traverse_first_file_area 指向的file_area到其他链表，也会
-	 * list_movep_traverse_file_area_list_head指向的链表上的file_area到其他链表，此时必须把p_traverse_first_file_area设置NULL。
+	 * list_move p_traverse_file_area_list_head指向的链表上的file_area到其他链表，此时必须把p_traverse_first_file_area设置NULL。
 	 * 下个周期从p_traverse_file_area_list_head指向的链表尾开始遍历，不能从p_traverse_first_file_area指向的file_area开始遍历，因为
-	 * 这个file_area已经从被移动到其他链表了，不属于p_traverse_file_area_list_head指向的链表了*/
+	 * 这个file_area已经从被移动到其他链表了，不属于p_traverse_file_area_list_head指向的链表了
+	 * 举个例子，本轮内存回收周期，遍历了global_file_stat的writeonly链表上的file_area，因遍历的file_area个数超过max而导致
+	 * 遍历结束。此时p_traverse_first_file_area指向global_file_stat->writeonly链表尾的file_area，p_traverse_file_area_list_head
+	 * 指向global_file_stat->writeonly链表头。因为内存紧张而执行该函数回收global_file_stat的writeonly和warm_cold链表上的
+	 * file_area的page，回收过后把这些file_area移动到global_file_stat的file_area_free链表。下个周期，继续遍历global_file_stat
+	 * 的writeonly链表尾的file_area，因为p_traverse_first_file_area不为NULL，于是从p_traverse_first_file_area指向的file_area
+	 * 向前遍历，而这个file_area此时处于global_file_stat->file_area_free链表。实际情况此时遍历的就是该链表上的file_area，
+	 * 则这些file_area来自warm或warm_cold链表，或者warm_list_num是0，而当前遍历的是global_file_stat->writeonly链表的file_area，
+	 * 自然会因为遍历的file_area的编号warm_list_num跟当前遍历的writeonly链表号不一致而crash。解决办法很简单，
+	 * 及时把p_traverse_first_file_area清NULL，下个周期直接从writeonly链表尾取file_area即可。
+	 * 有一点需要注意，现在将writeonly或warm_cold链表的file_area移动到file_area_free链表时，还有file_area移动到hot链表，
+	 * 都没有清理掉该file_area的warm_list_num，这就导致一旦原本遍历warm的各个file_area链表时，错误遍历到hot或者free链表
+	 * ，因为没有清理掉file_area老的warm_list_num，错误以为当前遍历的file_area的warm_list_num编号跟当前遍历的warm链表一致
+	 * 不能立即panic。我认为有必要warm等链表的file_area移动到hot或free链表时，必须清理掉file_area的warm_list_num为-1。还有
+	 * 一点，当前还有一个crash:遍历writeonly文件warm链表的file_area时，正常file_area的warm_list_num是0，现在链表尾的file_area
+	 * 却是1，1是writeonly链表编号，于是出发panic。目前根本原因还无法确定，但有可能是同一个问题。
+	 */
 	if(p_current_scan_file_stat_info->p_traverse_file_area_list_head == &p_global_file_stat->file_stat.file_area_writeonly_or_cold ||
 			p_current_scan_file_stat_info->p_traverse_file_area_list_head == &p_global_file_stat->file_area_warm_cold){
 		//p_current_scan_file_stat_info->p_traverse_file_stat = NULL;

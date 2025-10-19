@@ -369,11 +369,21 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
 		/* 可能存在一个并发，kswapd执行page_cache_delete_for_file_area()释放page，业务进程iput()释放文件执行 find_get_entries_for_file_area()
 		 * 二者都会xas_store(&xas, NULL)把file_area从xarray tree剔除，但是只有成功把file_area从xarry tree剔除，返回值old_entry
 		 * 非NULL，才能把file_area移动到global_file_stat.file_area_delete_list链表，依次防护重复把file_area移动到file_area_delete_list链表*/
-		if(p_file_area->mapping && old_entry && file_stat_in_global_base((struct file_stat_base *)mapping->rh_reserved1)){
-			/*p_file_area->mapping置NULL，表示该文件iput了，马上要释放inode和mapping了*/
-			p_file_area->mapping = 0;
-			//文件iput了，此时file_area一个page都没有，于是把file_area移动到global_file_stat.file_area_delete_list链表
-			move_file_area_to_global_delete_list((struct file_stat_base *)mapping->rh_reserved1,p_file_area);
+		if(/*p_file_area->mapping && old_entry && */file_stat_in_global_base((struct file_stat_base *)mapping->rh_reserved1)){
+			/*该函数全程xas_lock加锁，并且最开头可以从xarray tree查找到file_area，这里不可能从xarray tree查不到file_area*/
+			if(!old_entry)
+				panic("%s mapping:0x%llx p_file_area:0x%llx file_area_state:0x%x error old_entry NULL\n",__func__,(u64)mapping,(u64)p_file_area,p_file_area->file_area_state);
+			/*可能并发iput()执行find_get_entry_for_file_area()把file_area->mapping置NULL了，这个没有xas_lock加锁防护*/
+			if(p_file_area->mapping){
+				/*p_file_area->mapping置NULL，表示该文件iput了，马上要释放inode和mapping了*/
+				p_file_area->mapping = 0;
+				/*这个写屏障保证异步内存回收线程cold_file_area_delete()函数里，立即看到file_area->mapping是NULL*/
+				smp_wmb();
+				//文件iput了，此时file_area一个page都没有，于是把file_area移动到global_file_stat.file_area_delete_list链表
+				move_file_area_to_global_delete_list((struct file_stat_base *)mapping->rh_reserved1,p_file_area);
+			}else{
+				printk("%s file_area:0x%llx mapping NULL\n",__func__,(u64)p_file_area);
+			}
 		}
 	}
 
@@ -705,11 +715,21 @@ find_page_from_file_area:
 				/* 可能存在一个并发，kswapd执行page_cache_delete_for_file_area()释放page，业务进程iput()释放文件执行 find_get_entries_for_file_area()
 				 * 二者都会xas_store(&xas, NULL)把file_area从xarray tree剔除，但是只有成功把file_area从xarry tree剔除，返回值old_entry
 				 * 非NULL，才能把file_area移动到global_file_stat.file_area_delete_list链表，依次防护重复把file_area移动到file_area_delete_list链表*/
-				if(p_file_area->mapping && old_entry && file_stat_in_global_base((struct file_stat_base *)mapping->rh_reserved1)){
-					/*p_file_area->mapping置NULL，表示该文件iput了，马上要释放inode和mapping了*/
-					p_file_area->mapping = 0;
-					/*文件iput了，此时file_area一个page都没有，于是把file_area移动到global_file_stat.file_area_delete_list链表*/
-					move_file_area_to_global_delete_list((struct file_stat_base *)mapping->rh_reserved1,p_file_area);
+				if(/*p_file_area->mapping && old_entry && */file_stat_in_global_base((struct file_stat_base *)mapping->rh_reserved1)){
+					/*该函数全程xas_lock加锁，并且最开头可以从xarray tree查找到file_area，这里不可能从xarray tree查不到file_area*/
+					if(!old_entry)
+						panic("%s mapping:0x%llx p_file_area:0x%llx file_area_state:0x%x error old_entry NULL\n",__func__,(u64)mapping,(u64)p_file_area,p_file_area->file_area_state);
+					/*可能并发iput()执行find_get_entry_for_file_area()把file_area->mapping置NULL了，这个没有xas_lock加锁防护*/
+					if(p_file_area->mapping){
+						/*p_file_area->mapping置NULL，表示该文件iput了，马上要释放inode和mapping了*/
+						p_file_area->mapping = 0;
+						/*这个写屏障保证异步内存回收线程cold_file_area_delete()函数里，立即看到file_area->mapping是NULL*/
+						smp_wmb();
+						/*文件iput了，此时file_area一个page都没有，于是把file_area移动到global_file_stat.file_area_delete_list链表*/
+						move_file_area_to_global_delete_list((struct file_stat_base *)mapping->rh_reserved1,p_file_area);
+					}else{
+						printk("%s file_area:0x%llx mapping NULL\n",__func__,(u64)p_file_area);
+					}
 				}
 			}
 
@@ -3730,10 +3750,27 @@ retry:
 	 * 从xarray tree剔除page。这个mapping可能已经新的文件的，那就错误把新的文件的file_area错误xarray tree剔除了。如果mapping内存
 	 * 被其他slab内存分配走了，那xas_store(xas,NULL)就是内存踩踏了。
 	 *
-	 * 3:最后一点，find_get_entry_for_file_area 把file_area移动到global_file_stat.file_area_delete_list链表时，要先防护
+	 * 3:还有一点，find_get_entry_for_file_area 把file_area移动到global_file_stat.file_area_delete_list链表时，要先防护
 	 * if(file_area->mapping != NULL)判断file_area->mapping是否是NULL，因为iput()过程，可能会多次执行find_get_entry_for_file_area()，
 	 * 如果不过if(file_area->mapping != NULL)防护，就会把file_area多次list_add到global_file_stat.file_area_delete_list链表，如此就会扰乱该链表上的file_area
 	 *
+	 * 最后，再总结一下3处并发
+	 * 1:iput()文件执行find_get_entries_for_file_area()跟异步内存回收线程执行cold_file_area_delete()的并发，这个已说过多次
+	 * 2:iput()文件执行find_get_entries_for_file_area()跟kswapd内存回收执行page_cache_delete()的并发，二者都会把
+	 * p_file_area->mapping置NULL，且把file_area移动到global_file_stat_delete链表。不会并发执行，kswapd内存回收先xas_lock，再
+	 * 执行page_cache_delete()，此时file_area一定有page，iput()执行到find_get_entry_for_file_area()，因为file_area有page
+	 * 就不会把file_area移动到global_file_stat_delete链表。况且，把file_area移动到global_file_stat_delete链表执行的
+	 * move_file_area_to_global_delete_list()函数，已经防护了file_area重复移动到global_file_stat_delete链表。写代码就得
+	 * 这样，得想办法从源头防护，从底层防护
+	 * 3:异步内存回收线程执行cold_file_area_delete()跟kswapd内存回收执行page_cache_delete()的并发，前者把file_area移动到
+	 * global_file_stat_delete链表，后者会释放掉file_area。二者不存在方法，因为前者是xas_lock，再执行page_cache_delete()，
+	 * 此时file_area一定有page，而异步内存回收线程执行cold_file_area_delete()后，xas_lock后，因为file_area有page就直接
+	 * return了。不对，有个潜在大隐患，page_cache_delete()后，mapping可能就被释放了呀，此时cold_file_area_delete()
+	 * 里，xas_lock(mapping)，mapping就可能释放了呀，这是非法内存访问!不会，因为page_cache_delete()流程是
+	 * xas_lock(mapping);file_area->mapping=NULL;smp_wmb();把file_area移动到global_file_stat_delete链表;释放mapping。
+	 * cold_file_area_delete()流程是rcu_read_lock();if(file_area->mapping == NULL) return;xas_lock(mapping);
+	 * if(file_area_have_page)return。有了rcu防护，cold_file_area_delete()里xas_lock(mapping)不用担心mapping
+	 * 被释放，这个跟并发1细节一样。
 	 * */
 
 	/*当文件iput()后，执行该函数，遇到没有file_area的page，则要强制把xarray tree剔除。原因是：
@@ -3766,6 +3803,11 @@ retry:
 		smp_wmb();
 		/*需要用文件xarray tree的lock加锁，因为xas_store()操作必须要xarray tree加锁*/
 		xas_lock_irq(&xas_del);
+		/*正常情况这里不可能成立，因为此时文件inode处于iput()，不会有进程访问产生新的page。
+		  况且上边已经做了if(!file_area_have_page(*p_file_area))防护，以防万一还是spin_lock
+		  加锁再防护一次，防止此时有进程并发读写该文件导致file_area分配了新的page*/
+		if(file_area_have_page(*p_file_area))
+			panic("%s file_area:0x%llx have page\n",__func__,(u64)p_file_area);
 		old_entry = xas_store(&xas_del, NULL);
 		xas_unlock_irq(&xas_del);
 
@@ -3781,7 +3823,7 @@ retry:
 		 * 为了防护这个并发问题，主要使用上边的xas_lock_irq()加锁，从xrray tree遍历该file_area，如果返回值old_entry
 		 * 是NULL，说明该file_area已经被异步内存回收线程释放了，那这里就不能再把file_area移动到
 		 * global_file_stat.file_area_delete_list链表了。*/
-		if(old_entry && file_stat_in_global_base((struct file_stat_base *)mapping->rh_reserved1)){
+		if(/*old_entry && */file_stat_in_global_base((struct file_stat_base *)mapping->rh_reserved1)){
 			/*if(file_stat_in_cache_file_base((struct file_stat_base *)mapping->rh_reserved1)){
 				spin_lock(&hot_cold_file_global_info.global_file_stat.file_area_delete_lock);
 				// 写代码稍微不过脑子就犯了错，file_area->file_area_delete的next和prev来自file_area->page[0/1]，默认是0，
@@ -3796,7 +3838,16 @@ retry:
 				list_add(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_list);
 				spin_unlock(&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_lock);
 			}*/
-			move_file_area_to_global_delete_list((struct file_stat_base *)mapping->rh_reserved1,*p_file_area);
+			if(old_entry)
+			    move_file_area_to_global_delete_list((struct file_stat_base *)mapping->rh_reserved1,*p_file_area);
+			else{
+				/*如果old_entry是NULL，但file_area->mapping不是NULL则panic。不可能，因为上边已经清NULL了*/
+				/*if(NULL != (*p_file_area)->mapping)
+					panic("%s file_area:0x%llx file_area mapping NULL\n",__func__,(u64)p_file_area);*/
+				
+				printk("%s file_area:0x%llx old_entry NULL\n",__func__,(u64)p_file_area);
+			}
+				
 		}else{
 			/* 对p_file_area->file_area_delete链表赋值NULL,表示该file_area没有被移动到global_file_stat.file_area_delete_list链表。有问题，
 			 * 到这里就不能再对file_area赋值了，因为file_area可能被异步内存回收线程释放了。错了有rcu_read_lock防护不用担心file_area
