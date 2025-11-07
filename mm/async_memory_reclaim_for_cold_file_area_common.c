@@ -526,7 +526,7 @@ static const struct proc_ops open_print_important_fops = {
 };
 
 //file_stat_debug_or_make_backlist
-static int print_file_stat_one_file_area_info(struct seq_file *m,struct list_head *file_area_list_head,unsigned int file_area_type,char *file_area_list_name,char is_proc_print)
+static int print_file_stat_one_file_area_info(struct seq_file *m,struct list_head *file_area_list_head,unsigned int file_area_type,char *file_area_list_name,char is_proc_print,char file_area_from_multi_warm_list)
 {
 	struct file_area *p_file_area = NULL;
 	struct file_area *p_file_area_last = NULL;
@@ -563,15 +563,21 @@ static int print_file_stat_one_file_area_info(struct seq_file *m,struct list_hea
 	 * 链表上的file_area参与内存，会移动到file_area_free临时链表，情况很复杂。没有好办法，感觉
 	 * 需要该函数标记file_stat的in_print标记，然后禁止该file_stat的file_area跨链表移动???????????*/
 	list_for_each_entry_reverse(p_file_area,file_area_list_head,file_area_list){
-		/*遍历file_stat_small->other链表上的file_area，同时具备refault、hot、free、mapcount属性，有一个都成立*/
-		//if(get_file_area_list_status(p_file_area) != file_area_type)
-		if((get_file_area_list_status(p_file_area) & file_area_type) == 0){
-			if(is_proc_print)
-				seq_printf(m,"%s invalid file_area:0x%llx state:0x%x!!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
-			else
-				printk("%s invalid file_area:0x%llx state:0x%x!!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+		if(0 == file_area_from_multi_warm_list){
+			/*遍历file_stat_small->other链表上的file_area，同时具备refault、hot、free、mapcount属性，有一个都成立*/
+			//if(get_file_area_list_status(p_file_area) != file_area_type)
+			if((get_file_area_list_status(p_file_area) & file_area_type) == 0){
+				pr_warn("%s invalid file_area:0x%llx state:0x%x!!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+				if(is_proc_print)
+					seq_printf(m,"%s invalid file_area:0x%llx state:0x%x!!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+				else
+					printk("%s invalid file_area:0x%llx state:0x%x!!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 
-			break;
+				break;
+			}
+		}else{
+			if(list_num_get(p_file_area) != file_area_type)
+				pr_warn("%s invalid num file_area:0x%llx state:0x%x!!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 		}
 
 		if(p_file_area->file_area_age > hot_cold_file_global_info.global_age){
@@ -613,6 +619,7 @@ static int file_stat_debug_or_make_backlist(struct seq_file *m,char is_proc_prin
 	struct file_stat_base *p_file_stat_base;
 	unsigned int file_stat_type;
 	int ret = 0;
+	char file_stat_in_global;
 
 	/* 取出file_stat并打印该文件的所有file_area。但是有两个并发场景需要注意，
 	 * 1:该文件inode被并发iput()释放了，要防止
@@ -622,6 +629,8 @@ static int file_stat_debug_or_make_backlist(struct seq_file *m,char is_proc_prin
 	rcu_read_lock();
 	smp_rmb();
 	p_file_stat_base = hot_cold_file_global_info.print_file_stat;//这个赋值留着，有警示作用
+	
+	file_stat_in_global = file_stat_in_global_base(p_file_stat_base);
 
 	/* 不能使用p_file_stat_base判断该file_stat是否被异步内存回收线程cold_file_stat_delete()里标记NULL。
 	 * 存在极端情况，这里"p_file_stat_base = hot_cold_file_global_info.print_file_stat"赋值后，异步内存
@@ -653,7 +662,8 @@ static int file_stat_debug_or_make_backlist(struct seq_file *m,char is_proc_prin
 		goto err;
 	}
 
-	if((u64)p_file_stat_base != p_file_stat_base->mapping->rh_reserved1){
+	/*global_file_stat->mapping非法*/
+	if(!file_stat_in_global && (u64)p_file_stat_base != p_file_stat_base->mapping->rh_reserved1){
 		if(is_proc_print)
 			seq_printf(m, "invalid file_stat:0x%llx 0x%lx\n",(u64)p_file_stat_base,p_file_stat_base->mapping->rh_reserved1);
 		else
@@ -668,26 +678,36 @@ static int file_stat_debug_or_make_backlist(struct seq_file *m,char is_proc_prin
 	else				
 		printk("file_stat:0x%llx\n",(u64)p_file_stat_base);
 
-	file_stat_type = get_file_stat_type(p_file_stat_base);
-	print_file_stat_one_file_area_info(m,&p_file_stat_base->file_area_temp,1 << F_file_area_in_temp_list,"temp list",1);
+	if(file_stat_in_global)
+		file_stat_type = FILE_STAT_NORMAL;
+	else
+		file_stat_type = get_file_stat_type(p_file_stat_base);
+
+	print_file_stat_one_file_area_info(m,&p_file_stat_base->file_area_temp,1 << F_file_area_in_temp_list,"temp list",1,0);
 
 	if(FILE_STAT_SMALL == file_stat_type){
 		unsigned int file_area_type = (1 << F_file_area_in_hot_list) | (1 << F_file_area_in_refault_list)| (1 << F_file_area_in_mapcount_list) | (1 << F_file_area_in_free_list);
 		struct file_stat_small *p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
 
-		print_file_stat_one_file_area_info(m,&p_file_stat_small->file_area_other,file_area_type,"other list",1);
+		print_file_stat_one_file_area_info(m,&p_file_stat_small->file_area_other,file_area_type,"other list",1,0);
 	}else if(FILE_STAT_NORMAL == file_stat_type){
 		struct file_stat *p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
 
-		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_refault,1 << F_file_area_in_refault_list,"refault list",1);
+		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_refault,1 << F_file_area_in_refault_list,"refault list",1,0);
+		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_free,1 << F_file_area_in_free_list,"free list",1,0);
+		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_hot,1 << F_file_area_in_hot_list,"hot list",1,0);
 
-		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_hot,1 << F_file_area_in_hot_list,"hot list",1);
-		//print_file_stat_one_file_area_info(m,&p_file_stat->file_area_warm,1 << F_file_area_in_warm_list,"warm list",1);
-		//print_file_stat_one_file_area_info(m,&p_file_stat->file_area_mapcount,1 << F_file_area_in_mapcount_list,"mapcount list",1);
-		//print_file_stat_one_file_area_info(m,&p_file_stat->file_area_warm_cold,0,"warm_cold list",1);
-		//print_file_stat_one_file_area_info(m,&p_file_stat->file_area_writeonly_or_cold,0,"writeonly_cold list",1);
+		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_warm_hot,POS_WARM_HOT,"warm_hot list",1,1);
+		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_warm,POS_WARM,"warm list",1,1);
+		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_writeonly_or_cold,POS_WIITEONLY_OR_COLD,"writeonly_cold list",1,1);
 
-		print_file_stat_one_file_area_info(m,&p_file_stat->file_area_free,1 << F_file_area_in_free_list,"free list",1);
+		if(file_stat_in_global_base(p_file_stat_base)){
+			struct global_file_stat *p_global_file_stat = container_of(p_file_stat,struct global_file_stat,file_stat);
+
+			print_file_stat_one_file_area_info(m,&p_global_file_stat->file_area_warm_middle_hot,POS_WARM_MIDDLE_HOT,"warm_middle_hot list",1,1);
+			print_file_stat_one_file_area_info(m,&p_global_file_stat->file_area_warm_middle,POS_WARM_MIDDLE,"warm_middle list",1,1);
+			print_file_stat_one_file_area_info(m,&p_global_file_stat->file_area_warm_cold,POS_WARM_COLD,"warm_cold list",1,1);
+		}
 	}
 
 err:
@@ -765,6 +785,20 @@ static ssize_t file_stat_debug_or_make_backlist_write(struct file *file,
         goto free;
 	}
 
+	while(*p && *p != ' ')
+		p ++;
+
+	p ++;
+	if(!strncmp(p,"global mmap",11)){
+		rcu_read_lock();
+		p_file_stat_base = &hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base;
+		goto direct_global_file_stat;
+	}else if(!strncmp(p,"global cache",12)){
+		rcu_read_lock();
+		p_file_stat_base = &hot_cold_file_global_info.global_file_stat.file_stat.file_stat_base;
+        goto direct_global_file_stat;
+	}
+
 	while(*p && *p != '/')
 			p ++;
 		
@@ -806,6 +840,8 @@ static ssize_t file_stat_debug_or_make_backlist_write(struct file *file,
 	smp_rmb();
 	inode = file_inode(file_temp);
 	p_file_stat_base = (struct file_stat_base *)(inode->i_mapping->rh_reserved1);//这个要放到内存屏障后
+
+direct_global_file_stat:
 
 	/*是支持的file_area的文件系统的文件，并且该文件并没有被异步内存回收线程并发cold_file_stat_delete()释放赋值SUPPORT_FILE_AREA_INIT_OR_DELETE*/
 	if((u64)p_file_stat_base > SUPPORT_FILE_AREA_INIT_OR_DELETE){
@@ -1376,7 +1412,7 @@ noinline void printk_shrink_param(struct hot_cold_file_global *p_hot_cold_file_g
 	if(is_proc_print){
 
 		seq_printf(m,"\n\n********cache file********\n");
-		seq_printf(m,"scan_cold_file_area_count_from_temp:%d scan_read_file_area_count_from_temp:%d scan_ahead_file_area_count_from_temp:%d scan_cold_file_area_count_from_warm:%d scan_read_file_area_count_from_warm:%d scan_ahead_file_area_count_from_warm:%d scan_file_area_count_from_warm:%d scan_cold_file_area_count_from_mmap_file:%d file_area_hot_to_warm_from_hot_file:%d free_pages_from_mmap_file:%d cache_file_stat_get_file_area_fail_count:%d mmap_file_stat_get_file_area_from_cache_count:%d\n",p->scan_cold_file_area_count_from_temp,p->scan_read_file_area_count_from_temp,p->scan_ahead_file_area_count_from_temp,p->scan_cold_file_area_count_from_warm,p->scan_read_file_area_count_from_warm,p->scan_ahead_file_area_count_from_warm,p->scan_file_area_count_from_warm,p->scan_cold_file_area_count_from_mmap_file,p->file_area_hot_to_warm_from_hot_file,p->free_pages_from_mmap_file,p->cache_file_stat_get_file_area_fail_count,p->mmap_file_stat_get_file_area_from_cache_count);
+		seq_printf(m,"global_cache_refault:%d  scan_cold_file_area_count_from_temp:%d scan_read_file_area_count_from_temp:%d scan_ahead_file_area_count_from_temp:%d scan_cold_file_area_count_from_warm:%d scan_read_file_area_count_from_warm:%d scan_ahead_file_area_count_from_warm:%d scan_file_area_count_from_warm:%d scan_cold_file_area_count_from_mmap_file:%d file_area_hot_to_warm_from_hot_file:%d free_pages_from_mmap_file:%d cache_file_stat_get_file_area_fail_count:%d mmap_file_stat_get_file_area_from_cache_count:%d\n",p_hot_cold_file_global->global_file_stat.file_stat.file_stat_base.refault_page_count,p->scan_cold_file_area_count_from_temp,p->scan_read_file_area_count_from_temp,p->scan_ahead_file_area_count_from_temp,p->scan_cold_file_area_count_from_warm,p->scan_read_file_area_count_from_warm,p->scan_ahead_file_area_count_from_warm,p->scan_file_area_count_from_warm,p->scan_cold_file_area_count_from_mmap_file,p->file_area_hot_to_warm_from_hot_file,p->free_pages_from_mmap_file,p->cache_file_stat_get_file_area_fail_count,p->mmap_file_stat_get_file_area_from_cache_count);
 
 		seq_printf(m,"\ntemp_to_warm_file_area_count:%d warm_to_temp_file_area_count:%d del_file_area_count:%d del_file_stat_count:%d writeback_count:%d dirty_count:%d del_zero_file_area_file_stat_count:%d scan_zero_file_area_file_stat_count:%d file_area_refault_to_warm_list_count:%d file_area_hot_to_warm_list_count:%d file_area_free_count_from_free_list:%d temp_to_hot_file_area_count:%d warm_to_hot_file_area_count:%d scan_file_area_count:%d scan_file_stat_count:%d scan_delete_file_stat_count:%d\n",p->temp_to_warm_file_area_count,p->warm_to_temp_file_area_count,p->del_file_area_count,p->del_file_stat_count,p->writeback_count,p->dirty_count,p->del_zero_file_area_file_stat_count,p->scan_zero_file_area_file_stat_count,p->file_area_refault_to_warm_list_count,p->file_area_hot_to_warm_list_count,p->file_area_free_count_from_free_list,p->temp_to_hot_file_area_count,p->warm_to_hot_file_area_count,p->scan_file_area_count,p->scan_file_stat_count,p->scan_delete_file_stat_count);
 
@@ -1386,7 +1422,7 @@ noinline void printk_shrink_param(struct hot_cold_file_global *p_hot_cold_file_g
 
 		seq_printf(m,"\nfile_area_hot_to_warm_list_count:%d del_file_stat_count:%d del_file_area_count:%d writeback_count:%d dirty_count:%d scan_mapcount_file_area_count:%d scan_hot_file_area_count:%d free_pages_from_cache_file:%d mapcount_to_warm_file_area_count:%d hot_to_warm_file_area_count:%d check_refault_file_area_count:%d free_file_area_count:%d temp_to_temp_head_file_area_count:%d scan_file_area_count_file_move_from_cache:%d mapcount_to_temp_file_area_count_from_mapcount_file:%d hot_to_temp_file_area_count_from_hot_file:%d\n",mp->file_area_hot_to_warm_list_count,mp->del_file_stat_count,mp->del_file_area_count,mp->writeback_count,mp->dirty_count,mp->scan_mapcount_file_area_count,mp->scan_hot_file_area_count,mp->free_pages_from_cache_file,mp->mapcount_to_warm_file_area_count,mp->hot_to_warm_file_area_count,mp->check_refault_file_area_count,mp->free_file_area_count,mp->temp_to_temp_head_file_area_count,mp->scan_file_area_count_file_move_from_cache,mp->mapcount_to_temp_file_area_count_from_mapcount_file,mp->hot_to_temp_file_area_count_from_hot_file);
 #else
-		seq_printf(m,"scan_cold_file_area_count_from_temp:%d scan_read_file_area_count_from_temp:%d scan_ahead_file_area_count_from_temp:%d scan_cold_file_area_count_from_warm:%d scan_read_file_area_count_from_warm:%d scan_ahead_file_area_count_from_warm:%d scan_file_area_count_from_warm:%d scan_cold_file_area_count_from_mmap_file:%d file_area_hot_to_warm_from_hot_file:%d cache_file_stat_get_file_area_fail_count:%d mmap_file_stat_get_file_area_from_cache_count:%d\n",mp->scan_cold_file_area_count_from_temp,mp->scan_read_file_area_count_from_temp,mp->scan_ahead_file_area_count_from_temp,mp->scan_cold_file_area_count_from_warm,mp->scan_read_file_area_count_from_warm,mp->scan_ahead_file_area_count_from_warm,mp->scan_file_area_count_from_warm,mp->scan_cold_file_area_count_from_mmap_file,mp->file_area_hot_to_warm_from_hot_file,mp->cache_file_stat_get_file_area_fail_count,mp->mmap_file_stat_get_file_area_from_cache_count);
+		seq_printf(m,"global_mmap_refault:%d  scan_cold_file_area_count_from_temp:%d scan_read_file_area_count_from_temp:%d scan_ahead_file_area_count_from_temp:%d scan_cold_file_area_count_from_warm:%d scan_read_file_area_count_from_warm:%d scan_ahead_file_area_count_from_warm:%d scan_file_area_count_from_warm:%d scan_cold_file_area_count_from_mmap_file:%d file_area_hot_to_warm_from_hot_file:%d cache_file_stat_get_file_area_fail_count:%d mmap_file_stat_get_file_area_from_cache_count:%d\n",p_hot_cold_file_global->global_mmap_file_stat.file_stat.file_stat_base.refault_page_count,mp->scan_cold_file_area_count_from_temp,mp->scan_read_file_area_count_from_temp,mp->scan_ahead_file_area_count_from_temp,mp->scan_cold_file_area_count_from_warm,mp->scan_read_file_area_count_from_warm,mp->scan_ahead_file_area_count_from_warm,mp->scan_file_area_count_from_warm,mp->scan_cold_file_area_count_from_mmap_file,mp->file_area_hot_to_warm_from_hot_file,mp->cache_file_stat_get_file_area_fail_count,mp->mmap_file_stat_get_file_area_from_cache_count);
 
 		seq_printf(m,"\ntemp_to_warm_file_area_count:%d warm_to_temp_file_area_count:%d del_file_area_count:%d del_file_stat_count:%d writeback_count:%d dirty_count:%d del_zero_file_area_file_stat_count:%d scan_zero_file_area_file_stat_count:%d file_area_refault_to_warm_list_count:%d file_area_hot_to_warm_list_count:%d file_area_free_count_from_free_list:%d temp_to_hot_file_area_count:%d warm_to_hot_file_area_count:%d scan_file_area_count:%d scan_file_stat_count:%d scan_delete_file_stat_count:%d scan_mapcount_file_area_count:%d\n",mp->temp_to_warm_file_area_count,mp->warm_to_temp_file_area_count,mp->del_file_area_count,mp->del_file_stat_count,mp->writeback_count,mp->dirty_count,mp->del_zero_file_area_file_stat_count,mp->scan_zero_file_area_file_stat_count,mp->file_area_refault_to_warm_list_count,mp->file_area_hot_to_warm_list_count,mp->file_area_free_count_from_free_list,mp->temp_to_hot_file_area_count,mp->warm_to_hot_file_area_count,mp->scan_file_area_count,mp->scan_file_stat_count,mp->scan_delete_file_stat_count,mp->scan_mapcount_file_area_count);
 #endif		

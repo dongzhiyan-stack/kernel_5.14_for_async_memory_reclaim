@@ -1404,6 +1404,9 @@ extern unsigned int xarray_tree_node_cache_hit;
 extern int open_file_area_printk;
 extern int open_file_area_printk_important;
 
+#define list_num_get(p_file_area)  (p_file_area->warm_list_num_and_access_freq.val_bits.warm_list_num)
+#define file_area_access_freq(p_file_area)  (p_file_area->warm_list_num_and_access_freq.val_bits.access_freq)
+
 /** file_area的page bit/writeback mark bit/dirty mark bit/towrite mark bit统计**************************************************************/
 #define FILE_AREA_PAGE_COUNT_SHIFT (XA_CHUNK_SHIFT + PAGE_COUNT_IN_AREA_SHIFT)//6+2
 #define FILE_AREA_PAGE_COUNT_MASK ((1 << FILE_AREA_PAGE_COUNT_SHIFT) - 1)//0xFF 
@@ -3296,6 +3299,10 @@ static char inline file_area_in_deleted(struct file_area *p_file_area)
 {
 	return (p_file_area->file_area_state == -1);
 }
+#if 0
+/* 如果file_area被iput()释放了，原本是想同时设置file_area的in_free、in_temp、in_refault、in_hot等状态，表示该file_area
+ * 被iput()释放了，但是就引入了新的问题：如果该file_area此时正被异步内存回收线程遍历，发现file_area同时具备in_free、in_temp等
+ * 状态，因状态不对而触发panic，类似问题很多。这是个并发问题，不要解决。干脆file_area->mapping赋值NULL表示file_area被iput了*/
 static void inline set_file_area_in_mapping_delete(struct file_area *p_file_area)
 {
 	/*正常file_area不可能同时存在in_temp和in_free标记，暂时以二者标记file_area的in_mapping_delete标记*/
@@ -3306,6 +3313,16 @@ static char inline file_area_in_mapping_delete(struct file_area *p_file_area)
 {
 	return file_area_in_temp_list(p_file_area) && file_area_in_free_list(p_file_area);
 }
+#else
+static void inline set_file_area_in_mapping_delete(struct file_area *p_file_area)
+{
+	p_file_area->mapping = NULL;
+}
+static char inline file_area_in_mapping_delete(struct file_area *p_file_area)
+{
+	return (p_file_area->mapping == NULL);
+}
+#endif
 static void inline move_file_area_to_global_delete_list(struct file_stat_base *p_file_stat_base,struct file_area *p_file_area)
 {
 	if(file_stat_in_cache_file_base(p_file_stat_base)){
