@@ -1923,10 +1923,8 @@ static inline long get_file_stat_normal_type(struct file_stat_base *file_stat_ba
 
 }
 /*判断文件是否是tiny small文件、small文件、普通文件*/
-static inline long get_file_stat_type(struct file_stat_base *file_stat_base)
+static inline int get_file_stat_type_common(unsigned int file_stat_type)
 {
-	unsigned long file_stat_type = file_stat_base->file_stat_status & FILE_STAT_LIST_MASK;
-
 	switch (file_stat_type){
 		case 1 << F_file_stat_in_file_stat_small_file_head_list:
 			return FILE_STAT_SMALL;
@@ -1946,6 +1944,28 @@ static inline long get_file_stat_type(struct file_stat_base *file_stat_base)
 			return -1;
 	}
 	return -1;
+}
+
+static inline int get_file_stat_type(struct file_stat_base *file_stat_base)
+{
+	unsigned int file_stat_type = file_stat_base->file_stat_status & FILE_STAT_LIST_MASK;
+
+	return get_file_stat_type_common(file_stat_type);
+}
+static inline int get_file_stat_type_file_iput(struct file_stat_base *file_stat_base)
+{
+	unsigned int file_stat_type = file_stat_base->file_stat_status & FILE_STAT_LIST_MASK;
+
+	/* iput()文件时，遇到in_zero_list的file_stat，这种file_stat还保留了原始in_temp、in_middle等状态，
+	 * 这里要清理掉file_stat的in_zero状态，否则get_file_stat_type()会返回-1，现在只返回in_temp、in_middle原始状态*/
+
+	/*编译老是告警，warning: array subscript ‘long unsigned int[0]’ is partly outside array bounds*/
+	//test_and_clear_bit(F_file_stat_in_zero_file_area_list,(unsigned long *)&file_stat_type);
+
+	if(file_stat_type & (1 << F_file_stat_in_zero_file_area_list))
+		file_stat_type &= ~(1 << F_file_stat_in_zero_file_area_list);
+
+	return get_file_stat_type_common(file_stat_type);
 }
 #define is_file_stat_match_error(p_file_stat_base,file_type) \
 { \

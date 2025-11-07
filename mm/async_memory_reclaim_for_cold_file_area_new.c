@@ -964,7 +964,7 @@ static noinline void __destroy_inode_handler_post(struct inode *inode)
 		//struct file_stat_tiny_small *p_file_stat_tiny_small = NULL;
 		struct file_stat_base *p_file_stat_base = (struct file_stat_base *)inode->i_mapping->rh_reserved1;
 
-		unsigned long file_stat_type = get_file_stat_type(p_file_stat_base);
+		unsigned int file_stat_type = get_file_stat_type_file_iput(p_file_stat_base);
 
 		/*到这里，文件inode的mapping的xarray tree必然是空树，不是就crash*/  
 		if(inode->i_mapping->i_pages.xa_head != NULL)
@@ -1037,7 +1037,7 @@ static noinline void __destroy_inode_handler_post(struct inode *inode)
 					}
 					else{
 						if(FILE_STAT_TINY_SMALL != file_stat_type)
-							panic("%s file_stat:0x%llx status:0x%x file_stat_type:0x%lx error\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_type);
+							panic("%s file_stat:0x%llx status:0x%x file_stat_type:0x%x error\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_type);
 
 						//p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
 						//list_move(&p_file_stat_tiny_small->hot_cold_file_list,&hot_cold_file_global_info.file_stat_tiny_small_delete_head);
@@ -1088,7 +1088,7 @@ mmap_file_solve:
 					}
 					else{
 						if(FILE_STAT_TINY_SMALL != file_stat_type)
-							panic("%s file_stat:0x%llx status:0x%x file_stat_type:0x%lx error\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_type);
+							panic("%s file_stat:0x%llx status:0x%x file_stat_type:0x%x error\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_type);
 
 						//p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
 						//list_move(&p_file_stat_tiny_small->hot_cold_file_list,&hot_cold_file_global_info.mmap_file_stat_tiny_small_delete_head);
@@ -3315,8 +3315,9 @@ static noinline void file_stat_has_zero_file_area_manage(struct hot_cold_file_gl
 		file_stat_delete_protect_unlock(1);
 		file_stat_delete_lock = 0;
 
-		/*现在normal、small、tiny_small的zero file_area的file_stat都是in_zero_file_area_list状态，是否有必要区分开分成3种呢?????????????*/
-		if(!file_stat_in_zero_file_area_list_base(p_file_stat_base) || file_stat_in_zero_file_area_list_error_base(p_file_stat_base))
+		/* 现在normal、small、tiny_small的zero file_area的file_stat都是in_zero_file_area_list状态，是否有必要区分开分成3种呢?????????????
+		 * 特殊处理，放到下边处理了*/
+		if(!file_stat_in_zero_file_area_list_base(p_file_stat_base) /*|| file_stat_in_zero_file_area_list_error_base(p_file_stat_base)*/)
 			panic("%s file_stat:0x%llx not in_zero_file_area_list status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
 
 		/*file_stat和file_type不匹配则主动crash*/
@@ -3385,6 +3386,16 @@ file_stat_access:
 				 */
 				switch (file_type){
 					case FILE_STAT_TINY_SMALL:
+						/*file_stat移动到zero链表并没有清理原始属性，这里没有tiny_small且有其他干扰属性再crash*/
+						if(file_stat_in_zero_file_area_list_error_base(p_file_stat_base)){
+							if(file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base))
+								clear_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
+							else if(file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base))
+								clear_file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base);
+							else
+								panic("%s:1 file_stat:0x%llx not in_zero_file_area_list status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+						}
+
 						if(p_file_stat_base->file_area_count > TINY_SMALL_TO_TINY_SMALL_ONE_AREA_LEVEL){
 							set_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
 							if(is_cache_file)
@@ -3401,7 +3412,10 @@ file_stat_access:
 						}
 						break;
 					case FILE_STAT_SMALL:
-						set_file_stat_in_file_stat_middle_file_head_list_base(p_file_stat_base);
+						if(!file_stat_in_file_stat_middle_file_head_list_base(p_file_stat_base) && file_stat_in_zero_file_area_list_error_base(p_file_stat_base))
+							panic("%s:2 file_stat:0x%llx not in_zero_file_area_list status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+						
+						//set_file_stat_in_file_stat_middle_file_head_list_base(p_file_stat_base);
 						if(is_cache_file)
 							list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_small_file_head);
 						else
@@ -3409,8 +3423,24 @@ file_stat_access:
 						break;
 					case FILE_STAT_NORMAL:
 						/*当mormal file_stat移动到zero链表后，就会清理掉file_stat的in_temp、middle、large等属性，
-						 *于是当这些file_stat再移动回global temp、middle、large链表时，要根据file_area个数决定移动到哪个链表.*/
+						 *于是当这些file_stat再移动回global temp、middle、large链表时，要根据file_area个数决定移动到哪个链表.
+						 *还有一种情况漏掉了，就是writeonly文件，也是normal文件，当成temp、middle、large文件处理了*/
 						file_stat_type = is_file_stat_file_type_ori(p_hot_cold_file_global,p_file_stat_base);
+
+						if(file_stat_in_zero_file_area_list_error_base(p_file_stat_base)){
+							/*有writeonly属性则清理掉，当成temp、middle、large文件处理了*/
+							if(file_stat_in_file_stat_writeonly_file_head_list_base(p_file_stat_base))
+								clear_file_stat_in_file_stat_writeonly_file_head_list_base(p_file_stat_base);
+							else if(file_stat_in_file_stat_temp_head_list_base(p_file_stat_base))
+								clear_file_stat_in_file_stat_temp_head_list_base(p_file_stat_base);
+							else if(file_stat_in_file_stat_middle_file_head_list_base(p_file_stat_base))
+								clear_file_stat_in_file_stat_middle_file_head_list_base(p_file_stat_base);
+							else if(file_stat_in_file_stat_large_file_head_list_base(p_file_stat_base))		
+								clear_file_stat_in_file_stat_large_file_head_list_base(p_file_stat_base);
+							else		
+								panic("%s:3 file_stat:0x%llx not in_zero_file_area_list status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+						}
+
 						//file_stat_type = get_file_stat_normal_type(p_file_stat_base);
 						if(TEMP_FILE == file_stat_type){
 							/*file_stat移动到global zero链表时，不再清理file_stat的in_temp状态，故这里不再清理*/
@@ -7924,49 +7954,49 @@ static unsigned int get_file_area_from_file_stat_list_common(struct hot_cold_fil
 			switch (file_stat_list_type){
 				//如果该文件没有file_area了，则把对应file_stat移动到hot_cold_file_global->zero链表
 				case F_file_stat_in_file_stat_tiny_small_file_head_list:
-					clear_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
+					//clear_file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base);
 					if(is_cache_file)
 						list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_tiny_small_zero_file_area_head);
 					else
 						list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_tiny_small_zero_file_area_head);
 					break;
 				case F_file_stat_in_file_stat_tiny_small_file_one_area_head_list:
-					clear_file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base);
+					//clear_file_stat_in_file_stat_tiny_small_file_one_area_head_list_base(p_file_stat_base);
 					if(is_cache_file)
 						list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_tiny_small_zero_file_area_head);
 					else
 						list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_tiny_small_zero_file_area_head);
 					break;
 				case F_file_stat_in_file_stat_small_file_head_list:
-					clear_file_stat_in_file_stat_small_file_head_list_base(p_file_stat_base);
+					//clear_file_stat_in_file_stat_small_file_head_list_base(p_file_stat_base);
 					if(is_cache_file)
 						list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_small_zero_file_area_head);
 					else
 						list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_small_zero_file_area_head);
 					break;
 				case F_file_stat_in_file_stat_temp_head_list:
-					clear_file_stat_in_file_stat_temp_head_list_base(p_file_stat_base);
+					//clear_file_stat_in_file_stat_temp_head_list_base(p_file_stat_base);
 					if(is_cache_file)
 						list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_zero_file_area_head);
 					else
 						list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_zero_file_area_head);
 					break;
 				case F_file_stat_in_file_stat_middle_file_head_list:
-					clear_file_stat_in_file_stat_middle_file_head_list_base(p_file_stat_base);
+					//clear_file_stat_in_file_stat_middle_file_head_list_base(p_file_stat_base);
 					if(is_cache_file)
 						list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_zero_file_area_head);
 					else
 						list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_zero_file_area_head);
 					break;
 				case F_file_stat_in_file_stat_large_file_head_list:
-					clear_file_stat_in_file_stat_large_file_head_list_base(p_file_stat_base);
+					//clear_file_stat_in_file_stat_large_file_head_list_base(p_file_stat_base);
 					if(is_cache_file)
 						list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_zero_file_area_head);
 					else
 						list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->mmap_file_stat_zero_file_area_head);
 					break;
 				case F_file_stat_in_file_stat_writeonly_file_head_list:
-					clear_file_stat_in_file_stat_writeonly_file_head_list_base(p_file_stat_base);
+					//clear_file_stat_in_file_stat_writeonly_file_head_list_base(p_file_stat_base);
 					if(is_cache_file)
 						list_move(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->file_stat_zero_file_area_head);
 					else
