@@ -2876,6 +2876,7 @@ out:
 		hot_cold_file_global_info.file_stat_tiny_small_one_area_move_tail_count ++;
 	}
 #endif
+
 	/* 1:该文件可能被并发iput()释放掉  2:异步内存回收线程正把该文件并发由cache文件转成mmap文件 3:异步内存回收线程正把该文件并发由tiny small转成small或normal文件
 	 * 还要考虑一点，如果异步内存回收线程，正在使用的file_stat正好是该p_file_stat_base，会有并发问题吗？想想不会的*/
 	if(file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base) && p_file_stat_base->file_area_count > NORMAL_TEMP_FILE_AREA_COUNT_LEVEL &&
@@ -2902,8 +2903,9 @@ out:
 		hot_cold_file_global_info.file_stat_tiny_small_move_tail_count ++;
 	}
 
-	/*新分配的file_area，不管有没有访问都赋值当前global_age，否则就是0，可能会被识别为冷file_area而迅速释放掉*/
-	p_file_area->file_area_age = hot_cold_file_global_info.global_age; 
+	/* 新分配的file_area，不管有没有访问都赋值当前global_age，否则就是0，可能会被识别为冷file_area而迅速释放掉。这里不再赋值了，
+	 * 而是读写时执行hot_file_update_file_status()再给file_area_age赋值*/
+	//p_file_area->file_area_age = hot_cold_file_global_info.global_age; 
 	return p_file_area;
 }
 #if 1
@@ -3460,7 +3462,9 @@ static inline unsigned int move_small_file_area_to_normal_file(struct hot_cold_f
 extern int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,unsigned int file_area_type,unsigned int file_type,struct list_head *file_area_list);
 
 extern void hot_file_update_file_status(struct address_space *mapping,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,int access_count,int read_or_write/*,unsigned long index*/);
-extern char *get_file_name(char *file_name_path,struct file_stat_base *p_file_stat_base);
+extern char *get_file_name_buf(char *file_name_path,struct file_stat_base *p_file_stat_base);
+extern int get_file_name_match(struct file_stat_base *p_file_stat_base,char *file_name1,char *file_name2,char *file_name3); 
+extern char *get_file_name(struct file_stat_base *p_file_stat_base);
 //extern unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_free,struct list_head *file_area_have_mmap_page_head);
 extern unsigned int cold_mmap_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base * p_file_stat_base,struct file_area *p_file_area,struct page *page_buf[],int cold_page_count);
 extern unsigned long shrink_inactive_list_async(unsigned long nr_to_scan, struct lruvec *lruvec,struct hot_cold_file_global *p_hot_cold_file_global,int is_mmap_file, enum lru_list lru);

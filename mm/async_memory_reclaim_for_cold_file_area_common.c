@@ -1113,7 +1113,7 @@ static const struct proc_ops enable_disable_async_memory_reclaim_fops = {
 	.proc_release	= single_release,
 	.proc_write		= enable_disable_async_memory_reclaim_write,
 };
-char *get_file_name(char *file_name_path,struct file_stat_base *p_file_stat_base)
+char *get_file_name_buf(char *file_name_path,struct file_stat_base *p_file_stat_base)
 {
 	struct dentry *dentry = NULL;
 	struct inode *inode = NULL;
@@ -1142,6 +1142,75 @@ char *get_file_name(char *file_name_path,struct file_stat_base *p_file_stat_base
 	rcu_read_unlock();
 
 	return (dentry == NULL) ? NULL:dentry->d_iname;
+}
+char *get_file_name(struct file_stat_base *p_file_stat_base)
+{
+	struct dentry *dentry = NULL;
+	struct inode *inode = NULL;
+
+	/*需要rcu加锁，保证inode在这个宽限期内inode结构体不会被iput()释放掉而非法内存访问*/
+	rcu_read_lock();
+	/*必须 hlist_empty()判断文件inode是否有dentry，没有则返回true。这里通过inode和dentry获取文件名字，必须 inode->i_lock加锁 
+	 *同时 增加inode和dentry的应用计数，否则可能正使用时inode和dentry被其他进程释放了*/
+	if(p_file_stat_base->mapping && p_file_stat_base->mapping->host/* && !hlist_empty(&p_file_stat_base->mapping->host->i_dentry)*/){
+		inode = p_file_stat_base->mapping->host;
+		spin_lock(&inode->i_lock);
+		/*如果inode的引用计数是0，说明inode已经在释放环节了，不能再使用了。现在发现不一定，改为hlist_empty(&inode->i_dentry)判断*/
+		if(/*atomic_read(&inode->i_count) > 0*/ !hlist_empty(&inode->i_dentry)){
+			dentry = hlist_entry(inode->i_dentry.first, struct dentry, d_u.d_alias);
+			//__dget(dentry);------这里不再__dget,因为全程有spin_lock(&inode->i_lock)加锁
+			if(dentry){
+				//snprintf(file_name_path,MAX_FILE_NAME_LEN - 2,"i_count:%d i_size:%lld dentry:0x%llx %s",atomic_read(&inode->i_count),inode->i_size,(u64)dentry,/*dentry->d_iname*/dentry->d_name.name);
+				//snprintf(file_name_path,MAX_FILE_NAME_LEN - 2,"%s",dentry->d_name.name);
+			}
+			//dput(dentry);
+		}else{
+			//snprintf(file_name_path,MAX_FILE_NAME_LEN - 2,"i_count:%d dentry:0x%llx lru_list_empty:%d",atomic_read(&inode->i_count),(u64)inode->i_dentry.first,list_empty(&inode->i_lru));
+		}
+		spin_unlock(&inode->i_lock);
+	}
+	rcu_read_unlock();
+
+	return (dentry == NULL) ? NULL:dentry->d_iname;
+}
+int get_file_name_match(struct file_stat_base *p_file_stat_base,char *file_name1,char *file_name2,char *file_name3)
+{
+	struct dentry *dentry = NULL;
+	struct inode *inode = NULL;
+
+	/*需要rcu加锁，保证inode在这个宽限期内inode结构体不会被iput()释放掉而非法内存访问*/
+	rcu_read_lock();
+	/*必须 hlist_empty()判断文件inode是否有dentry，没有则返回true。这里通过inode和dentry获取文件名字，必须 inode->i_lock加锁 
+	 *同时 增加inode和dentry的应用计数，否则可能正使用时inode和dentry被其他进程释放了*/
+	if(p_file_stat_base->mapping && p_file_stat_base->mapping->host/* && !hlist_empty(&p_file_stat_base->mapping->host->i_dentry)*/){
+		inode = p_file_stat_base->mapping->host;
+		spin_lock(&inode->i_lock);
+		/*如果inode的引用计数是0，说明inode已经在释放环节了，不能再使用了。现在发现不一定，改为hlist_empty(&inode->i_dentry)判断*/
+		if(/*atomic_read(&inode->i_count) > 0*/ !hlist_empty(&inode->i_dentry)){
+			dentry = hlist_entry(inode->i_dentry.first, struct dentry, d_u.d_alias);
+			//__dget(dentry);------这里不再__dget,因为全程有spin_lock(&inode->i_lock)加锁
+			if(dentry){
+				//snprintf(file_name_path,MAX_FILE_NAME_LEN - 2,"i_count:%d i_size:%lld dentry:0x%llx %s",atomic_read(&inode->i_count),inode->i_size,(u64)dentry,/*dentry->d_iname*/dentry->d_name.name);
+				//snprintf(file_name_path,MAX_FILE_NAME_LEN - 2,"%s",dentry->d_name.name);
+			}
+			//dput(dentry);
+		}else{
+			//snprintf(file_name_path,MAX_FILE_NAME_LEN - 2,"i_count:%d dentry:0x%llx lru_list_empty:%d",atomic_read(&inode->i_count),(u64)inode->i_dentry.first,list_empty(&inode->i_lru));
+		}
+		spin_unlock(&inode->i_lock);
+	}
+	rcu_read_unlock();
+
+	if(dentry){
+		if(file_name1 && strcmp(dentry->d_iname,file_name1) == 0)
+			return 1;
+		else if(file_name2 && strcmp(dentry->d_iname,file_name2) == 0)
+			return 1;
+		else if(file_name3 && strcmp(dentry->d_iname,file_name3) == 0)
+			return 1;
+	}
+
+	return 0;
 }
 static int print_one_list_file_stat(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print,char *file_stat_name,struct list_head *file_stat_temp_head,struct list_head *file_stat_delete_list_head,unsigned int *file_stat_one_file_area_count,unsigned int *file_stat_many_file_area_count,unsigned int *file_stat_one_file_area_pages,unsigned int file_stat_in_list_type,unsigned int file_type,int print_file_stat_info_or_update_refault)
 {
@@ -1232,7 +1301,7 @@ static int print_one_list_file_stat(struct hot_cold_file_global *p_hot_cold_file
 					  seq_printf(m,"1:refault_pages:%d last:%d 0x%llx 0x%llx\n",p_file_stat_base->refault_page_count,p_file_stat_base->refault_page_count_last,(u64)&p_file_stat_base->refault_page_count,(u64)&p_file_stat_base->refault_page_count_last);*/
 
 					memset(file_name_path,0,sizeof(&file_name_path));
-					get_file_name(file_name_path,p_file_stat_base);
+					get_file_name_buf(file_name_path,p_file_stat_base);
 					all_pages += p_file_stat_base->mapping->nrpages;
 
 					if(FILE_STAT_NORMAL == file_type){

@@ -374,7 +374,7 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
 			if(!old_entry)
 				panic("%s mapping:0x%llx p_file_area:0x%llx file_area_state:0x%x error old_entry NULL\n",__func__,(u64)mapping,(u64)p_file_area,p_file_area->file_area_state);
 			/*可能并发iput()执行find_get_entry_for_file_area()把file_area->mapping置NULL了，这个没有xas_lock加锁防护*/
-			if(p_file_area->mapping){
+		    if(p_file_area->mapping){
 				/*p_file_area->mapping置NULL，表示该文件iput了，马上要释放inode和mapping了*/
 				p_file_area->mapping = 0;
 				/*这个写屏障保证异步内存回收线程cold_file_area_delete()函数里，立即看到file_area->mapping是NULL*/
@@ -720,7 +720,7 @@ find_page_from_file_area:
 					if(!old_entry)
 						panic("%s mapping:0x%llx p_file_area:0x%llx file_area_state:0x%x error old_entry NULL\n",__func__,(u64)mapping,(u64)p_file_area,p_file_area->file_area_state);
 					/*可能并发iput()执行find_get_entry_for_file_area()把file_area->mapping置NULL了，这个没有xas_lock加锁防护*/
-					if(p_file_area->mapping){
+		            if(p_file_area->mapping){
 						/*p_file_area->mapping置NULL，表示该文件iput了，马上要释放inode和mapping了*/
 						p_file_area->mapping = 0;
 						/*这个写屏障保证异步内存回收线程cold_file_area_delete()函数里，立即看到file_area->mapping是NULL*/
@@ -1789,6 +1789,11 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 							hot_cold_file_global_info.file_area_refault_file ++;
 							if(p_file_stat_base->refault_page_count < USHRT_MAX - 2)
 								p_file_stat_base->refault_page_count ++;
+
+							if(file_stat_in_test_base(p_file_stat_base)){
+								printk("%s refault file_stat:0x%llx file_area:0x%llx status:0x%x index:%ld\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,index);
+								dump_stack();
+							}
 						}
 					}else{
 						/*否则folio_temp非NULL，说明是kswapd内存的page保存的shadow。如果是文件截断回收的page则folio_temp是NULL*/
@@ -1850,6 +1855,10 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 			goto unlock;
 
 find_file_area:
+		/*if(get_file_name_match(p_file_stat_base,"binlog.index","resolv.conf","system.devices")){
+			printk("%s file_stat:0x%llx status 0x%x mmap:%d mapping:0x%llx add_folio\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,mapping_mapped(mapping),(u64)mapping);
+			dump_stack();
+		}*/
 		/* 统计发生refault的page数，跟workingset_refault_file同一个含义。但是有个问题，只有被异步内存回收线程
 		 * 回收的page的file_area才会被标记in_free，被kswapd内存回收的page的file_area，就不会标记in_free
 		 * 了。问题就出在这里，当这些file_area的page将来被访问，发生refault，但是这些file_area因为没有in_free
@@ -3385,7 +3394,7 @@ out:
 
 	return folio;
 }
-/*这个函数可以加入node cache机制*/
+/*这个函数可以加入node cache机制。这个函数做成inline形式，因为调用频繁，降低性能损耗*/
 void *get_folio_from_file_area_for_file_area(struct address_space *mapping,pgoff_t index)
 {
 	struct file_area *p_file_area;
@@ -3421,13 +3430,37 @@ void *get_folio_from_file_area_for_file_area(struct address_space *mapping,pgoff
 	
 		/* 到这里才判定page有有效，没有被其他进程并发释放掉。但这里是内核预读代码page_cache_ra_unbounded()调用的，
 		 * 原生代码并没有判定该page是否会因page内存回收而判定page是否无效，这里还要判断吗？目前只判断索引*/
-		if(folio && folio->index != index)
-	        panic("%s %s %d index:%ld folio->index:%ld folio:0x%llx mapping:0x%llx\n",__func__,current->comm,current->pid,index,folio->index,(u64)folio,(u64)mapping);
+		if(folio && (/*folio->index != index ||*/ folio->mapping != mapping)){
+			/*if成立说明该folio被内存回收了，那就设置folio为NULL而无效。这里确实遇到过，是正常现象，不能panic*/
+	        //panic("%s %s %d index:%ld folio->index:%ld folio:0x%llx mapping:0x%llx\n",__func__,current->comm,current->pid,index,folio->index,(u64)folio,(u64)mapping);
+	        pr_warn("%s %s %d index:%ld folio->index:%ld folio:0x%llx mapping:0x%llx\n",__func__,current->comm,current->pid,index,folio->index,(u64)folio,(u64)mapping);
+			folio = NULL;
+		}
 	}
 out:
 	rcu_read_unlock();
 	FILE_AREA_PRINT("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx index:%ld\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,index);
 
+	/* 这些都时预读产生的page，标记file_area的in_read标记。但是不令file_area的访问计数加1，不赋值file_area_age=global_age，
+	 * 节省性能。我只要标记file_area的in_read，异步内存回收线程就不会立即回收这些file_area的page了。后续这些folio真的被用
+	 * 户读，会执行到filemap_get_read_batch()，令file_area的访问计数加1，赋值file_area_age=global_age。但是又遇到问题了，
+	 * 因为这里的set_file_area_in_read，把文件的所有file_area都在这里设置了in_read标记。因为所有的page大部分都是预读流程
+	 * 产生的，因为这里设置了in_read标记，导致后续这些file_area的page被真正读写时，执行到hot_file_update_file_status()函数，
+	 * 因为file_area已经有了in_read标记，不再清理file_area的in_writeonly标记。导致原本读属性的文件被判定为writeonly
+	 * 文件，导致更容易回收这些文件的file_area的page，导致refault率升高。注意，这是实际测试遇到的问题!!!!!!!!注意，实际
+	 * 测试还证明，预读时执行到的page_cache_ra_unbounded函数，如果第一次在get_folio_from_file_area_for_file_area()从xarray
+	 * tree没有查到folio，就无法标记file_area的in_read属性和清理file_stat的writeonly标记。然后分配folio和file_area并添加
+	 * 到xarray tree。这个预读的folio就不会执行get_folio_from_file_area_for_file_area()了。后续该folio被读执行到
+	 * hot_file_update_file_status()，file_area没有in_read标记，还需要再标记file_area的in_read标记。*/
+	/* hot_file_update_file_status()和get_folio_from_file_area_for_file_area()函数都需要标记file_area的in_read标记
+	 * 和清理文件file_stat的writeonly标记，只在hot_file_update_file_status()里设置可以吗，浪费性能！不行，没办法解决*/
+	if(folio && !file_area_in_read(p_file_area)){
+		set_file_area_in_read(p_file_area);
+		if(file_stat_in_writeonly_base(p_file_stat_base))
+			clear_file_stat_in_writeonly_base(p_file_stat_base);
+
+		//p_file_area->file_area_age = hot_cold_file_global_info.global_age; 
+	}
 	return (void *)folio;
 }
 EXPORT_SYMBOL(get_folio_from_file_area_for_file_area);
@@ -4959,7 +4992,7 @@ static void filemap_get_read_batch_for_file_area(struct address_space *mapping,
 	unsigned int page_offset_in_file_area_origin = page_offset_in_file_area;
 	unsigned long folio_index_from_xa_index;
 	/*默认file_area没有init标记*/
-	int file_area_is_init = 0;
+	//int file_area_is_init = 0;
 	
 	rcu_read_lock();
 	//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
@@ -5030,11 +5063,11 @@ static void filemap_get_read_batch_for_file_area(struct address_space *mapping,
 		/* 如果是第一次读文件，file_area刚分配而设置了init标记，分配file_area时已经更新了file_area_age。这里
 		 * read操作时，file_area_is_init置1，就不再执行hot_file_update_file_status函数了，降低损耗。目的是
 		 * 降低第一次读文件时，损耗有增加的的问题*/
-		file_area_is_init = 0;
+		/*file_area_is_init = 0;
 		if(unlikely(file_area_in_init(p_file_area))){
 			clear_file_area_in_init(p_file_area);
 			file_area_is_init = 1;
-		}
+		}*/
 
 #ifdef ASYNC_MEMORY_RECLAIM_DEBUG
 		FILE_AREA_PRINT("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld xas->xa_offset:%d xa_node_cache:0x%llx cache_base_index:%ld index:%ld\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index,xas.xa_offset,(u64)p_file_stat_base->xa_node_cache,p_file_stat_base->xa_node_cache_base_index,index);
@@ -5121,16 +5154,16 @@ find_page_from_file_area:
 			/*统计page引用计数。如果是第一次统计，page_offset_in_file_area_origin >=0，此时访问file_area的page的访问计数是
 			 *page_offset_in_file_area - page_offset_in_file_area_origin。之后，file_area的page的访问计数是page_offset_in_file_area，
 			 *此时page_offset_in_file_area与PAGE_COUNT_IN_AREA相等*/
-			if(0 == file_area_is_init){
-				if(page_offset_in_file_area_origin == -1)
-					hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area,FILE_AREA_PAGE_IS_READ/*,folio->index*/);
-				else{
-					/*访问的第一个file_area，page访问计数是page_offset_in_file_area - page_offset_in_file_area_origin*/
-					hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area - page_offset_in_file_area_origin,FILE_AREA_PAGE_IS_READ/*,folio->index*/);
-					page_offset_in_file_area_origin = -1;
-				}
+			//if(0 == file_area_is_init){
+			if(page_offset_in_file_area_origin == -1)
+				hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area,FILE_AREA_PAGE_IS_READ/*,folio->index*/);
+			else{
+				/*访问的第一个file_area，page访问计数是page_offset_in_file_area - page_offset_in_file_area_origin*/
+				hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area - page_offset_in_file_area_origin,FILE_AREA_PAGE_IS_READ/*,folio->index*/);
+				page_offset_in_file_area_origin = -1;
 			}
-            
+			//}
+
 			//要查找下一个file_area了，page_offset_in_file_area要清0
 			page_offset_in_file_area = 0;
 		}
@@ -5143,16 +5176,17 @@ retry:
 	}
 	
     /*如果前边for循环异常break了，就无法统计最后file_area的访问计数了，那就在这里统计*/
-	if(0 == file_area_is_init){
-		if(page_offset_in_file_area_origin == -1){
-			if(page_offset_in_file_area)/*可能这个file_area一个page都没有获取到，要过滤掉*/
-				hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area,FILE_AREA_PAGE_IS_READ/*,folio != NULL? folio->index:-1*/);
-		}
-		else{//访问的第一个file_area就跳出for循环了，page访问计数是page_offset_in_file_area - page_offset_in_file_area_origin
-			if(page_offset_in_file_area > page_offset_in_file_area_origin)/*这样才说明至少有一个page被获取了*/
-				hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area - page_offset_in_file_area_origin,FILE_AREA_PAGE_IS_READ/*,folio != NULL? folio->index:-1*/);
-		}
+	//if(0 == file_area_is_init){
+	if(page_offset_in_file_area_origin == -1){
+		if(page_offset_in_file_area)/*可能这个file_area一个page都没有获取到，要过滤掉*/
+			hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area,FILE_AREA_PAGE_IS_READ/*,folio != NULL? folio->index:-1*/);
 	}
+	else{//访问的第一个file_area就跳出for循环了，page访问计数是page_offset_in_file_area - page_offset_in_file_area_origin
+		if(page_offset_in_file_area > page_offset_in_file_area_origin)/*这样才说明至少有一个page被获取了*/
+			hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,page_offset_in_file_area - page_offset_in_file_area_origin,FILE_AREA_PAGE_IS_READ/*,folio != NULL? folio->index:-1*/);
+	}
+	//}
+	
 	/*如果本次查找的page所在xarray tree的父节点变化了，则把最新的保存到mapping->rh_reserved2。实际测试表明，
 	 *当查找不到page时，xas_load(&xas)->xas_start 里会给xas.xa_node赋值1，即XAS_BOUNDS。导致错误赋值给
 	 *p_file_stat->xa_node_cache=1，导致后续非法指针crash。因此必须判断父节点的合法性!!!!!!!!。错了，错了，
