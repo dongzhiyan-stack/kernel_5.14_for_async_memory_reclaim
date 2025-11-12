@@ -653,6 +653,7 @@ struct file_stat
 	struct list_head file_area_warm_hot;
 	/*温冷的file_area移动到这个链表*/
 	struct list_head file_area_warm;
+	struct list_head file_area_warm_cold;
 	/*只读的file_area、很长时间未访问的file_area移动到这个链表*/
 	struct list_head file_area_writeonly_or_cold;
 
@@ -681,7 +682,9 @@ struct file_stat
 	//所有被释放内存page的file_area结构最后添加到这个链表，如果长时间还没被访问，就释放file_area结构。
 	struct list_head file_area_free;
 	//file_area的page被释放后，但很快又被访问，发生了refault，于是要把这种page添加到file_area_refault链表，短时间内不再考虑扫描和释放
-	struct list_head file_area_refault;
+	//现在决定把refault file_area移动到file_area_hot链表了，从而改名为file_area_warm_cold链表
+	//struct list_head file_area_refault;
+	
 	//file_area对应的page的pagecount大于0的，则把file_area移动到该链表
 	//struct list_head file_area_mapcount;
 	//存放内存回收的file_area，mmap文件用
@@ -757,11 +760,12 @@ struct current_scan_file_stat_info{
 struct global_file_stat{
     struct file_stat file_stat;
 
-	struct list_head file_area_warm_cold;
+	//struct list_head file_area_warm_cold;
 	struct list_head file_area_warm_middle_hot;
 	struct list_head file_area_warm_middle;
 
 	struct list_head file_area_mapcount;
+	struct list_head file_area_refault;
 	
 	struct list_head file_area_delete_list;
 	struct list_head file_area_delete_list_temp;
@@ -2261,10 +2265,13 @@ static inline struct file_stat_base *file_stat_alloc_and_init(struct address_spa
 		//初始化file_area_hot头结点
 		INIT_LIST_HEAD(&p_file_stat->file_area_hot);
 		INIT_LIST_HEAD(&p_file_stat_base->file_area_temp);
+		INIT_LIST_HEAD(&p_file_stat->file_area_warm_hot);
 		INIT_LIST_HEAD(&p_file_stat->file_area_warm);
+		INIT_LIST_HEAD(&p_file_stat->file_area_warm_cold);
+		INIT_LIST_HEAD(&p_file_stat->file_area_writeonly_or_cold);
 		//INIT_LIST_HEAD(&p_file_stat->file_area_free_temp);
 		INIT_LIST_HEAD(&p_file_stat->file_area_free);
-		INIT_LIST_HEAD(&p_file_stat->file_area_refault);
+		//INIT_LIST_HEAD(&p_file_stat->file_area_refault);
 		//INIT_LIST_HEAD(&p_file_stat->file_area_mapcount);
 
 		//mapping->file_stat记录该文件绑定的file_stat结构，将来判定是否对该文件分配了file_stat
@@ -2396,15 +2403,16 @@ static inline struct file_stat_base *add_mmap_file_stat_to_list(struct address_s
 		//设置文件是mmap文件状态，有些mmap文件可能还会被读写，要与cache文件互斥，要么是cache文件要么是mmap文件，不能两者都是 
 		set_file_stat_in_mmap_file_base(p_file_stat_base);
 		INIT_LIST_HEAD(&p_file_stat->file_area_hot);
-		INIT_LIST_HEAD(&p_file_stat->file_area_warm);
 		INIT_LIST_HEAD(&p_file_stat->file_area_warm_hot);
+		INIT_LIST_HEAD(&p_file_stat->file_area_warm);
+		INIT_LIST_HEAD(&p_file_stat->file_area_warm_cold);
 		INIT_LIST_HEAD(&p_file_stat->file_area_writeonly_or_cold);
 
 		INIT_LIST_HEAD(&p_file_stat_base->file_area_temp);
 		/*mmap文件需要p_file_stat->file_area_free_temp暂存参与内存回收的file_area，不能注释掉*/
 		//INIT_LIST_HEAD(&p_file_stat->file_area_free_temp);
 		INIT_LIST_HEAD(&p_file_stat->file_area_free);
-		INIT_LIST_HEAD(&p_file_stat->file_area_refault);
+		//INIT_LIST_HEAD(&p_file_stat->file_area_refault);
 		//file_area对应的page的pagecount大于0的，则把file_area移动到该链表
 		//INIT_LIST_HEAD(&p_file_stat->file_area_mapcount);
 
@@ -2597,8 +2605,11 @@ static inline void update_file_stat_next_multi_level_warm_or_writeonly_list(stru
 		case POS_WARM:
 			p_file_stat->traverse_warm_list_num = POS_WARM_HOT;
 			break;
-		case POS_WIITEONLY_OR_COLD:
+		case POS_WARM_COLD:
 			p_file_stat->traverse_warm_list_num = POS_WARM;
+			break;
+		case POS_WIITEONLY_OR_COLD:
+			p_file_stat->traverse_warm_list_num = POS_WARM_COLD;
 			break;
 		default:
 			BUG();
@@ -2704,13 +2715,14 @@ static inline struct file_stat_base *file_stat_alloc_and_init_other(struct addre
 		INIT_LIST_HEAD(&p_file_stat->file_area_hot);
 		INIT_LIST_HEAD(&p_file_stat->file_area_warm);
 		INIT_LIST_HEAD(&p_file_stat->file_area_warm_hot);
+		INIT_LIST_HEAD(&p_file_stat->file_area_warm_cold);
 		INIT_LIST_HEAD(&p_file_stat->file_area_writeonly_or_cold);
 		
 		INIT_LIST_HEAD(&p_file_stat_base->file_area_temp);
 		/*mmap文件需要p_file_stat->file_area_free_temp暂存参与内存回收的file_area，不能注释掉*/
 		//INIT_LIST_HEAD(&p_file_stat->file_area_free_temp);
 		INIT_LIST_HEAD(&p_file_stat->file_area_free);
-		INIT_LIST_HEAD(&p_file_stat->file_area_refault);
+		//INIT_LIST_HEAD(&p_file_stat->file_area_refault);
 		//file_area对应的page的pagecount大于0的，则把file_area移动到该链表
 		//INIT_LIST_HEAD(&p_file_stat->file_area_mapcount);
 
