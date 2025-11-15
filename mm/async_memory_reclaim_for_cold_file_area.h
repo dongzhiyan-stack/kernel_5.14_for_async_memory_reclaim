@@ -60,7 +60,7 @@
 //置1说明说明触发了drop_cache，此时禁止异步内存回收线程处理gloabl drop_cache_file_stat_head链表上的file_stat
 #define ASYNC_DROP_CACHES 1
 //异步内存回收周期，单位s
-#define ASYNC_MEMORY_RECLIAIM_PERIOD 60
+#define ASYNC_MEMORY_RECLIAIM_PERIOD 10
 //最大文件名字长度
 #define MAX_FILE_NAME_LEN 100
 //当一个文件file_stat长时间不被访问，释放掉了所有的file_area，再过FILE_STAT_DELETE_AGE_DX个周期，则释放掉file_stat结构
@@ -77,17 +77,17 @@
 #define TREE_INTERNAL_NODE 1
 
 /*热file_area经过FILE_AREA_HOT_to_TEMP_AGE_DX个周期后，还没有被访问，则移动到file_area_warm链表*/
-#define FILE_AREA_HOT_to_TEMP_AGE_DX  20
+#define FILE_AREA_HOT_TO_TEMP_AGE_DX  500
 /*发生refault的file_area经过FILE_AREA_REFAULT_TO_TEMP_AGE_DX个周期后，还没有被访问，则移动到file_area_warm链表*/
-#define FILE_AREA_REFAULT_TO_TEMP_AGE_DX 50
+#define FILE_AREA_REFAULT_TO_TEMP_AGE_DX 500
 /*普通的file_area在FILE_AREA_TEMP_TO_COLD_AGE_DX个周期内没有被访问则被判定是冷file_area，然后释放这个file_area的page*/
-#define FILE_AREA_TEMP_TO_COLD_AGE_DX  10
+#define FILE_AREA_TEMP_TO_COLD_AGE_DX  600
 /*在file_stat->warm上的file_area经过file_area_warm_to_temp_age_dx个周期没有被访问，则移动到file_stat->temp链表*/
-#define FILE_AREA_WARM_TO_TEMP_AGE_DX  (FILE_AREA_TEMP_TO_COLD_AGE_DX + 10) 
+//#define FILE_AREA_WARM_TO_TEMP_AGE_DX  (FILE_AREA_TEMP_TO_COLD_AGE_DX + 10) 
 /*一个冷file_area，如果经过FILE_AREA_FREE_AGE_DX个周期，仍然没有被访问，则释放掉file_area结构*/
-#define FILE_AREA_FREE_AGE_DX  60
+#define FILE_AREA_FREE_AGE_DX  (FILE_AREA_TEMP_TO_COLD_AGE_DX + 100)
 /*当一个file_area因多次访问被设置了ahead标记，经过FILE_AREA_AHEAD_CANCEL_AGE_DX个周期后file_area没有被访问，才会允许清理file_area的ahead标记*/
-#define FILE_AREA_AHEAD_CANCEL_AGE_DX (FILE_AREA_TEMP_TO_COLD_AGE_DX + 10)
+//#define FILE_AREA_AHEAD_CANCEL_AGE_DX (FILE_AREA_TEMP_TO_COLD_AGE_DX + 10)
 
 /*当一个file_area在一个周期内访问超过FILE_AREA_HOT_LEVEL次数，则判定是热的file_area*/
 #define FILE_AREA_HOT_LEVEL (PAGE_COUNT_IN_AREA << 2)
@@ -100,24 +100,24 @@
 #define HOT_FILE_COLD_AGE_DX 10
 
 
-//一个冷file_area，如果经过FILE_AREA_TO_FREE_AGE_DX个周期，仍然没有被访问，则释放掉file_area结构
-#define MMAP_FILE_AREA_TO_FREE_AGE_DX  (MMAP_FILE_AREA_TEMP_TO_COLD_AGE_DX + 20)
+//一个冷file_area，如果经过FILE_AREA_FREE_AGE_DX个周期，仍然没有被访问，则释放掉file_area结构
+#define MMAP_FILE_AREA_FREE_AGE_DX  (MMAP_FILE_AREA_TEMP_TO_COLD_AGE_DX + 100)
 //发生refault的file_area经过FILE_AREA_REFAULT_TO_TEMP_AGE_DX个周期后，还没有被访问，则移动到file_area_temp链表
-#define MMAP_FILE_AREA_REFAULT_TO_TEMP_AGE_DX 30
+#define MMAP_FILE_AREA_REFAULT_TO_TEMP_AGE_DX 600
 //普通的file_area在FILE_AREA_TEMP_TO_COLD_AGE_DX个周期内没有被访问则被判定是冷file_area，然后释放这个file_area的page
-#define MMAP_FILE_AREA_TEMP_TO_COLD_AGE_DX  10//这个参数调的很小容易在file_area被内存回收后立即释放，这样测试了很多bug，先不要改
+#define MMAP_FILE_AREA_TEMP_TO_COLD_AGE_DX  600//这个参数调的很小容易在file_area被内存回收后立即释放，这样测试了很多bug，先不要改
 
 //file_area如果在 MMAP_FILE_AREA_HOT_AGE_DX 周期内被检测到访问 MMAP_FILE_AREA_ACCESS_HOT_COUNT 次，file_area被判定为热file_area
 #define MMAP_FILE_AREA_ACCESS_HOT_COUNT 2
 //hot链表上的file_area在MMAP_FILE_AREA_HOT_TO_TEMP_AGE_DX个周期内没有被访问，则降级到temp链表
-#define MMAP_FILE_AREA_HOT_TO_TEMP_AGE_DX 10
+#define MMAP_FILE_AREA_HOT_TO_TEMP_AGE_DX 600
 
 //mapcount的file_area在MMAP_FILE_AREA_MAPCOUNT_AGE_DX个周期内不再遍历访问，降低性能损耗
 #define MMAP_FILE_AREA_MAPCOUNT_AGE_DX 5
 //hot链表上的file_area在MMAP_FILE_AREA_HOT_AGE_DX个周期内不再遍历访问，降低性能损耗
 #define MMAP_FILE_AREA_HOT_AGE_DX 20
 //free链表上的file_area在MMAP_FILE_AREA_HOT_AGE_DX个周期内不再遍历访问，降低性能损耗
-#define MMAP_FILE_AREA_FREE_AGE_DX 5
+//#define MMAP_FILE_AREA_FREE_AGE_DX 5
 //refault链表上的file_area在MMAP_FILE_AREA_HOT_AGE_DX个周期内不再遍历访问，降低性能损耗
 #define MMAP_FILE_AREA_REFAULT_AGE_DX 5
 
@@ -2915,9 +2915,17 @@ out:
 		hot_cold_file_global_info.file_stat_tiny_small_move_tail_count ++;
 	}
 
-	/* 新分配的file_area，不管有没有访问都赋值当前global_age，否则就是0，可能会被识别为冷file_area而迅速释放掉。这里不再赋值了，
-	 * 而是读写时执行hot_file_update_file_status()再给file_area_age赋值*/
-	//p_file_area->file_area_age = hot_cold_file_global_info.global_age; 
+	/* 新分配的file_area，不管有没有访问都赋值当前global_age，否则就是0，可能会被识别为冷file_area而迅速释放掉.因为怕有些
+	 * file_area分配后，对应的page不会被读写，就没有机会执行到update函数，赋值file_area_age=global_age，并令access_count加1.
+	 * 。决定这里不再赋值了，
+	 * 而是读写时执行hot_file_update_file_status()再给file_area_age赋值。但是这里赋值的话，file_area_age跟global_age就相等了，
+	 * 然后很快对应的page被访问了，而执行到update函数，if(file_area_age < global_age)不成立，就不会令file_area的access_count加
+	 * 1。实际mysql测试，发现大量的文件，预读时分配folio和file_area。但是因为这里的赋值，导致这些file_area的page很快被访问时，
+	 * 执行到update函数，if(file_area_age < global_age)不成立，就不会令file_area的access_count加1。然后异步内存回收线程扫描到
+	 * 这些file_area，access_count是0，有很大概率被移动到下一层的warm链表，很容易被回收掉，然后发生refault。现在决定，这个赋值
+	 * 还留着。update函数修改为if(file_area_age < global_age || test_and_clear_bit(F_file_area_in_init,&p_file_area->file_area_state))
+	 * 这里新分配的file_area因为有init标记，如此该if依然成立，然后顺利令file_area的access_count加1*/
+	p_file_area->file_area_age = hot_cold_file_global_info.global_age; 
 	return p_file_area;
 }
 #if 1
@@ -3357,11 +3365,22 @@ static char inline file_area_in_mapping_delete(struct file_area *p_file_area)
 	return (p_file_area->mapping == NULL);
 }
 #endif
+/* 当文件iput时，针对没有page的file_area，要把file_area移动到global_file_stat_delete链表，用的是file_area的
+ * file_area_delete成员，本质就是file_area->page[0/1]。此时二者要么是NULL，要么是xa_is_value。不可能是page
+ * 指针，如果是page指针，这里就要crash，负责就会覆盖掉page->page[0/1]里保存的page指针*/
+static void inline check_file_area_delete_list_is_not_page(struct file_area *p_file_area)
+{
+   if((p_file_area->file_area_delete.prev && !xa_is_value(p_file_area->file_area_delete.prev)) ||
+		   (p_file_area->file_area_delete.next && !xa_is_value(p_file_area->file_area_delete.next)))
+	   panic("check_file_area_delete_list_is_not_page file_area:0x%llx error\n",(u64)p_file_area);
+}
 static void inline move_file_area_to_global_delete_list(struct file_stat_base *p_file_stat_base,struct file_area *p_file_area)
 {
 	if(file_stat_in_cache_file_base(p_file_stat_base)){
 		spin_lock(&hot_cold_file_global_info.global_file_stat.file_area_delete_lock);
 		if(!file_area_in_mapping_delete(p_file_area)){
+			check_file_area_delete_list_is_not_page(p_file_area);
+
 			/* 写代码稍微不过脑子就犯了错，file_area->file_area_delete的next和prev来自file_area->page[0/1]，默认是0，
 			 * 根本就没有添加到其他链表，故不能用list_move，而是list_add，首次添加到其他链表用list_add*/
 			//list_move(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_file_stat.file_area_delete_list);
@@ -3373,6 +3392,8 @@ static void inline move_file_area_to_global_delete_list(struct file_stat_base *p
 	else{
 		spin_lock(&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_lock);
 		if(!file_area_in_mapping_delete(p_file_area)){
+			check_file_area_delete_list_is_not_page(p_file_area);
+
 			//list_move(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_list);
 			list_add(&p_file_area->file_area_delete,&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_list);
 			set_file_area_in_mapping_delete(p_file_area);
@@ -3473,7 +3494,8 @@ static inline unsigned int move_small_file_area_to_normal_file(struct hot_cold_f
 //extern void can_small_file_change_to_normal_file(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_small *p_file_stat_small,char is_cache_file);
 extern int reverse_other_file_area_list_common(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,unsigned int file_area_type,unsigned int file_type,struct list_head *file_area_list);
 
-extern void hot_file_update_file_status(struct address_space *mapping,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,int access_count,int read_or_write/*,unsigned long index*/);
+inline void hot_file_update_file_status(struct address_space *mapping,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,int read_or_write);
+//extern void hot_file_update_file_status(struct address_space *mapping,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,int access_count,int read_or_write/*,unsigned long index*/);
 extern char *get_file_name_buf(char *file_name_path,struct file_stat_base *p_file_stat_base);
 extern int get_file_name_match(struct file_stat_base *p_file_stat_base,char *file_name1,char *file_name2,char *file_name3); 
 extern char *get_file_name(struct file_stat_base *p_file_stat_base);

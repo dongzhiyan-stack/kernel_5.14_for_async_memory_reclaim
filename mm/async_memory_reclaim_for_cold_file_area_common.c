@@ -1799,10 +1799,10 @@ static int __init hot_cold_file_init(void)
 
 	hot_cold_file_global_info.file_area_temp_to_cold_age_dx = FILE_AREA_TEMP_TO_COLD_AGE_DX;
 	hot_cold_file_global_info.file_area_temp_to_cold_age_dx_ori = FILE_AREA_TEMP_TO_COLD_AGE_DX;
-	hot_cold_file_global_info.file_area_hot_to_temp_age_dx = FILE_AREA_TEMP_TO_COLD_AGE_DX << 2;
-	hot_cold_file_global_info.file_area_hot_to_temp_age_dx_ori = FILE_AREA_TEMP_TO_COLD_AGE_DX << 2;
-	hot_cold_file_global_info.file_area_refault_to_temp_age_dx = FILE_AREA_TEMP_TO_COLD_AGE_DX << 3;
-	hot_cold_file_global_info.file_area_refault_to_temp_age_dx_ori = FILE_AREA_TEMP_TO_COLD_AGE_DX << 3;
+	hot_cold_file_global_info.file_area_hot_to_temp_age_dx = FILE_AREA_HOT_TO_TEMP_AGE_DX;
+	hot_cold_file_global_info.file_area_hot_to_temp_age_dx_ori = FILE_AREA_HOT_TO_TEMP_AGE_DX;
+	hot_cold_file_global_info.file_area_refault_to_temp_age_dx = FILE_AREA_REFAULT_TO_TEMP_AGE_DX;
+	hot_cold_file_global_info.file_area_refault_to_temp_age_dx_ori = FILE_AREA_REFAULT_TO_TEMP_AGE_DX;
 	/*file_area_temp_to_warm_age_dx取自file_area_temp_to_cold_age_dx的3/4*/
 	hot_cold_file_global_info.file_area_temp_to_warm_age_dx = hot_cold_file_global_info.file_area_temp_to_cold_age_dx - (hot_cold_file_global_info.file_area_temp_to_cold_age_dx >> 2);
 	hot_cold_file_global_info.file_area_temp_to_warm_age_dx_ori = hot_cold_file_global_info.file_area_temp_to_warm_age_dx;
@@ -1829,7 +1829,7 @@ static int __init hot_cold_file_init(void)
 	hot_cold_file_global_info.mmap_file_area_temp_to_cold_age_dx = MMAP_FILE_AREA_TEMP_TO_COLD_AGE_DX;
 	hot_cold_file_global_info.mmap_file_area_hot_to_temp_age_dx = MMAP_FILE_AREA_HOT_TO_TEMP_AGE_DX;
 	hot_cold_file_global_info.mmap_file_area_refault_to_temp_age_dx = MMAP_FILE_AREA_REFAULT_TO_TEMP_AGE_DX;
-	hot_cold_file_global_info.mmap_file_area_free_age_dx = MMAP_FILE_AREA_TO_FREE_AGE_DX;
+	hot_cold_file_global_info.mmap_file_area_free_age_dx = MMAP_FILE_AREA_FREE_AGE_DX;
 	hot_cold_file_global_info.mmap_file_area_hot_age_dx = MMAP_FILE_AREA_HOT_AGE_DX;
 	hot_cold_file_global_info.mmap_file_area_temp_to_warm_age_dx = hot_cold_file_global_info.mmap_file_area_temp_to_cold_age_dx - (hot_cold_file_global_info.mmap_file_area_temp_to_cold_age_dx >> 2);
 	hot_cold_file_global_info.mmap_file_area_warm_to_temp_age_dx = hot_cold_file_global_info.mmap_file_area_temp_to_cold_age_dx - (hot_cold_file_global_info.mmap_file_area_temp_to_cold_age_dx >> 1);
