@@ -81,11 +81,11 @@
 /*发生refault的file_area经过FILE_AREA_REFAULT_TO_TEMP_AGE_DX个周期后，还没有被访问，则移动到file_area_warm链表*/
 #define FILE_AREA_REFAULT_TO_TEMP_AGE_DX 500
 /*普通的file_area在FILE_AREA_TEMP_TO_COLD_AGE_DX个周期内没有被访问则被判定是冷file_area，然后释放这个file_area的page*/
-#define FILE_AREA_TEMP_TO_COLD_AGE_DX  600
+#define FILE_AREA_TEMP_TO_COLD_AGE_DX  10
 /*在file_stat->warm上的file_area经过file_area_warm_to_temp_age_dx个周期没有被访问，则移动到file_stat->temp链表*/
 //#define FILE_AREA_WARM_TO_TEMP_AGE_DX  (FILE_AREA_TEMP_TO_COLD_AGE_DX + 10) 
 /*一个冷file_area，如果经过FILE_AREA_FREE_AGE_DX个周期，仍然没有被访问，则释放掉file_area结构*/
-#define FILE_AREA_FREE_AGE_DX  (FILE_AREA_TEMP_TO_COLD_AGE_DX + 100)
+#define FILE_AREA_FREE_AGE_DX  (FILE_AREA_TEMP_TO_COLD_AGE_DX + 600)
 /*当一个file_area因多次访问被设置了ahead标记，经过FILE_AREA_AHEAD_CANCEL_AGE_DX个周期后file_area没有被访问，才会允许清理file_area的ahead标记*/
 //#define FILE_AREA_AHEAD_CANCEL_AGE_DX (FILE_AREA_TEMP_TO_COLD_AGE_DX + 10)
 
@@ -101,11 +101,11 @@
 
 
 //一个冷file_area，如果经过FILE_AREA_FREE_AGE_DX个周期，仍然没有被访问，则释放掉file_area结构
-#define MMAP_FILE_AREA_FREE_AGE_DX  (MMAP_FILE_AREA_TEMP_TO_COLD_AGE_DX + 100)
+#define MMAP_FILE_AREA_FREE_AGE_DX  (MMAP_FILE_AREA_TEMP_TO_COLD_AGE_DX + 600)
 //发生refault的file_area经过FILE_AREA_REFAULT_TO_TEMP_AGE_DX个周期后，还没有被访问，则移动到file_area_temp链表
 #define MMAP_FILE_AREA_REFAULT_TO_TEMP_AGE_DX 600
 //普通的file_area在FILE_AREA_TEMP_TO_COLD_AGE_DX个周期内没有被访问则被判定是冷file_area，然后释放这个file_area的page
-#define MMAP_FILE_AREA_TEMP_TO_COLD_AGE_DX  600//这个参数调的很小容易在file_area被内存回收后立即释放，这样测试了很多bug，先不要改
+#define MMAP_FILE_AREA_TEMP_TO_COLD_AGE_DX  10//这个参数调的很小容易在file_area被内存回收后立即释放，这样测试了很多bug，先不要改
 
 //file_area如果在 MMAP_FILE_AREA_HOT_AGE_DX 周期内被检测到访问 MMAP_FILE_AREA_ACCESS_HOT_COUNT 次，file_area被判定为热file_area
 #define MMAP_FILE_AREA_ACCESS_HOT_COUNT 2
@@ -707,7 +707,15 @@ struct hot_cold_file_node_pgdat
 	struct list_head pgdat_page_list;
 	struct list_head pgdat_page_list_mmap_file;
 };
-
+struct reclaim_pages_counter{
+	unsigned int tiny_small_file_stat_reclaim_pages;
+	unsigned int small_file_stat_reclaim_pages;
+	unsigned int temp_file_stat_reclaim_pages;
+	unsigned int middle_file_stat_reclaim_pages;
+	unsigned int large_file_stat_reclaim_pages;
+	unsigned int writeonly_file_stat_reclaim_pages;
+	unsigned int global_file_stat_reclaim_pages;
+};
 #define FILE_STAT_CACHE_FILE          0
 #define FILE_STAT_MMAP_FILE           1
 #define GLOBAL_FILE_STAT_CACHE_FILE   2
@@ -788,6 +796,10 @@ struct hot_cold_file_global
 	struct global_file_stat global_mmap_file_stat;
 	struct current_scan_file_stat_info current_scan_file_stat_info[CURRENT_SCAN_FILE_STAT_INFO_MAX];
 	struct current_scan_file_stat_info current_scan_mmap_file_stat_info[CURRENT_SCAN_FILE_STAT_INFO_MAX];
+	struct reclaim_pages_counter reclaim_pages_counter_cache;
+	struct reclaim_pages_counter reclaim_pages_counter_mmap;
+	unsigned int read_file_area_count_in_reclaim;
+	unsigned int cold_file_area_delete_count;
 
 	/*被判定是热文本的file_stat添加到file_stat_hot_head链表,超过50%或者80%的file_area都是热的，则该文件就是热文件，
 	 * 文件的file_stat要移动到global的file_stat_hot_head链表*/
