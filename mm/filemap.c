@@ -1790,9 +1790,8 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 							if(p_file_stat_base->refault_page_count < USHRT_MAX - 2)
 								p_file_stat_base->refault_page_count ++;
 
-							if(file_stat_in_test_base(p_file_stat_base)){
-								printk("%s refault file_stat:0x%llx file_area:0x%llx status:0x%x index:%ld\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,index);
-								dump_stack();
+							if(file_stat_in_test_base(p_file_stat_base) || is_global_file_stat_file_in_debug(mapping)){
+								printk("%s refault file_stat:0x%llx file_area:0x%llx status:0x%x index:%ld  %s\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,index,get_file_name_no_lock_from_mapping(mapping));
 							}
 						}
 					}else{

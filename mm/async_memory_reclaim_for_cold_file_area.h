@@ -901,6 +901,9 @@ struct hot_cold_file_global
 	unsigned int file_area_reclaim_read_age_dx_ori;
 	unsigned int file_area_reclaim_ahead_age_dx;
 	unsigned int file_area_reclaim_ahead_age_dx_ori;
+	unsigned int file_area_cold_level;
+	unsigned int to_down_list_age_dx;
+	unsigned int to_writeonly_cold_list_age_dx;
 	//一个冷file_area，如果经过file_area_free_age_dx_fops个周期，仍然没有被访问，则释放掉file_area结构
 	unsigned int file_area_free_age_dx;
 	unsigned int file_area_free_age_dx_ori;
@@ -1420,6 +1423,7 @@ extern unsigned int xarray_tree_node_cache_hit;
 extern int open_file_area_printk;
 extern int open_file_area_printk_important;
 
+#define is_global_file_stat_file_in_debug(mapping) (1 == mapping->rh_reserved2)
 #define list_num_get(p_file_area)  (p_file_area->warm_list_num_and_access_freq.val_bits.warm_list_num)
 #define file_area_access_freq(p_file_area)  (p_file_area->warm_list_num_and_access_freq.val_bits.access_freq)
 
@@ -3510,7 +3514,7 @@ inline void hot_file_update_file_status(struct address_space *mapping,struct fil
 //extern void hot_file_update_file_status(struct address_space *mapping,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,int access_count,int read_or_write/*,unsigned long index*/);
 extern char *get_file_name_buf(char *file_name_path,struct file_stat_base *p_file_stat_base);
 extern int get_file_name_match(struct file_stat_base *p_file_stat_base,char *file_name1,char *file_name2,char *file_name3); 
-extern char *get_file_name(struct file_stat_base *p_file_stat_base);
+extern char *get_file_name_no_lock_from_mapping(struct address_space *mapping);
 //extern unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_free,struct list_head *file_area_have_mmap_page_head);
 extern unsigned int cold_mmap_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base * p_file_stat_base,struct file_area *p_file_area,struct page *page_buf[],int cold_page_count);
 extern unsigned long shrink_inactive_list_async(unsigned long nr_to_scan, struct lruvec *lruvec,struct hot_cold_file_global *p_hot_cold_file_global,int is_mmap_file, enum lru_list lru);

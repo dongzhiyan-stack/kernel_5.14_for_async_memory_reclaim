@@ -56,6 +56,107 @@
 #include "async_memory_reclaim_for_cold_file_area.h"
 
 /*****proc文件系统**********************************************************************************************************************/
+//to_writeonly_cold_list_age_dx
+static int to_writeonly_cold_list_age_dx_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "%d\n", hot_cold_file_global_info.to_writeonly_cold_list_age_dx);
+	return 0;
+}
+static int to_writeonly_cold_list_age_dx_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, to_writeonly_cold_list_age_dx_show, NULL);
+}
+static ssize_t to_writeonly_cold_list_age_dx_write(struct file *file,
+				const char __user *buffer, size_t count, loff_t *ppos)
+{
+	int rc;
+	unsigned int val;
+	rc = kstrtouint_from_user(buffer, count, 10,&val);
+	if (rc)
+		return rc;
+
+	if(val < 1000)
+		hot_cold_file_global_info.to_writeonly_cold_list_age_dx = val;
+	else
+		return -EINVAL;
+
+	return count;
+}
+static const struct proc_ops to_writeonly_cold_list_age_dx_fops = {
+	.proc_open		= to_writeonly_cold_list_age_dx_open,
+	.proc_read		= seq_read,
+	.proc_lseek     = seq_lseek,
+	.proc_release	= single_release,
+	.proc_write		= to_writeonly_cold_list_age_dx_write,
+};
+
+//file_area_cold_level
+static int file_area_cold_level_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "%d\n", hot_cold_file_global_info.file_area_cold_level);
+	return 0;
+}
+static int file_area_cold_level_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, file_area_cold_level_show, NULL);
+}
+static ssize_t file_area_cold_level_write(struct file *file,
+				const char __user *buffer, size_t count, loff_t *ppos)
+{
+	int rc;
+	unsigned int val;
+	rc = kstrtouint_from_user(buffer, count, 10,&val);
+	if (rc)
+		return rc;
+
+	if(val < 1000)
+		hot_cold_file_global_info.file_area_cold_level = val;
+	else
+		return -EINVAL;
+
+	return count;
+}
+static const struct proc_ops file_area_cold_level_fops = {
+	.proc_open		= file_area_cold_level_open,
+	.proc_read		= seq_read,
+	.proc_lseek     = seq_lseek,
+	.proc_release	= single_release,
+	.proc_write		= file_area_cold_level_write,
+};
+
+//to_down_list_age_dx
+static int to_down_list_age_dx_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "%d\n", hot_cold_file_global_info.to_down_list_age_dx);
+	return 0;
+}
+static int to_down_list_age_dx_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, to_down_list_age_dx_show, NULL);
+}
+static ssize_t to_down_list_age_dx_write(struct file *file,
+				const char __user *buffer, size_t count, loff_t *ppos)
+{
+	int rc;
+	unsigned int val;
+	rc = kstrtouint_from_user(buffer, count, 10,&val);
+	if (rc)
+		return rc;
+
+	if(val < 1000)
+		hot_cold_file_global_info.to_down_list_age_dx = val;
+	else
+		return -EINVAL;
+
+	return count;
+}
+static const struct proc_ops to_down_list_age_dx_fops = {
+	.proc_open		= to_down_list_age_dx_open,
+	.proc_read		= seq_read,
+	.proc_lseek     = seq_lseek,
+	.proc_release	= single_release,
+	.proc_write		= to_down_list_age_dx_write,
+};
 
 //file_area_reclaim_read_age_dx
 static int file_area_reclaim_read_age_dx_show(struct seq_file *m, void *v)
@@ -564,7 +665,8 @@ static int print_file_stat_one_file_area_info(struct seq_file *m,struct list_hea
 	 * 需要该函数标记file_stat的in_print标记，然后禁止该file_stat的file_area跨链表移动???????????*/
 	list_for_each_entry_reverse(p_file_area,file_area_list_head,file_area_list){
 		if(0 == file_area_from_multi_warm_list){
-			/*遍历file_stat_small->other链表上的file_area，同时具备refault、hot、free、mapcount属性，有一个都成立*/
+			/* 遍历file_stat_small->other链表上的file_area，同时具备refault、hot、free、mapcount属性，有一个都成立
+			 * file_stat->hot链表上现在的file_area有hot、mapcount、refault属性，此时不能crash*/
 			//if(get_file_area_list_status(p_file_area) != file_area_type)
 			if((get_file_area_list_status(p_file_area) & file_area_type) == 0){
 				pr_warn("%s invalid file_area:0x%llx state:0x%x!!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
@@ -731,7 +833,7 @@ static ssize_t file_stat_debug_or_make_backlist_write(struct file *file,
 	char *file_path = NULL;
 	char *p;
 	struct file *file_temp;
-	struct inode *inode;
+	struct inode *inode = NULL;
 	struct file_stat_base *p_file_stat_base;
 	int ret = 0,file_blacklist = 0,file_debug = 0;
 	int set_or_clear = -1;
@@ -834,6 +936,7 @@ static ssize_t file_stat_debug_or_make_backlist_write(struct file *file,
 #endif
 	if (IS_ERR(file_temp)){
 		printk("file_open fail:%s %lld\n",file_path,(s64)file_temp);
+		ret = -ENOENT;
 		goto free;
 	}
 
@@ -1038,14 +1141,30 @@ direct_global_file_stat:
 				 }
 
 				 if(set_or_clear){
-					 /*设置文件in test模式*/
-					 set_file_stat_in_test_base(p_file_stat_base);
-					 printk("%s file_stat:0x%llx set_in_debug\n",p,(u64)p_file_stat_base);
+					 if(file_stat_in_global_base(p_file_stat_base)){
+						 /*如果inode是NULL，说明本次仅仅是echo -n debug set global cache设置调试global_file_stat，不是调试global_file_stat的file_area的文件*/
+						 if(inode)
+						     inode->i_mapping->rh_reserved2 = 1;
+
+						 printk("%s file_stat:0x%llx in_global set_in_debug\n",p,(u64)p_file_stat_base);
+					 }
+					 else{
+						 /*设置文件in test模式*/
+						 set_file_stat_in_test_base(p_file_stat_base);
+						 printk("%s file_stat:0x%llx set_in_debug\n",p,(u64)p_file_stat_base);
+					 }
 				 }
 				 else{
-					 /*清理文件in test模式*/
-					 clear_file_stat_in_test_base(p_file_stat_base);
-					 printk("%s file_stat:0x%llx clear_in_debug\n",p,(u64)p_file_stat_base);
+					 if(file_stat_in_global_base(p_file_stat_base)){
+						 if(inode)
+						     inode->i_mapping->rh_reserved2 = 0;
+
+						 printk("%s file_stat:0x%llx in_global clear_in_debug\n",p,(u64)p_file_stat_base);
+					 }else{
+						 /*清理文件in test模式*/
+						 clear_file_stat_in_test_base(p_file_stat_base);
+						 printk("%s file_stat:0x%llx clear_in_debug\n",p,(u64)p_file_stat_base);
+					 }
 				 }
 			 }
 		 }else{
@@ -1146,33 +1265,15 @@ char *get_file_name_buf(char *file_name_path,struct file_stat_base *p_file_stat_
 
 	return (dentry == NULL) ? NULL:dentry->d_iname;
 }
-char *get_file_name(struct file_stat_base *p_file_stat_base)
+char *get_file_name_no_lock_from_mapping(struct address_space *mapping)
 {
 	struct dentry *dentry = NULL;
 	struct inode *inode = NULL;
 
-	/*需要rcu加锁，保证inode在这个宽限期内inode结构体不会被iput()释放掉而非法内存访问*/
-	rcu_read_lock();
-	/*必须 hlist_empty()判断文件inode是否有dentry，没有则返回true。这里通过inode和dentry获取文件名字，必须 inode->i_lock加锁 
-	 *同时 增加inode和dentry的应用计数，否则可能正使用时inode和dentry被其他进程释放了*/
-	if(p_file_stat_base->mapping && p_file_stat_base->mapping->host/* && !hlist_empty(&p_file_stat_base->mapping->host->i_dentry)*/){
-		inode = p_file_stat_base->mapping->host;
-		spin_lock(&inode->i_lock);
-		/*如果inode的引用计数是0，说明inode已经在释放环节了，不能再使用了。现在发现不一定，改为hlist_empty(&inode->i_dentry)判断*/
-		if(/*atomic_read(&inode->i_count) > 0*/ !hlist_empty(&inode->i_dentry)){
-			dentry = hlist_entry(inode->i_dentry.first, struct dentry, d_u.d_alias);
-			//__dget(dentry);------这里不再__dget,因为全程有spin_lock(&inode->i_lock)加锁
-			if(dentry){
-				//snprintf(file_name_path,MAX_FILE_NAME_LEN - 2,"i_count:%d i_size:%lld dentry:0x%llx %s",atomic_read(&inode->i_count),inode->i_size,(u64)dentry,/*dentry->d_iname*/dentry->d_name.name);
-				//snprintf(file_name_path,MAX_FILE_NAME_LEN - 2,"%s",dentry->d_name.name);
-			}
-			//dput(dentry);
-		}else{
-			//snprintf(file_name_path,MAX_FILE_NAME_LEN - 2,"i_count:%d dentry:0x%llx lru_list_empty:%d",atomic_read(&inode->i_count),(u64)inode->i_dentry.first,list_empty(&inode->i_lru));
-		}
-		spin_unlock(&inode->i_lock);
+	inode = mapping->host;
+	if(!hlist_empty(&inode->i_dentry)){
+		dentry = hlist_entry(inode->i_dentry.first, struct dentry, d_u.d_alias);
 	}
-	rcu_read_unlock();
 
 	return (dentry == NULL) ? NULL:dentry->d_iname;
 }
@@ -1860,6 +1961,10 @@ static int __init hot_cold_file_init(void)
 	hot_cold_file_global_info.refault_file_area_scan_dx = 32;
 	hot_cold_file_global_info.writeonly_file_age_dx_ori = 3;
 	hot_cold_file_global_info.writeonly_file_age_dx = hot_cold_file_global_info.writeonly_file_age_dx_ori;
+
+	hot_cold_file_global_info.file_area_cold_level = 100;
+	hot_cold_file_global_info.to_down_list_age_dx = 60;
+	hot_cold_file_global_info.to_writeonly_cold_list_age_dx = 180;
 
 	hot_cold_file_global_info.async_memory_reclaim = kthread_run(async_memory_reclaim_main_thread,&hot_cold_file_global_info, "async_memory_reclaim");
 	if (IS_ERR(hot_cold_file_global_info.async_memory_reclaim)) {
