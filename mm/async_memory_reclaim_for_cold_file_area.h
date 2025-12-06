@@ -1925,11 +1925,11 @@ static inline unsigned int get_file_area_list_status(struct file_area *p_file_ar
 {
 	return p_file_area->file_area_state & FILE_AREA_LIST_MASK;
 }
-static inline long get_file_stat_normal_type_all(struct file_stat_base *file_stat_base)
+static inline unsigned int get_file_stat_normal_type_all(struct file_stat_base *p_file_stat_base)
 {
-	unsigned long file_stat_type = file_stat_base->file_stat_status & FILE_STAT_LIST_MASK;
+	unsigned int file_stat_list_bit = p_file_stat_base->file_stat_status & FILE_STAT_LIST_MASK;
 
-	switch (file_stat_type){
+	switch (file_stat_list_bit){
 		case 1 << F_file_stat_in_file_stat_temp_head_list:
 		case 1 << F_file_stat_in_file_stat_middle_file_head_list:
 		case 1 << F_file_stat_in_file_stat_large_file_head_list:
@@ -1941,11 +1941,11 @@ static inline long get_file_stat_normal_type_all(struct file_stat_base *file_sta
 	return 0;
 
 }
-static inline long get_file_stat_normal_type(struct file_stat_base *file_stat_base)
+static inline unsigned int get_file_stat_normal_type(struct file_stat_base *p_file_stat_base)
 {
-	unsigned long file_stat_type = file_stat_base->file_stat_status & FILE_STAT_LIST_MASK;
+	unsigned int file_stat_list_bit = p_file_stat_base->file_stat_status & FILE_STAT_LIST_MASK;
 
-	switch (file_stat_type){
+	switch (file_stat_list_bit){
 		case 1 << F_file_stat_in_file_stat_temp_head_list:
 			return TEMP_FILE;
 		case 1 << F_file_stat_in_file_stat_middle_file_head_list:
@@ -1960,9 +1960,9 @@ static inline long get_file_stat_normal_type(struct file_stat_base *file_stat_ba
 
 }
 /*判断文件是否是tiny small文件、small文件、普通文件*/
-static inline int get_file_stat_type_common(unsigned int file_stat_type)
+static inline unsigned int get_file_stat_type_common(unsigned int file_stat_list_bit)
 {
-	switch (file_stat_type){
+	switch (file_stat_list_bit){
 		case 1 << F_file_stat_in_file_stat_small_file_head_list:
 			return FILE_STAT_SMALL;
 		case 1 << F_file_stat_in_file_stat_tiny_small_file_head_list:
@@ -1983,26 +1983,26 @@ static inline int get_file_stat_type_common(unsigned int file_stat_type)
 	return -1;
 }
 
-static inline int get_file_stat_type(struct file_stat_base *file_stat_base)
+static inline unsigned int get_file_stat_type(struct file_stat_base *p_file_stat_base)
 {
-	unsigned int file_stat_type = file_stat_base->file_stat_status & FILE_STAT_LIST_MASK;
+	unsigned int file_stat_list_bit = p_file_stat_base->file_stat_status & FILE_STAT_LIST_MASK;
 
-	return get_file_stat_type_common(file_stat_type);
+	return get_file_stat_type_common(file_stat_list_bit);
 }
-static inline int get_file_stat_type_file_iput(struct file_stat_base *file_stat_base)
+static inline unsigned int get_file_stat_type_file_iput(struct file_stat_base *p_file_stat_base)
 {
-	unsigned int file_stat_type = file_stat_base->file_stat_status & FILE_STAT_LIST_MASK;
+	unsigned int file_stat_list_bit = p_file_stat_base->file_stat_status & FILE_STAT_LIST_MASK;
 
 	/* iput()文件时，遇到in_zero_list的file_stat，这种file_stat还保留了原始in_temp、in_middle等状态，
 	 * 这里要清理掉file_stat的in_zero状态，否则get_file_stat_type()会返回-1，现在只返回in_temp、in_middle原始状态*/
 
 	/*编译老是告警，warning: array subscript ‘long unsigned int[0]’ is partly outside array bounds*/
-	//test_and_clear_bit(F_file_stat_in_zero_file_area_list,(unsigned long *)&file_stat_type);
+	//test_and_clear_bit(F_file_stat_in_zero_file_area_list,(unsigned long *)&file_stat_list_bit);
 
-	if(file_stat_type & (1 << F_file_stat_in_zero_file_area_list))
-		file_stat_type &= ~(1 << F_file_stat_in_zero_file_area_list);
+	if(file_stat_list_bit & (1 << F_file_stat_in_zero_file_area_list))
+		file_stat_list_bit &= ~(1 << F_file_stat_in_zero_file_area_list);
 
-	return get_file_stat_type_common(file_stat_type);
+	return get_file_stat_type_common(file_stat_list_bit);
 }
 #define is_file_stat_match_error(p_file_stat_base,file_type) \
 { \
@@ -3444,26 +3444,31 @@ static void inline move_file_area_to_global_delete_list(struct file_stat_base *p
 {
 	if(file_stat_in_cache_file_base(p_file_stat_base)){
 		spin_lock(&hot_cold_file_global_info.global_file_stat.file_area_delete_lock);
-		if(!file_area_in_mapping_delete(p_file_area)){//------这个其实用p_file_area->file_area_delete.prev/next的bit0是否是1，来判断file_area添加到了file_area_delete_list链表
+		/* 这个判断是多余的，一个file_area只可能添加到global_file_stat_delete_list链表一次，第一次进来，file_area->page[0/1]要么是0，
+		 * 表示page被释放了。要么bit0是1，表示被异步内存回收或kswapd线程回收而在file_area->page[0/1]做了标记。只可能是以上情况，
+		 * 如果不是，说明file_area被重复添加到了global_file_stat_delete_list链表，这是异常的，要在
+		 * check_file_area_delete_list_is_not_page函数里panic，不能在这里做if限制，也没这个必要。于是把set_file_area_in_mapping_delete()
+		 * 放到iput()流程，检测到file_area没有page，立即对file_area进行set_file_area_in_mapping_delete()*/
+		//if(!file_area_in_mapping_delete(p_file_area)){
 			check_file_area_delete_list_is_not_page(p_file_area);
 
 			/* 写代码稍微不过脑子就犯了错，file_area->file_area_delete的next和prev来自file_area->page[0/1]，默认是0，
 			 * 根本就没有添加到其他链表，故不能用list_move，而是list_add，首次添加到其他链表用list_add*/
 			//list_move(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_file_stat.file_area_delete_list);
 			list_add(&p_file_area->file_area_delete,&hot_cold_file_global_info.global_file_stat.file_area_delete_list);
-			set_file_area_in_mapping_delete(p_file_area);
-		}
+			//set_file_area_in_mapping_delete(p_file_area);
+		//}
 		spin_unlock(&hot_cold_file_global_info.global_file_stat.file_area_delete_lock);
 	}
 	else{
 		spin_lock(&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_lock);
-		if(!file_area_in_mapping_delete(p_file_area)){
+		//if(!file_area_in_mapping_delete(p_file_area)){
 			check_file_area_delete_list_is_not_page(p_file_area);
 
 			//list_move(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_list);
 			list_add(&p_file_area->file_area_delete,&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_list);
-			set_file_area_in_mapping_delete(p_file_area);
-		}
+			//set_file_area_in_mapping_delete(p_file_area);
+		//}
 		spin_unlock(&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_lock);
 	}
 }

@@ -1641,6 +1641,7 @@ void replace_page_cache_page(struct page *old, struct page *new)
 }
 EXPORT_SYMBOL_GPL(replace_page_cache_page);
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
+#if 0
 noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 		struct folio *folio, pgoff_t index, gfp_t gfp, void **shadowp)
 {
@@ -1991,6 +1992,290 @@ error:
 	folio_put_refs(folio, nr);
 	return xas_error(&xas);
 }
+#else
+static void inline async_and_kswapd_refault_page_count(struct file_stat_base *p_file_stat_base,struct folio *folio_temp,void **shadowp)
+{
+	/* 统计发生refault的page数，跟workingset_refault_file同一个含义。但是有个问题，只有被异步内存回收线程
+	 * 回收的page的file_area才会被标记in_free，被kswapd内存回收的page的file_area，就不会标记in_free
+	 * 了。问题就出在这里，当这些file_area的page将来被访问，发生refault，但是这些file_area因为没有in_free
+	 * 标记，导致这里if不成立，而无法统计发生refault的page，漏掉了。怎么解决，kswapd内存回收的page最终
+	 * 也是执行page_cache_delete_for_file_area函数释放page的，在该函数里，如果file_area没有in_free标记，
+	 * 则标记in_free。后续该file_area的page再被访问，这里就可以统计到了。
+	 *
+	 * 有个问题，假设file_area里有3个page，只有一个page0内存回收成功，还有两个page，page1、page3没回收
+	 * 成功。file_area被设置了in_free标记。如果将来page1被访问了，这里file_area_refault_file岂不是要
+	 * 加1了，这就是误加1了，因为page1并没有发生refault。仔细想想不会，因为page1存在于file_area，将来
+	 * 该page被访问，直接从xrray tree找到file_area再找到page1，就返回了，不会执行到当前函数。即便执行
+	 * 到当前函数，因为page1存在于file_area，上边xas_set_err(&xas, -EEXIST)就返回了，不会执行到这里的
+	 * hot_cold_file_global_info.file_area_refault_file ++。*/
+	/*filemap_add_folio()函数增加refault次数有限制条件，就是gfp没有__GFP_WRITE标记，即folio不是write的，而是read的*/
+
+	/*如果该page被异步内存回收线程回收而做了shadow标记*/
+	if(1 == (u64)folio_temp){
+		/*异步内存回收造成的refault page数统计到/proc/vmstat里*/
+		atomic_long_add(1, &vm_node_stat[WORKINGSET_REFAULT_FILE]);
+
+		/* file_area_refault_file存在多进程并发加1的情况而不准。这只是一个粗略的统计值，只要跟WORKINGSET_REFAULT_FILE统计的refault别偏差太大就行*/
+		hot_cold_file_global_info.file_area_refault_file ++;
+		if(p_file_stat_base->refault_page_count < USHRT_MAX - 2)
+			p_file_stat_base->refault_page_count ++;
+
+	}else{
+		/*否则folio_temp非NULL，说明是kswapd内存的page保存的shadow。如果是文件截断回收的page则folio_temp是NULL。但是上边加了if(folio_temp)限制*/
+		if(shadowp)
+			*shadowp = folio_temp;
+
+		/*这是统计kswapd造成的refault page数，有意义吗，反正我也统计不了呀。算了还是先统计吧*/
+		hot_cold_file_global_info.kswapd_file_area_refault_file ++;
+		if(p_file_stat_base->refault_page_count_last < USHRT_MAX - 2)
+			p_file_stat_base->refault_page_count_last ++;
+	}
+}
+noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
+		struct folio *folio, pgoff_t index, gfp_t gfp, void **shadowp)
+{
+	/*index是long型？area_index_for_page也有必要定义成long型吧???????????????*/
+	unsigned int area_index_for_page = index >> PAGE_COUNT_IN_AREA_SHIFT;
+	//XA_STATE(xas, &mapping->i_pages, index);
+	XA_STATE(xas, &mapping->i_pages, area_index_for_page);
+	int huge = folio_test_hugetlb(folio);
+	bool charged = false;
+	long nr = 1;
+	//struct file_stat *p_file_stat;
+	struct file_stat_base *p_file_stat_base;
+	struct file_area *p_file_area;
+	struct folio *folio_temp;
+	gfp_t gfp_ori = gfp;
+	
+	//令page索引与上0x3得到它在file_area的pages[]数组的下标
+	unsigned int page_offset_in_file_area = index & PAGE_COUNT_IN_AREA_MASK;
+
+	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+	VM_BUG_ON_FOLIO(folio_test_swapbacked(folio), folio);
+	//mapping_set_update(&xas, mapping); shadow 操作，这里不再设置
+	FILE_AREA_PRINT("%s mapping:0x%llx folio:0x%llx index:%ld area_index_for_page:%d\n",__func__,(u64)mapping,(u64)folio,index,area_index_for_page);
+	
+	/* 这段代码有个隐藏很深的bug!!!!!!!!!!!!，如果进程1文件open后，mmap映射，然后读写映射的地址产生缺页异常。
+	 * 接着分配新的page并执行该函数：加global mmap_file_global_lock锁后，分配file_stat并赋值给mapping->rh_reserved1。
+	 * 同时，进程2也open该文件，直接读写该文件，然后分配新的page并执行到函数：加global file_global_lock锁后，分配
+	 * file_stat并赋值给mapping->rh_reserved1。因为cache文件mmap文件用的global锁不一样，所以无法避免同时分配
+	 * file_stat并赋值给mapping->rh_reserved1，这位就错乱了。依次，这段分配file_stat并赋值给mapping->rh_reserved1
+	 * 的代码要放到xas_lock_irq(&xas)这个锁里，可以避免这种情况*/
+#if 0
+	p_file_stat = (struct file_stat *)mapping->rh_reserved1;
+	if(!p_file_stat){
+		//分配file_stat
+		if(RB_EMPTY_ROOT(&mapping->i_mmap.rb_root))
+			p_file_stat  = file_stat_alloc_and_init(mapping);
+		else
+			p_file_stat = add_mmap_file_stat_to_list(mapping);
+		if(!p_file_stat){
+			xas_set_err(&xas, -ENOMEM);
+			goto error; 
+		}
+	}
+#endif
+	if (!huge) {
+		int error = mem_cgroup_charge(folio, NULL, gfp);
+		VM_BUG_ON_FOLIO(index & (folio_nr_pages(folio) - 1), folio);
+		if (error)
+			return error;
+		charged = true;
+		/*xas_set_order()里会把page索引重新赋值给xas.xa_index，而xas.xa_index正确应该是file_area索引*/
+		//xas_set_order(&xas, index, folio_order(folio));
+		xas_set_order(&xas, area_index_for_page, folio_order(folio));
+		nr = folio_nr_pages(folio);
+	}
+
+	/*这里会去掉gfp的__GFP_WRITE标记*/
+	gfp &= GFP_RECLAIM_MASK;
+	folio_ref_add(folio, nr);
+	folio->mapping = mapping;
+	//folio->index = xas.xa_index;
+	folio->index = index;
+
+	if(nr != 1 || folio_order(folio) != 0){
+		panic("%s index:%ld folio->index:%ld nr:%ld folio_order(folio):%d\n",__func__,index,folio->index,nr,folio_order(folio));
+	}
+   
+	/*这里加rcu_read_lock+rmp_rmb() 很重要，目的有两个。详细mapping_get_entry和mapping_get_entry_for_file_area也有说明。
+	 *1：当前文件可能被异步内存回收线程有file_stat_tiny_small转成成file_stat_small，然后标记replaced后，就rcu异步释放掉。
+	     这个rcu_read_lock可以保证file_stat_tiny_small结构体不会被立即释放掉，否则当前函数使用的file_stat_tiny_small内存就是无效
+	  2: 当前文件file_stat可能因长时间不使用被异步内存回收线程并发 cold_file_stat_delete() rcu异步释放掉，并标记
+	     file_stat->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE.rcu_read_lock保证file_stat结构体不会被立即释放掉，否则这里使用
+		 file_stat就是无效内存访问。smp_rmb()是保证立即看到mapping->rh_reserved1是SUPPORT_FILE_AREA_INIT_OR_DELETE。其实不用加内存
+		 屏障cold_file_stat_delete()函数和当前函数都有xas_lock_irq(&xas)加锁判断mapping->rh_reserved1是否是SUPPORT_FILE_AREA_INIT_OR_DELETE
+		 为了保险，还是加上smp_rmb()，以防止将来下边的if(SUPPORT_FILE_AREA_INIT_OR_DELETE == mapping->rh_reserved1)没有放到xas_lock_irq()加锁里*/
+	rcu_read_lock();
+	smp_rmb();
+	do {
+		//这里边有执行xas_load()，感觉浪费性能吧!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+		unsigned int order = xa_get_order(xas.xa, xas.xa_index);
+		void *entry/*, *old = NULL*/;
+		/*这个赋值NULL必须，因为这里可能第1次把folio添加到xarray tree失败，然后第2次这里赋值NULL 就受上一个page的影响了*/
+		folio_temp = NULL;
+
+		if (order > folio_order(folio)){
+			panic("%s order:%d folio_order:%d error !!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,order,folio_order(folio));
+			xas_split_alloc(&xas, xa_load(xas.xa, xas.xa_index),
+					order, gfp);
+		}
+		xas_lock_irq(&xas);
+		/*file_stat可能会被方法删除，则分配一个新的file_stat，具体看cold_file_stat_delete()函数*/
+		if(SUPPORT_FILE_AREA_INIT_OR_DELETE == mapping->rh_reserved1){
+			p_file_stat_base = file_stat_alloc_and_init_tiny_small(mapping,!mapping_mapped(mapping));
+
+			if(!p_file_stat_base){
+				xas_set_err(&xas, -ENOMEM);
+				//goto error; 
+				goto unlock;
+			}
+		}else
+			p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+
+		if(file_stat_in_delete_base(p_file_stat_base))
+			panic("%s %s %d file_stat:0x%llx status:0x%x in delete\n",__func__,current->comm,current->pid,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+		//xas_lock_irq加锁后，检测到待添加的file_area已经被其他进程并发添加到xarray tree了
+		xas_for_each_conflict(&xas, entry) {
+			//old = entry;
+			//if (!xa_is_value(entry)) 
+
+			//if(!p_file_area)从进来说明file_area已经非NULL，不用再判断
+			//    goto ;
+			p_file_area = entry_to_file_area(entry);
+
+			/*如果p_file_area->pages[0/1]保存的folio是NULL，或者是folio_is_file_area_index_or_shadow(folio)，都要分配新的page。
+			 *否则才说明是有效的page指针，直接goto unlock，不用再分配新的。如果正好file_area的索引是0保存在p_file_area->pages[0/1]，
+			 *此时if也不成立，也要分配新的page。只有不是NULL且不是file_area索引时才说明是有效的folio指针，此时才会goto unlock，不用再分配新的page*/
+			folio_temp = rcu_dereference(p_file_area->pages[page_offset_in_file_area]);
+			//page已经添加到file_area了
+			//if(NULL != p_file_area->pages[page_offset_in_file_area])
+			//if(NULL != folio_temp && !folio_is_file_area_index_or_shadow(folio_temp)){
+			if(folio_temp){
+				if(!folio_is_file_area_index_or_shadow(folio_temp)){
+					xas_set_err(&xas, -EEXIST);
+					goto unlock;
+				}
+
+				/*统计refault page个数，但只有read的refault page才计入refault统计*/
+				if(!(gfp_ori & __GFP_WRITE)){
+					async_and_kswapd_refault_page_count(p_file_stat_base,folio_temp,shadowp);
+
+					if((file_stat_in_test_base(p_file_stat_base) || is_global_file_stat_file_in_debug(mapping)) && (1 == (u64)folio_temp)){
+						printk("%s refault file_stat:0x%llx file_area:0x%llx status:0x%x index:%ld  %s\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,index,get_file_name_no_lock_from_mapping(mapping));
+					}
+				}
+
+			}
+
+			//file_area已经添加到xarray tree，但是page还没有赋值到file_area->pages[]数组
+			goto find_file_area;
+		}
+
+		//分配file_area
+		p_file_area  = file_area_alloc_and_init(area_index_for_page,p_file_stat_base,mapping);
+		if(!p_file_area){
+			//xas_unlock_irq(&xas);
+			xas_set_err(&xas, -ENOMEM);
+			//goto error; 
+			goto unlock; 
+		}
+
+		//xas_store(&xas, folio);
+		xas_store(&xas, file_area_to_entry(p_file_area));
+		if (xas_error(&xas))
+			goto unlock;
+
+find_file_area:
+		/*if(get_file_name_match(p_file_stat_base,"binlog.index","resolv.conf","system.devices")){
+			printk("%s file_stat:0x%llx status 0x%x mmap:%d mapping:0x%llx add_folio\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,mapping_mapped(mapping),(u64)mapping);
+			dump_stack();
+		}*/
+		
+		set_file_area_page_bit(p_file_area,page_offset_in_file_area);
+		FILE_AREA_PRINT1("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx index:%ld page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,index,page_offset_in_file_area);
+        
+		/*不是NULL并且不是file_area的索引时，才触发crash，这个判断是多余的???????????????????。算了还是加上这个判断吧，多一个异常判断多点靠谱，最然看着没啥用*/
+		folio_temp = rcu_dereference(p_file_area->pages[page_offset_in_file_area]);
+		if(NULL != folio_temp && !folio_is_file_area_index_or_shadow(folio_temp))
+			panic("%s p_file_area->pages:0x%llx != NULL error folio:0x%llx\n",__func__,(u64)p_file_area->pages[page_offset_in_file_area],(u64)folio);
+
+		/*这里跟delete file_area page的两个函数配合，在set/clear file_area->file_area_state和向file_area->pages[]保存page/设置NULL
+		 *之间都加了个内存屏障。虽然这3个函数的这些操作前都加了spin_lock(&mapping->host->i_lock锁，但是分析spin_lock/spin_unlock
+		 *源码后，spin_lock加锁能100%保证对两个变量的赋值一定按照顺序生效吗。比如该函数里执行
+		 *"set_file_area_page_bit(p_file_area,page_offset_in_file_area)" 和 "p_file_area->pages[page_offset_in_file_area] = folio"
+		 *后，delete_from_page_cache_batch_for_file_area()函数先执行
+		 *"folio = p_file_area->pages[page_offset_in_file_area] ;if(!folio) goto next_page"和
+		 *"clear_file_area_page_bit(p_file_area,page_offset_in_file_area)" ，存在一种可能，folio = p_file_area->pages[page_offset_in_file_area]
+		 *得到的folio不是NULL，cache在多核cpu之间已经同步生效。但是file_area->file_area_state里的page bit还是0，set操作还没生效。
+		 *于是clear_file_area_page_bit(p_file_area,page_offset_in_file_area)里触发crash，因为file_area->pages[]里存在page，但是对应的
+		 *file_area->file_area_state里的page bit是0，就会触发crash。因此在这两个函数里，才进行
+		 *"set/clear file_area->file_area_state跟向file_area->pages[]保存page/设置NULL，之间都加了个内存屏障"，确保该函数里
+		 *"set_file_area_page_bit(p_file_area,page_offset_in_file_area)"一定先在"p_file_area->pages[page_offset_in_file_area] = folio"
+		 *生效。反过来，delete_from_page_cache_batch_for_file_area()和page_cache_delete_for_file_area()函数里也要加同样的内存屏障，
+		 *确保对"p_file_area->pages[page_offset_in_file_area]=NULL" 先于"clear_file_area_page_bit(p_file_area,page_offset_in_file_area)"
+		 *之前生效，然后保证该函数先看到p_file_area->pages[page_offset_in_file_area]里的page是NULL，
+		 *"set_file_area_page_bit(p_file_area,page_offset_in_file_area)"执行后，p_file_area->pages[page_offset_in_file_area]一定是NULL，
+		 *否则"if(NULL != p_file_area->pages[page_offset_in_file_area])"会触发crash。
+		 *
+		 * 但是理论上spin_lock加锁肯定能防护变量cpu cache同步延迟问题，加个smp_wmb/smp_mb内存屏障没啥用。此时发现个问题，我在看内核原生
+		 * page_cache_delete/page_cache_delete_batch/__filemap_add_folio 向xarray tree保存page指针或者删除page，都是spin_lock(xas_lock)
+		 * 加锁后，执行xas_store(&xas, folio)或xas_store(&xas, folio)，里边最后都是执行rcu_assign_pointer(*slot, entry)把page指针或者NULL
+		 * 保存到xarray tree里父节点的槽位。并且这些函数xas_load查找page指针时，里边都是执行rcu_dereference_check(node->slots[offset],...)
+		 * 返回page指针。于是，在这3个函数里，查找page指针 或者 保存page指针到xarray tree也都使用rcu_assign_pointer和rcu_dereference_check。
+		 * 目的是：这两个rcu函数都是对变量的volatile访问，再加上内存屏障，绝对保证对变量的访问没有cache影响，并且每次都是从内存中访问。
+		 * 实在没其他思路了，只能先这样考虑了。
+		 *
+		 * 还有一点，我怀疑这个bug的触发时机跟我的另一个bug有关:file_stat_lock()里遇到引用计数是0的inode，则错误的执行iput()释放掉该inode。
+		 * 这导致inode的引用计数是-1，后续该inode又被进程访问，inode的引用计数是0.结果此时触发了关机，这导致该inode被进程访问时，该inode
+		 * 被umount进程强制执行evict()释放掉。inode一边被使用一边被释放，可能会触发未知问题。虽然umount进程会执行
+		 * page_cache_delete_batch_for_file_area()释放文件inode的page，而此时访问该inode的进程可能正执行__filemap_add_folio_for_file_area()
+		 * 向file_area->pages[]保存page并设置page在file_area->file_area_state的bit位，但是两个进程都是spin_lock(&mapping->host->i_lock加锁
+		 * 进行的操作，不会有问题吧?其他会导致有问题的场景，也没有。现在已经解决"file_stat_lock()里遇到引用计数是0的inode，则错误的执行
+		 * iput()释放掉该inode"的bug，这个问题估计不会再出现。以上就是针对"20240723  复制新的虚拟机后 clear_file_area_page_bit crash"
+		 * case的最终分析，被折磨了快3周!!!!!!!!!!!!!
+		 */
+		smp_wmb();
+		//folio指针保存到file_area
+		//p_file_area->pages[page_offset_in_file_area] = folio;
+		rcu_assign_pointer(p_file_area->pages[page_offset_in_file_area], folio);
+
+		mapping->nrpages += nr;
+
+		/* hugetlb pages do not participate in page cache accounting */
+		if (!huge) {
+			__lruvec_stat_mod_folio(folio, NR_FILE_PAGES, nr);
+			if (folio_test_pmd_mappable(folio))
+				__lruvec_stat_mod_folio(folio,
+						NR_FILE_THPS, nr);
+		}
+unlock:
+		xas_unlock_irq(&xas);
+	} while (xas_nomem(&xas, gfp));
+	//} while (0);
+
+	if (xas_error(&xas))
+		goto error;
+     
+	trace_mm_filemap_add_to_page_cache(folio);
+	    
+	rcu_read_unlock();
+	return 0;
+error:
+//if(p_file_area) 在这里把file_area释放掉??????????有没有必要
+//	file_area_alloc_free();
+
+	rcu_read_unlock();
+
+	if (charged)
+		mem_cgroup_uncharge(folio);
+	folio->mapping = NULL;
+	/* Leave page->index set: truncation relies upon it */
+	folio_put_refs(folio, nr);
+	return xas_error(&xas);
+}
+#endif
 #endif
 noinline int __filemap_add_folio(struct address_space *mapping,
 		struct folio *folio, pgoff_t index, gfp_t gfp, void **shadowp)
@@ -3716,6 +4001,21 @@ retry:
 	//	return folio;
 	*p_file_area = entry_to_file_area(*p_file_area);
 
+	/* 在iput状态，mapping_exiting()成立，找到file_area立即设置set_file_area_in_mapping_delete()，异步内存回收线程碰到
+	 * 这种file_area，都不能在对该file_area进行list_move移动到其他链表，或者cold_file_area_delete()，作为一个保险。
+	 * 主要以前遇到过bug，异步内存回收线程把这里已经iput()的file_area，执行cold_file_area_delete()错误把file_area从
+	 * xarray tree剔除了，导致这个xarray tree所属文件的对应索引的file_area被错误从xarray tree剔除了。
+	 * 接着，继续执行下边的代码，在file_area没有page时，把file_area移动到global_file_stat_delete链表，后续异步内存
+	 * 回收线程再遍历global_file_stat_delete链表上的file_area，释放掉。注意，如果文件不是mapping_exiting()状态，
+	 * 直接goto find_page_from_file_area，获取file_area的page*/
+	if(mapping_exiting(mapping)){
+		if(!file_area_in_mapping_delete(*p_file_area))
+			set_file_area_in_mapping_delete(*p_file_area);
+	}
+	else{
+		goto find_page_from_file_area; 
+	}
+
 	/* 重大bug，引入多层warm链表机制后，tiny small文件的file_area全都移动到global_file_stat链表，释放掉文件file_stat，隐患就此
 	 * 引入。这些文件在iput()释放时，因为file_stat早已经释放掉，无法在最后执行的__destroy_inode_handler_post函数里，把file_stat
 	 * 移动到global->delete链表，然后异步内存回收线程再从global->delete链表得到该file_stat，释放掉file_area。于是想了一个办法，
@@ -3814,7 +4114,7 @@ retry:
 	 *delete_from_page_cache_batch(mapping, &fbatch)->page_cache_delete_batch()，把这个没有page的file_area从xarray tree剔除。于是只能在
 	 *truncate_inode_pages_range->find_lock_entries调用到该函数时，遇到没有page的file_area，强制把file_area从xarray tree剔除了*/
 	//if(!file_area_have_page(*p_file_area) && mapping_exiting(mapping)){
-	if((*p_file_area)->mapping && !file_area_have_page(*p_file_area) && mapping_exiting(mapping)){
+	if((*p_file_area)->mapping && !file_area_have_page(*p_file_area) /*&& mapping_exiting(mapping)*/){
 		/*为了不干扰原有的xas，重新定义一个xas_del*/
 #ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
 		XA_STATE(xas_del, &mapping->i_pages, get_file_area_start_index(*p_file_area));
@@ -3840,7 +4140,7 @@ retry:
 		  况且上边已经做了if(!file_area_have_page(*p_file_area))防护，以防万一还是spin_lock
 		  加锁再防护一次，防止此时有进程并发读写该文件导致file_area分配了新的page*/
 		if(file_area_have_page(*p_file_area))
-			panic("%s file_area:0x%llx have page\n",__func__,(u64)p_file_area);
+			panic("%s file_area:0x%llx have page\n",__func__,(u64)(*p_file_area));
 		old_entry = xas_store(&xas_del, NULL);
 		xas_unlock_irq(&xas_del);
 
@@ -3857,20 +4157,6 @@ retry:
 		 * 是NULL，说明该file_area已经被异步内存回收线程释放了，那这里就不能再把file_area移动到
 		 * global_file_stat.file_area_delete_list链表了。*/
 		if(/*old_entry && */file_stat_in_global_base((struct file_stat_base *)mapping->rh_reserved1)){
-			/*if(file_stat_in_cache_file_base((struct file_stat_base *)mapping->rh_reserved1)){
-				spin_lock(&hot_cold_file_global_info.global_file_stat.file_area_delete_lock);
-				// 写代码稍微不过脑子就犯了错，file_area->file_area_delete的next和prev来自file_area->page[0/1]，默认是0，
-				// 根本就没有添加到其他链表，故不能用list_move，而是list_add，首次添加到其他链表用list_add
-				//list_move(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_file_stat.file_area_delete_list);
-				list_add(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_file_stat.file_area_delete_list);
-				spin_unlock(&hot_cold_file_global_info.global_file_stat.file_area_delete_lock);
-			}
-			else{
-				spin_lock(&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_lock);
-				//list_move(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_list);
-				list_add(&(*p_file_area)->file_area_delete,&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_list);
-				spin_unlock(&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_lock);
-			}*/
 			if(old_entry)
 			    move_file_area_to_global_delete_list((struct file_stat_base *)mapping->rh_reserved1,*p_file_area);
 			else{
