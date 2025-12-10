@@ -380,7 +380,11 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
 				/*这个写屏障保证异步内存回收线程cold_file_area_delete()函数里，立即看到file_area->mapping是NULL*/
 				smp_wmb();
 				//文件iput了，此时file_area一个page都没有，于是把file_area移动到global_file_stat.file_area_delete_list链表
+#if 0
 				move_file_area_to_global_delete_list((struct file_stat_base *)mapping->rh_reserved1,p_file_area);
+#else
+				set_file_area_in_mapping_delete(p_file_area);
+#endif
 			}else{
 				printk("%s file_area:0x%llx mapping NULL\n",__func__,(u64)p_file_area);
 			}
@@ -726,7 +730,11 @@ find_page_from_file_area:
 						/*这个写屏障保证异步内存回收线程cold_file_area_delete()函数里，立即看到file_area->mapping是NULL*/
 						smp_wmb();
 						/*文件iput了，此时file_area一个page都没有，于是把file_area移动到global_file_stat.file_area_delete_list链表*/
+#if 0	
 						move_file_area_to_global_delete_list((struct file_stat_base *)mapping->rh_reserved1,p_file_area);
+#else
+						set_file_area_in_mapping_delete(p_file_area);
+#endif
 					}else{
 						printk("%s file_area:0x%llx mapping NULL\n",__func__,(u64)p_file_area);
 					}
@@ -4007,14 +4015,14 @@ retry:
 	 * xarray tree剔除了，导致这个xarray tree所属文件的对应索引的file_area被错误从xarray tree剔除了。
 	 * 接着，继续执行下边的代码，在file_area没有page时，把file_area移动到global_file_stat_delete链表，后续异步内存
 	 * 回收线程再遍历global_file_stat_delete链表上的file_area，释放掉。注意，如果文件不是mapping_exiting()状态，
-	 * 直接goto find_page_from_file_area，获取file_area的page*/
-	if(mapping_exiting(mapping)){
+	 * 直接goto find_page_from_file_area，获取file_area的page。这个方案取消了，原因看下边*/
+	/*if(mapping_exiting(mapping)){
 		if(!file_area_in_mapping_delete(*p_file_area))
 			set_file_area_in_mapping_delete(*p_file_area);
 	}
 	else{
 		goto find_page_from_file_area; 
-	}
+	}*/
 
 	/* 重大bug，引入多层warm链表机制后，tiny small文件的file_area全都移动到global_file_stat链表，释放掉文件file_stat，隐患就此
 	 * 引入。这些文件在iput()释放时，因为file_stat早已经释放掉，无法在最后执行的__destroy_inode_handler_post函数里，把file_stat
@@ -4114,7 +4122,7 @@ retry:
 	 *delete_from_page_cache_batch(mapping, &fbatch)->page_cache_delete_batch()，把这个没有page的file_area从xarray tree剔除。于是只能在
 	 *truncate_inode_pages_range->find_lock_entries调用到该函数时，遇到没有page的file_area，强制把file_area从xarray tree剔除了*/
 	//if(!file_area_have_page(*p_file_area) && mapping_exiting(mapping)){
-	if((*p_file_area)->mapping && !file_area_have_page(*p_file_area) /*&& mapping_exiting(mapping)*/){
+	if((*p_file_area)->mapping && !file_area_have_page(*p_file_area) && mapping_exiting(mapping)){
 		/*为了不干扰原有的xas，重新定义一个xas_del*/
 #ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
 		XA_STATE(xas_del, &mapping->i_pages, get_file_area_start_index(*p_file_area));
@@ -4156,10 +4164,27 @@ retry:
 		 * 为了防护这个并发问题，主要使用上边的xas_lock_irq()加锁，从xrray tree遍历该file_area，如果返回值old_entry
 		 * 是NULL，说明该file_area已经被异步内存回收线程释放了，那这里就不能再把file_area移动到
 		 * global_file_stat.file_area_delete_list链表了。*/
+		/*这个方案有了新问题，异步内存回收线程get_file_area_mmap_age()和cold_file_isolate_lru_pages_and_shrink()正在
+		 *遍历file_area->pages[0、1]的page，但是同时这个file_area的文件被iput()了，然后find_get_entry_for_file_area()里
+		 *执行move_file_area_to_global_delete_list()把file_area以file_area->pages[0、1]作为struct list_head file_area_delete
+		 *移动到global_file_stat_delete链表，就会修改file_area->pages[0、1]，指向该file_area在global_file_stat_delete链表
+		 *前后的file_area。总之，此时file_area->pages[0、1]保存的不再是folio指针，而是指向file_area。然后，get_file_area_mmap_age()
+		 *和cold_file_isolate_lru_pages_and_shrink()函数里错把file_area->pages[0、1]当成folio指针，进行内存回收或folio_referenced()
+		 *就会导致异常的内存踩踏了！解决办法就是iput()针对global_file_stat的文件file_area不再移动到global_file_stat_delete链表，
+		 *只是标记set_file_area_in_mapping_delete，后续异步内存回收线程遇到这种file_area再移动到global_file_stat_delete链表。
+		 *但是有一点要注意，要在old_entry = xas_store(&xas_del, NULL)把file_area从xarray tree剔除后，再执行
+		 *set_file_area_in_mapping_delete(*p_file_area)，保证异步内存回收线程看到file_area有in_mapping_exit标记后，再把file_area
+		 *移动到global_file_stat_delete链表，保证此时file_area已经被从xarray tree剔除掉*/	
 		if(/*old_entry && */file_stat_in_global_base((struct file_stat_base *)mapping->rh_reserved1)){
-			if(old_entry)
-			    move_file_area_to_global_delete_list((struct file_stat_base *)mapping->rh_reserved1,*p_file_area);
-			else{
+			if(old_entry){
+#if 0
+				move_file_area_to_global_delete_list((struct file_stat_base *)mapping->rh_reserved1,*p_file_area);
+#else
+				/*注意，set_file_area_in_mapping_delete必须放到这里做，确保该file_area没有因为长时间没访问，被判定是冷file_area，
+				 *而被异步内存回收线程主动执行cold_file_area_delete()释放掉*/
+				set_file_area_in_mapping_delete(*p_file_area);
+#endif		
+			}else{
 				/*如果old_entry是NULL，但file_area->mapping不是NULL则panic。不可能，因为上边已经清NULL了*/
 				/*if(NULL != (*p_file_area)->mapping)
 					panic("%s file_area:0x%llx file_area mapping NULL\n",__func__,(u64)p_file_area);*/

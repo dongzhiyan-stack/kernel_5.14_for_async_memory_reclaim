@@ -463,7 +463,7 @@ struct file_area
 		/* global_file_stat链表上的file_area在文件iput()释放时，依照file_area->file_area_delete把file_area移动到
 		 * global_file_stat->file_stat_delete链表。目的是这个list_move操作不用加锁，避免跟file_area.file_area_list
 		 * 链表形成并发*/
-		struct list_head file_area_delete;
+		//struct list_head file_area_delete;
 	};
 
 	#ifdef HOT_FILE_UPDATE_FILE_STATUS_USE_OLD	
@@ -3427,10 +3427,13 @@ static void inline set_file_area_in_mapping_delete(struct file_area *p_file_area
 }
 static char inline file_area_in_mapping_delete(struct file_area *p_file_area)
 {
-	//return (p_file_area->mapping == NULL);
-	return file_area_in_mapping_exit(p_file_area) || (p_file_area->mapping == NULL);
+	/* 非global_file_stat的正常的file_stat的file_area也会在iput()时把p_file_area->mapping设置NULL，这会导致这些file_stat的file_area被误判
+	 * 为有file_area_in_mapping_delete标记，造成误判，把把个file_area移动到global_file_stat_delete链表，大错特错，因此要去掉(p_file_area->mapping == NULL)*/
+	//return file_area_in_mapping_exit(p_file_area) || (p_file_area->mapping == NULL);
+	return file_area_in_mapping_exit(p_file_area);
 }
 #endif
+#if 0
 /* 当文件iput时，针对没有page的file_area，要把file_area移动到global_file_stat_delete链表，用的是file_area的
  * file_area_delete成员，本质就是file_area->page[0/1]。此时二者要么是NULL，要么是xa_is_value。不可能是page
  * 指针，如果是page指针，这里就要crash，负责就会覆盖掉page->page[0/1]里保存的page指针*/
@@ -3472,6 +3475,7 @@ static void inline move_file_area_to_global_delete_list(struct file_stat_base *p
 		spin_unlock(&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_lock);
 	}
 }
+#endif
 #if 0
 /*遍历file_stat_tiny_small->temp链表上的file_area，遇到hot、refault的file_area则移动到新的file_stat对应的链表。
  * 注意，执行这个函数前，必须保证没有进程再会访问该file_stat_tiny_small*/
