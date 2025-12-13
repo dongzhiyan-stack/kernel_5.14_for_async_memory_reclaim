@@ -2617,6 +2617,9 @@ static inline void update_file_stat_next_multi_level_warm_or_writeonly_list(stru
 	if(NULL == p_current_scan_file_stat_info->p_traverse_file_stat)
 		return;
 
+	if(!file_stat_in_file_area_in_tmp_list_base(&p_file_stat->file_stat_base))
+		panic("%s p_current_scan_file_stat_info:0x%llx p_file_stat:0x%llx error",__func__,(u64)p_current_scan_file_stat_info,(u64)p_file_stat);
+
 	clear_file_stat_in_file_area_in_tmp_list_base(&p_file_stat->file_stat_base);
 
 	/*1:当前file_stat的warm链表上的file_area完成了，更新next_num_list，还要把p_traverse_file_stat设置NULL，这样下次遍历同类型的

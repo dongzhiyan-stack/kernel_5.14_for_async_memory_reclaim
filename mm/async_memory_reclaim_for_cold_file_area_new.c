@@ -7279,6 +7279,9 @@ static unsigned int global_file_stat_zero_page_file_area_list_solve(struct hot_c
 
 static inline void update_normal_file_stat_current_scan_file_stat_info(struct current_scan_file_stat_info *p_current_scan_file_stat_info,struct file_stat *p_file_stat)
 {
+	if(file_stat_in_file_area_in_tmp_list_base(&p_file_stat->file_stat_base))
+		panic("%s p_current_scan_file_stat_info:0x%llx p_file_stat:0x%llx error",__func__,(u64)p_current_scan_file_stat_info,(u64)p_file_stat);
+
 	set_file_stat_in_file_area_in_tmp_list_base(&p_file_stat->file_stat_base);
 
 	/*最新要遍历的file_stat赋值给p_current_scan_file_stat_info.p_file_stat*/
@@ -7506,7 +7509,32 @@ static noinline unsigned int file_stat_multi_level_warm_or_writeonly_list_file_a
 
 		if(file_stat_in_delete_base(p_file_stat_base_temp) || 
 				(file_stat_in_mmap_file_base(p_file_stat_base_temp) && file_stat_in_from_cache_file_base(p_file_stat_base_temp) && is_cache_file)){
-	        printk("update_normal_file_stat_current_scan_file_stat_info current_scan_file_stat_info:0x%llx file_stat:0x%llx 0x%x file_stat_base_temp:0x%llx 0x%x global:%d is_cache_file:%d traverse_list_num:%d\n",(u64)p_current_scan_file_stat_info,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,(u64)p_file_stat_base_temp,p_file_stat_base_temp->file_stat_status,file_stat_in_global_base(p_file_stat_base),is_cache_file,p_current_scan_file_stat_info->traverse_list_num);
+               printk("update_normal_file_stat_current_scan_file_stat_info current_scan_file_stat_info:0x%llx file_stat:0x%llx 0x%x file_stat_base_temp:0x%llx 0x%x global:%d is_cache_file:%d traverse_list_num:%d\n",(u64)p_current_scan_file_stat_info,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,(u64)p_file_stat_base_temp,p_file_stat_base_temp->file_stat_status,file_stat_in_global_base(p_file_stat_base),is_cache_file,p_current_scan_file_stat_info->traverse_list_num);
+
+			/* 重大bug，当current_scan_file_stat_info->p_traverse_file_stat指向的file_stat1(假设是global->temp链表的)被iput()释放而标记delete，
+			 * 它就会被从原global->temp链表尾剔除，导致current_scan_file_stat_info->p_traverse_file_stat指向的
+			 * file_stat1跟现在的global->temp链表尾的file_stat2不相等。当识别到这种情况，就要执行update_normal_file_stat_current_scan_file_stat_info()
+			 * ，把现在global->temp链表尾的file_stat2赋值给current_scan_file_stat_info->p_traverse_file_stat，然后接着
+			 * 就会遍历这个新的file_stat2的warm等链表上的file_area。这里边就有个重大的隐藏很深的bug，p_current_scan_file_stat_info->temp_head
+			 * 链表上临时保存的已经遍历过的file_stat1的file_area就泄露了，没有移动回file_stat1->warm等链表
+			 * 并且，这个file_stat1的file_stat_in_file_area_in_tmp_list_base标记也没有清理掉，将来执行
+			 * cold_file_stat_delete_all_file_area()释放这个delete标记的文件的file_area时，发现file_stat1有
+			 * file_stat_in_file_area_in_tmp_list_base标记，但是get_normal_file_stat_current_scan_file_stat_info()得到的
+			 * p_current_scan_file_stat_info->p_traverse_file_stat却是NULL，从而触发了panic了。为什么会这样？什么情况下
+			 * 一个file_stat有file_stat_in_file_area_in_tmp_list_base标记，但是get_normal_file_stat_current_scan_file_stat_info()
+			 * 得到的p_current_scan_file_stat_info->p_traverse_file_stat却是NULL？根本不符合常理，因为对p_current_scan_file_stat_info->p_traverse_file_stat
+			 * 标记NULL时，会执行update_file_stat_next_multi_level_warm_or_writeonly_list()，同时清理掉file_stat的
+			 * file_stat_in_file_area_in_tmp_list_base标记。就是说如果一个file_stat有file_stat_in_file_area_in_tmp_list_base标记，
+			 * 那get_normal_file_stat_current_scan_file_stat_info()得到的p_current_scan_file_stat_info->p_traverse_file_stat一定
+			 * 指向这个file_stat，这是update_normal_file_stat_current_scan_file_stat_info()函数确定的。现在
+			 * p_current_scan_file_stat_info->p_traverse_file_stat却是NULL？肯定有不符合常理的地方。耐心排查代码，发现就是
+			 * 这里有问题：p_current_scan_file_stat_info->p_traverse_file_stat指向的file_stat1被iput()释放了，标记delete。但是
+			 * 却只是执行update_normal_file_stat_current_scan_file_stat_info()把新的file_stat2赋值给
+			 * p_current_scan_file_stat_info->p_traverse_file_stat，没有清理掉file_stat1的file_stat_in_file_area_in_tmp_list_base标记。
+			 * 因此，基于以上两个问题，在这里增加执行update_file_stat_next_multi_level_warm_or_writeonly_list()即可，既清理
+			 * 已iput的file_stat1的file_stat_in_file_area_in_tmp_list_base标记，又把p_current_scan_file_stat_info->temp_head
+			 * 遍历过的该file_stat的file_area移动回该file_stat1的warm等链表*/
+			update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info,p_current_scan_file_stat_info->p_traverse_file_stat);
 
 			update_normal_file_stat_current_scan_file_stat_info(p_current_scan_file_stat_info,p_file_stat);
         }
