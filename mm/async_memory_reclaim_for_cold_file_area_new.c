@@ -7481,6 +7481,23 @@ static noinline unsigned int file_stat_multi_level_warm_or_writeonly_list_file_a
 			struct file_area *p_file_area = p_current_scan_file_stat_info->p_traverse_first_file_area;
 			struct file_area *p_file_area_next = list_next_entry(p_file_area,file_area_list);
 
+			/*重大bug，当上一轮遍历的file_stat1(假设该file_stat是global->temp链表尾的)因遍历的file_area个数超过max而结束。接着该file_stat1被iput()释放了。
+			 * 但是p_current_scan_file_stat_info->p_traverse_file_stat还指向这个file_stat，p_current_scan_file_stat_info->p_traverse_first_file_area
+			 * 还指向最后一次遍历的file_area的上一个。然后新的一轮遍历，就会执行到这里，但是此时p_file_stat是global->temp链表尾最新的file_stat2。
+			 * 此时执行下边的check_multi_level_warm_list_file_area_valid()就会发现mapping不相等而panic。解决办法是跳转到current_scan_file_stat_delete
+			 * 分支，把file_stat2更新到p_current_scan_file_stat_info->p_traverse_file_stat。这里就有个问题，如果是代码刚执行到这里，file_stat1
+			 * 才被iput()并标记delete，这里能立即识别出来吗？不可能，如果是这种情况，file_stat1在global->temp链表尾，
+			 * get_file_area_from_file_stat_list()函数里会先对该文件inode加锁，然后才会执行到这里，此时该文件file_stat是不可能被iput()的。
+			 *
+			 * 灵光一现，我的天，又发现一个隐藏bug，遍历global->writeonly链表的只写文件是直接执行file_stat_multi_level_warm_or_writeonly_list_file_area_solve()，
+			 * 不会执行get_file_area_from_file_stat_list()函数，也就是遍历global->writeonly链表的只写文件，该文件file_stat是没有inode加锁的！
+			 * 就是因为多想了一下，就发现这个隐藏极深的bug!!!!!!!!!!!!!!!!!!!!!!!!。因此，遍历任何一种文件，都必须执行
+			 * get_file_area_from_file_stat_list()函数!!!!!!!仔细查看walk_throuth_all_file_area()源码，遍历global->writeonly链表
+			 * 的只写文件，是执行的get_file_area_from_file_stat_list()函数的，只有global_file_stat的file_area的遍历才会直接执行
+			 * file_stat_multi_level_warm_or_writeonly_list_file_area_solve()，敏感过度了!!!!!!!!*/
+			if(file_stat_in_delete_base(&p_current_scan_file_stat_info->p_traverse_file_stat->file_stat_base) && p_current_scan_file_stat_info->p_traverse_file_stat != p_file_stat)
+				goto current_scan_file_stat_delete;
+
 			/*由于p_current_scan_file_stat_info->p_traverse_first_file_area指向的file_area遇到好几次问题，因此检测这个file_area的有效性，
 			 *非常有必要。并且还要检测该file_area在链表的下一个file_area，在链表的上一个file_area的检测在
 			 *traverse_file_stat_multi_level_warm_list()函数进行，这里不再检测*/
@@ -7505,6 +7522,8 @@ static noinline unsigned int file_stat_multi_level_warm_or_writeonly_list_file_a
 	 * 从global->temp链表尾取出的是新的cache file_stat。而p_current_scan_file_stat_info->p_traverse_file_stat指向的file_stat已经转成mmap file_stat，
 	 * 而移动到global->temp mmap链表了。于是下边的if依然不成立，但是此时不能panic，而是要遍历新的file_stat*/
 	if(p_current_scan_file_stat_info->p_traverse_file_stat != p_file_stat){
+current_scan_file_stat_delete:
+
 		struct file_stat_base *p_file_stat_base_temp = &p_current_scan_file_stat_info->p_traverse_file_stat->file_stat_base;
 
 		if(file_stat_in_delete_base(p_file_stat_base_temp) || 
