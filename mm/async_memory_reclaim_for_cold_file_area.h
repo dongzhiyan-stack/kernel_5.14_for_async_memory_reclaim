@@ -61,6 +61,7 @@
 #define ASYNC_MEMORY_RECLAIM_ENABLE 0
 //置1说明说明触发了drop_cache，此时禁止异步内存回收线程处理gloabl drop_cache_file_stat_head链表上的file_stat
 #define ASYNC_DROP_CACHES 1
+#define MEMORY_IN_RECLAIM 2
 //异步内存回收周期，单位s
 #define ASYNC_MEMORY_RECLIAIM_PERIOD 10
 //最大文件名字长度
@@ -985,6 +986,8 @@ struct hot_cold_file_global
 	unsigned int normal1_zone_free_pages_last;
 	/*内存紧张等级，越大表示内存越紧张，并且还会回收有read标记和ahead标记的file_area的page*/
 	unsigned int memory_pressure_level;
+	/*内存紧急模式，内存回收后，检测内存依然紧张*/
+	unsigned int memory_still_memrgency_after_reclaim;
 	
 	//从系统启动到目前释放的page个数
 	unsigned long free_pages;
@@ -2617,10 +2620,10 @@ static inline void update_file_stat_next_multi_level_warm_or_writeonly_list(stru
 	if(NULL == p_current_scan_file_stat_info->p_traverse_file_stat)
 		return;
 
-	if(!file_stat_in_file_area_in_tmp_list_base(&p_file_stat->file_stat_base))
+	if(!file_stat_in_file_area_in_tmp_list_base(&p_current_scan_file_stat_info->p_traverse_file_stat->file_stat_base))
 		panic("%s p_current_scan_file_stat_info:0x%llx p_file_stat:0x%llx error",__func__,(u64)p_current_scan_file_stat_info,(u64)p_file_stat);
 
-	clear_file_stat_in_file_area_in_tmp_list_base(&p_file_stat->file_stat_base);
+	clear_file_stat_in_file_area_in_tmp_list_base(&p_current_scan_file_stat_info->p_traverse_file_stat->file_stat_base);
 
 	/*1:当前file_stat的warm链表上的file_area完成了，更新next_num_list，还要把p_traverse_file_stat设置NULL，这样下次遍历同类型的
 	 * file_stat时，才会更新到p_traverse_file_stat。同时，还要先把之前遍历过的移动到temp_head链表上的file_area移动回warm链表头
