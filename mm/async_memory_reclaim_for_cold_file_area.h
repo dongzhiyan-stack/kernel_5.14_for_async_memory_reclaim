@@ -84,7 +84,7 @@
 /*发生refault的file_area经过FILE_AREA_REFAULT_TO_TEMP_AGE_DX个周期后，还没有被访问，则移动到file_area_warm链表*/
 #define FILE_AREA_REFAULT_TO_TEMP_AGE_DX 500
 /*普通的file_area在FILE_AREA_TEMP_TO_COLD_AGE_DX个周期内没有被访问则被判定是冷file_area，然后释放这个file_area的page*/
-#define FILE_AREA_TEMP_TO_COLD_AGE_DX  10
+#define FILE_AREA_TEMP_TO_COLD_AGE_DX  100
 /*在file_stat->warm上的file_area经过file_area_warm_to_temp_age_dx个周期没有被访问，则移动到file_stat->temp链表*/
 //#define FILE_AREA_WARM_TO_TEMP_AGE_DX  (FILE_AREA_TEMP_TO_COLD_AGE_DX + 10) 
 /*一个冷file_area，如果经过FILE_AREA_FREE_AGE_DX个周期，仍然没有被访问，则释放掉file_area结构*/
@@ -786,6 +786,37 @@ struct global_file_stat{
 
 	struct current_scan_file_stat_info current_scan_file_stat_info;
 };
+struct memory_reclaim_info_for_one_warm_list{
+	unsigned int scan_file_area_count_in_reclaim;
+	unsigned int scan_zero_page_file_area_count_in_reclaim;
+	unsigned int scan_warm_file_area_count;
+
+	unsigned int reclaim_pages_count;
+};
+struct memory_reclaim_info{
+	unsigned int scan_file_area_count;
+	unsigned int scan_file_area_max;
+
+	unsigned int scan_exit_file_area_count;
+	unsigned int scan_zero_page_file_area_count;
+
+	unsigned int warm_list_file_area_up_count;
+	unsigned int warm_list_file_area_down_count;
+
+	unsigned int warm_list_file_area_to_writeonly_list_count;
+	unsigned int warm_list_file_area_to_writeonly_list_count_cold;
+
+	unsigned int direct_reclaim_pages_form_writeonly_file;
+	unsigned int scan_file_area_count_form_writeonly_file;
+
+	unsigned int scan_other_list_file_area_count;
+	unsigned int scan_file_area_max_for_memory_reclaim;
+
+	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_writeonly_list;
+	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_warm_cold_list;
+	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_warm_middle_list;
+	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_warm_list;
+};
 #define CURRENT_SCAN_FILE_STAT_INFO_TEMP 0
 #define CURRENT_SCAN_FILE_STAT_INFO_MIDDLE 1
 #define CURRENT_SCAN_FILE_STAT_INFO_LARGE 2
@@ -796,6 +827,9 @@ struct global_file_stat{
 //热点文件统计信息全局结构体
 struct hot_cold_file_global
 {
+	/*指向每次遍历的current_scan_file_stat_info结构体，调试用*/
+	struct current_scan_file_stat_info *p_struct_current_scan_file_stat_info;
+	struct memory_reclaim_info memory_reclaim_info;
 	unsigned int alreay_reclaim_pages;
 	unsigned int reclaim_pages_target;
 	struct global_file_stat global_file_stat;
@@ -1025,6 +1059,15 @@ struct hot_cold_file_global
 	unsigned int writeonly_file_age_dx_ori;
 	unsigned int writeonly_file_age_dx;
 	unsigned int in_writeonly_list_file_count;
+	/*统计每个内存回收周期回收的page数，每次内存回收前都清0*/
+	unsigned int all_reclaim_pages_one_period;
+	unsigned long warm_list_file_area_up_count;
+	unsigned long warm_list_file_area_down_count;
+	unsigned long warm_list_file_area_to_writeonly_list_count;
+	unsigned long warm_list_file_area_to_writeonly_list_count_cold;
+	unsigned long scan_exit_file_area_count;
+	unsigned long scan_zero_page_file_area_count;
+	unsigned long direct_reclaim_pages_form_writeonly_file;
 };
 
 
@@ -1442,6 +1485,7 @@ extern int shrink_page_printk_open;
 extern unsigned int xarray_tree_node_cache_hit;
 extern int open_file_area_printk;
 extern int open_file_area_printk_important;
+extern int warm_list_printk;
 
 #define is_global_file_stat_file_in_debug(mapping) (1 == mapping->rh_reserved2)
 #define list_num_get(p_file_area)  (p_file_area->warm_list_num_and_access_freq.val_bits.warm_list_num)

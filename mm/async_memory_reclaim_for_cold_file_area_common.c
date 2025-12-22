@@ -559,6 +559,40 @@ static const struct proc_ops nr_pages_level_fops = {
 	.proc_release	= single_release,
 	.proc_write		= nr_pages_level_write,
 };
+//warm_list_printk
+static int warm_list_printk_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "%d\n", shrink_page_printk_open1);
+	return 0;
+}
+static int warm_list_printk_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, warm_list_printk_show, NULL);
+}
+static ssize_t warm_list_printk_write(struct file *file,
+		const char __user *buffer, size_t count, loff_t *ppos)
+{
+	int rc;
+	unsigned int val;
+	rc = kstrtouint_from_user(buffer, count, 10,&val);
+	if (rc)
+		return rc;
+
+	if(val <= 1)
+		warm_list_printk = val;
+	else
+		return -EINVAL;
+
+	return count;
+}
+static const struct proc_ops warm_list_printk_fops = {
+	.proc_open		= warm_list_printk_open,
+	.proc_read		= seq_read,
+	.proc_lseek     = seq_lseek,
+	.proc_release	= single_release,
+	.proc_write		= warm_list_printk_write,
+};
+
 //open_print
 static int open_print_show(struct seq_file *m, void *v)
 {
@@ -1615,7 +1649,7 @@ noinline void printk_shrink_param(struct hot_cold_file_global *p_hot_cold_file_g
 #endif		
 
 		seq_printf(m,"\n\n********global********\n");
-		seq_printf(m,"0x%llx global_age:%d < file_area_refault_file:%ld kswapd_file_area_refault_file:%ld > cold_file_area_delete_count:%d file_stat_count:%d mmap_file_stat_count:%d file_stat_hot:%d file_stat_zero_file_area:%d file_stat_large_count:%d read_file_area_count_in_reclaim:%d free_pages:%ld free_mmap_pages:%ld check_refault_file_area_count:%ld check_mmap_refault_file_area_count:%ld tiny_small_file_stat_to_one_area_count:%ld tiny_small_move_tail_count:%ld kswapd_free_page_count:%ld async_thread_free_page_count:%ld\n",(u64)p_hot_cold_file_global,p_hot_cold_file_global->global_age,p_hot_cold_file_global->file_area_refault_file,p_hot_cold_file_global->kswapd_file_area_refault_file,p_hot_cold_file_global->cold_file_area_delete_count,p_hot_cold_file_global->file_stat_count,p_hot_cold_file_global->mmap_file_stat_count,p_hot_cold_file_global->file_stat_hot_count,p_hot_cold_file_global->file_stat_count_zero_file_area,p_hot_cold_file_global->file_stat_large_count,p_hot_cold_file_global->read_file_area_count_in_reclaim,p_hot_cold_file_global->free_pages,p_hot_cold_file_global->free_mmap_pages,p_hot_cold_file_global->check_refault_file_area_count,p_hot_cold_file_global->check_mmap_refault_file_area_count,p_hot_cold_file_global->tiny_small_file_stat_to_one_area_count,p_hot_cold_file_global->file_stat_tiny_small_move_tail_count,p_hot_cold_file_global->kswapd_free_page_count,p_hot_cold_file_global->async_thread_free_page_count);
+		seq_printf(m,"0x%llx global_age:%d < file_area_refault_file:%ld kswapd_file_area_refault_file:%ld > cold_file_area_delete_count:%d scan_exit_file_area_count:%ld scan_zero_page_file_area_count:%ld warm_list_file_area_up_count:%ld warm_list_file_area_to_writeonly_list_count:%ld  warm_list_file_area_to_writeonly_list_count_cold:%ld file_stat_count:%d mmap_file_stat_count:%d file_stat_hot:%d file_stat_zero_file_area:%d file_stat_large_count:%d read_file_area_count_in_reclaim:%d free_pages:%ld free_mmap_pages:%ld check_refault_file_area_count:%ld check_mmap_refault_file_area_count:%ld tiny_small_file_stat_to_one_area_count:%ld tiny_small_move_tail_count:%ld kswapd_free_page_count:%ld async_thread_free_page_count:%ld\n",(u64)p_hot_cold_file_global,p_hot_cold_file_global->global_age,p_hot_cold_file_global->file_area_refault_file,p_hot_cold_file_global->kswapd_file_area_refault_file,p_hot_cold_file_global->cold_file_area_delete_count,p_hot_cold_file_global->scan_exit_file_area_count,p_hot_cold_file_global->scan_zero_page_file_area_count,p_hot_cold_file_global->warm_list_file_area_up_count,p_hot_cold_file_global->warm_list_file_area_to_writeonly_list_count,p_hot_cold_file_global->warm_list_file_area_to_writeonly_list_count_cold,p_hot_cold_file_global->file_stat_count,p_hot_cold_file_global->mmap_file_stat_count,p_hot_cold_file_global->file_stat_hot_count,p_hot_cold_file_global->file_stat_count_zero_file_area,p_hot_cold_file_global->file_stat_large_count,p_hot_cold_file_global->read_file_area_count_in_reclaim,p_hot_cold_file_global->free_pages,p_hot_cold_file_global->free_mmap_pages,p_hot_cold_file_global->check_refault_file_area_count,p_hot_cold_file_global->check_mmap_refault_file_area_count,p_hot_cold_file_global->tiny_small_file_stat_to_one_area_count,p_hot_cold_file_global->file_stat_tiny_small_move_tail_count,p_hot_cold_file_global->kswapd_free_page_count,p_hot_cold_file_global->async_thread_free_page_count);
 	}else{
 		printk("********cache file********\n");
 		printk("scan_cold_file_area_count_from_temp:%d scan_read_file_area_count_from_temp:%d scan_ahead_file_area_count_from_temp:%d scan_cold_file_area_count_from_warm:%d scan_read_file_area_count_from_warm:%d scan_ahead_file_area_count_from_warm:%d scan_file_area_count_from_warm:%d scan_cold_file_area_count_from_mmap_file:%d file_area_hot_to_warm_from_hot_file:%d free_pages_from_mmap_file:%d \n",p->scan_cold_file_area_count_from_temp,p->scan_read_file_area_count_from_temp,p->scan_ahead_file_area_count_from_temp,p->scan_cold_file_area_count_from_warm,p->scan_read_file_area_count_from_warm,p->scan_ahead_file_area_count_from_warm,p->scan_file_area_count_from_warm,p->scan_cold_file_area_count_from_mmap_file,p->file_area_hot_to_warm_from_hot_file,p->free_pages_from_mmap_file);
@@ -1859,6 +1893,46 @@ static void global_file_stat_init(void)
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.zero_page_file_area_list);
 	spin_lock_init(&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_lock);
 }
+#define PROTECT_SIZE 100
+#define KPROBE_BUF_SIZE 2097152
+char kprobe_buf[KPROBE_BUF_SIZE + PROTECT_SIZE];
+int  kprobe_buf_count;
+static void wakeup_kswapd_handler_post(struct kprobe *p, struct pt_regs *regs,
+		unsigned long flags)
+{
+	int i;
+	int	len;
+	pg_data_t *pgdat;
+	struct zone *zone = (struct zone *)(regs->di);
+	const char *wakeup_zone_name = zone->name;
+
+	for_each_online_pgdat(pgdat){
+		for (i = 0; i < MAX_NR_ZONES - 1; i++) {
+			zone = &pgdat->node_zones[i];  
+			/*空zone跳过*/
+			if(!populated_zone(zone)) 
+				continue;
+
+			if(kprobe_buf_count > KPROBE_BUF_SIZE){
+				memset(kprobe_buf,0,sizeof(kprobe_buf));
+				kprobe_buf_count = 0;
+			}
+
+			/*即便kprobe_buf_count等于KPROBE_BUF_SIZE，但是snprintf(...PROTECT_SIZE-20)限制了此次snprintf保存的字符串长度也不会超过PROTECT_SIZE，
+			 *自然不会超出kprobe_buf数组大小(KPROBE_BUF_SIZE+PROTECT_SIZE)*/
+			len = snprintf(kprobe_buf + kprobe_buf_count,PROTECT_SIZE - 20, "%s %s free:%ld high:%ld %ld %ld \n",wakeup_zone_name,zone->name,zone_page_state(zone, NR_FREE_PAGES),high_wmark_pages(zone),low_wmark_pages(zone),min_wmark_pages(zone));
+			printk("%s",kprobe_buf + kprobe_buf_count);
+			kprobe_buf_count += len;
+
+			if(strlen(wakeup_zone_name))
+				wakeup_zone_name = "";
+		}
+	}
+}
+static struct kprobe kp_wakeup_kswapd = {
+	.symbol_name    = "wakeup_kswapd",
+	.post_handler   = wakeup_kswapd_handler_post,
+};
 static int __init hot_cold_file_init(void)
 {
 	int i;
@@ -1991,6 +2065,12 @@ static int __init hot_cold_file_init(void)
 	hot_cold_file_global_info.hot_cold_file_thead = kthread_run(hot_cold_file_thread,&hot_cold_file_global_info, "hot_cold_file_thread");
 	if (IS_ERR(hot_cold_file_global_info.hot_cold_file_thead)) {
 		printk("Failed to start  hot_cold_file_thead\n");
+		return -1;
+	}
+
+	i = register_kprobe(&kp_wakeup_kswapd);
+	if (i < 0) {
+		pr_err("kp_wakeup_kswapd register_kprobe failed, returned %d\n",i);
 		return -1;
 	}
 
