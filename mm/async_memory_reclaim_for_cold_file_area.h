@@ -810,7 +810,8 @@ struct memory_reclaim_info{
 	unsigned int scan_file_area_count_form_writeonly_file;
 
 	unsigned int scan_other_list_file_area_count;
-	unsigned int scan_file_area_max_for_memory_reclaim;
+	int scan_file_area_max_for_memory_reclaim;
+	unsigned int scan_file_area_count_reclaim_fail;
 
 	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_writeonly_list;
 	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_warm_cold_list;
@@ -832,6 +833,10 @@ struct hot_cold_file_global
 	struct memory_reclaim_info memory_reclaim_info;
 	unsigned int alreay_reclaim_pages;
 	unsigned int reclaim_pages_target;
+	unsigned int cache_file_warm_list_file_area_up_count;
+	unsigned int mmap_file_warm_list_file_area_up_count;
+	unsigned int cache_file_warm_list_file_area_down_count;
+	unsigned int mmap_file_warm_list_file_area_down_count;
 	struct global_file_stat global_file_stat;
 	struct global_file_stat global_mmap_file_stat;
 	struct current_scan_file_stat_info current_scan_file_stat_info[CURRENT_SCAN_FILE_STAT_INFO_MAX];
@@ -2685,7 +2690,11 @@ static inline void update_file_stat_next_multi_level_warm_or_writeonly_list(stru
 
 	switch(p_file_stat->traverse_warm_list_num){
 		case POS_WARM_HOT:
-			p_file_stat->traverse_warm_list_num = POS_WIITEONLY_OR_COLD;
+			/* 遍历过file_stat->warm_hot链表上的file_area后，不再允许异步内存回收线程traverse_file_stat_multi_level_warm_list()遍历
+			 * file_stat->writeonly链表上的file_area了。因为现在判定有点浪费性能，反正异步内存回收时，遍历file_stat->writeonly
+			 * 链表上的file_area进行内存回收时。如果file_area最近访问过，直接移动到file_stat->warm链表。*/
+			//p_file_stat->traverse_warm_list_num = POS_WIITEONLY_OR_COLD;
+			p_file_stat->traverse_warm_list_num = POS_WARM_COLD;
 			break;
 		case POS_WARM:
 			p_file_stat->traverse_warm_list_num = POS_WARM_HOT;
