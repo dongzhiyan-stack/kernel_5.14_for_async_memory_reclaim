@@ -376,7 +376,7 @@ static void page_cache_delete_for_file_area(struct address_space *mapping,
 			/*可能并发iput()执行find_get_entry_for_file_area()把file_area->mapping置NULL了，这个没有xas_lock加锁防护*/
 		    if(p_file_area->mapping){
 				/*p_file_area->mapping置NULL，表示该文件iput了，马上要释放inode和mapping了*/
-				p_file_area->mapping = 0;
+				WRITE_ONCE(p_file_area->mapping, 0);
 				/*这个写屏障保证异步内存回收线程cold_file_area_delete()函数里，立即看到file_area->mapping是NULL*/
 				smp_wmb();
 				//文件iput了，此时file_area一个page都没有，于是把file_area移动到global_file_stat.file_area_delete_list链表
@@ -726,7 +726,7 @@ find_page_from_file_area:
 					/*可能并发iput()执行find_get_entry_for_file_area()把file_area->mapping置NULL了，这个没有xas_lock加锁防护*/
 		            if(p_file_area->mapping){
 						/*p_file_area->mapping置NULL，表示该文件iput了，马上要释放inode和mapping了*/
-						p_file_area->mapping = 0;
+						WRITE_ONCE(p_file_area->mapping, 0);
 						/*这个写屏障保证异步内存回收线程cold_file_area_delete()函数里，立即看到file_area->mapping是NULL*/
 						smp_wmb();
 						/*文件iput了，此时file_area一个page都没有，于是把file_area移动到global_file_stat.file_area_delete_list链表*/
@@ -2130,7 +2130,7 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 		}
 		xas_lock_irq(&xas);
 		/*file_stat可能会被方法删除，则分配一个新的file_stat，具体看cold_file_stat_delete()函数*/
-		if(SUPPORT_FILE_AREA_INIT_OR_DELETE == mapping->rh_reserved1){
+		if(SUPPORT_FILE_AREA_INIT_OR_DELETE == READ_ONCE(mapping->rh_reserved1)){
 			p_file_stat_base = file_stat_alloc_and_init_tiny_small(mapping,!mapping_mapped(mapping));
 
 			if(!p_file_stat_base){
@@ -4140,7 +4140,7 @@ retry:
 		//XA_STATE(xas_del, &mapping->i_pages, (*p_file_area)->start_index >> PAGE_COUNT_IN_AREA_SHIFT);
 		XA_STATE(xas_del, &mapping->i_pages, (*p_file_area)->start_index);
 #endif	
-		(*p_file_area)->mapping = 0;
+		WRITE_ONCE((*p_file_area)->mapping, 0);
 		smp_wmb();
 		/*需要用文件xarray tree的lock加锁，因为xas_store()操作必须要xarray tree加锁*/
 		xas_lock_irq(&xas_del);

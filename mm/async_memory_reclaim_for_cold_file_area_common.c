@@ -775,7 +775,7 @@ static int file_stat_debug_or_make_backlist(struct seq_file *m,char is_proc_prin
 	/*rcu加锁保证这个宽限期内，这个file_stat结构体不能cold_file_stat_delete()异步释放了，否则这里再使用它就是访问非法内存!!!!!!!!!!!!!!!!!!!*/
 	rcu_read_lock();
 	smp_rmb();
-	p_file_stat_base = hot_cold_file_global_info.print_file_stat;//这个赋值留着，有警示作用
+	p_file_stat_base = READ_ONCE(hot_cold_file_global_info.print_file_stat);//这个赋值留着，有警示作用
 	
 	file_stat_in_global = file_stat_in_global_base(p_file_stat_base);
 
@@ -789,7 +789,7 @@ static int file_stat_debug_or_make_backlist(struct seq_file *m,char is_proc_prin
 	 * 待释放的rcu链表。 2:异步内存回收先执行，cold_file_stat_delete()里标记
 	 * hot_cold_file_global_info.print_file_stat为NULL。这里if不成立，就不会再使用该file_stat了。*/
 	//if(!p_file_stat_base){
-	if(!hot_cold_file_global_info.print_file_stat){
+	if(!READ_ONCE(hot_cold_file_global_info.print_file_stat)){
 		if(is_proc_print)
 			seq_printf(m, "invalid file_stat\n");
 		else				
@@ -797,7 +797,7 @@ static int file_stat_debug_or_make_backlist(struct seq_file *m,char is_proc_prin
 
 		goto err;
 	}
-	p_file_stat_base = hot_cold_file_global_info.print_file_stat;
+	p_file_stat_base = READ_ONCE(hot_cold_file_global_info.print_file_stat);
 
 	if(file_stat_in_replaced_file_base(p_file_stat_base) || file_stat_in_delete_base(p_file_stat_base)){
 		if(is_proc_print)
@@ -980,6 +980,7 @@ static ssize_t file_stat_debug_or_make_backlist_write(struct file *file,
 	file_temp = file_open_root(&root, file_path, O_RDONLY, 0);
 	path_put(&root);
 #endif
+	/*如果open文件成功，do_dentry_open->path_get()流程会令dentry引用计数加1。之后谁也无法再iput()释放了inode了。因此后续流程不用担心inode被释放*/
 	if (IS_ERR(file_temp)){
 		printk("file_open fail:%s %lld\n",file_path,(s64)file_temp);
 		ret = -ENOENT;
@@ -1180,17 +1181,17 @@ direct_global_file_stat:
 			 }
 
 			 if(file_debug){
-				 hot_cold_file_global_info.print_file_stat = p_file_stat_base;
+				 WRITE_ONCE(hot_cold_file_global_info.print_file_stat, p_file_stat_base);
 				 smp_mb();
 				 if(file_stat_in_delete_base(p_file_stat_base) || file_stat_in_replaced_file_base(p_file_stat_base)){
-					 hot_cold_file_global_info.print_file_stat = NULL;
+					 WRITE_ONCE(hot_cold_file_global_info.print_file_stat, NULL);
 				 }
 
 				 if(set_or_clear){
 					 if(file_stat_in_global_base(p_file_stat_base)){
 						 /*如果inode是NULL，说明本次仅仅是echo -n debug set global cache设置调试global_file_stat，不是调试global_file_stat的file_area的文件*/
 						 if(inode)
-						     inode->i_mapping->rh_reserved2 = 1;
+						     WRITE_ONCE(inode->i_mapping->rh_reserved2, 1);
 
 						 printk("%s file_stat:0x%llx in_global set_in_debug\n",p,(u64)p_file_stat_base);
 					 }
@@ -1435,7 +1436,7 @@ static int print_one_list_file_stat(struct hot_cold_file_global *p_hot_cold_file
 		/*如果file_stat对应的文件inode释放了，file_stat被标记了delete，此时不能再使用p_file_stat->mapping，因为mapping已经释放了.
 		  但执行这个函数时，必须禁止执行cold_file_stat_delete_all_file_area()释放掉file_stat!!!!!!!!!!!!!!!!!!!!*/
 		smp_rmb();//内存屏障获取最新的file_stat状态
-		if(0 == file_stat_in_delete_base(p_file_stat_base)){
+		if(0 == file_stat_in_delete_base(p_file_stat_base) || 0 == file_stat_in_replaced_file_base(p_file_stat_base)){
 
 			/* 如果print_file_stat_info_or_update_refault是更新file_stat_refault，说明此时是cat /proc/async_memory_reclaime/async_memory_reclaime_info 
 			 * 最后，执行close proc文件，此时才更新p_file_stat_base->refault_page_count_last*/

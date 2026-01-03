@@ -2208,11 +2208,37 @@ static inline unsigned int get_file_stat_type_file_iput(struct file_stat_base *p
  * 1:rcu_read_lock()防止inode被iput()释放了，导致 p_file_stat_base->mapping->rh_reserved1无效内存访问。
  * 2:rcu_read_lock()加printk打印会导致休眠吧，这点要控制
  * 3:smp_rmb()保证p_file_stat_base->mapping->rh_reserved1在iput()被赋值0后，file_stat一定有delete标记。iput()里是set_file_stat_in_delete;smp_wmb;p_file_stat_base->mapping->rh_reserved1=0
- * */
+ *
 #define is_file_stat_mapping_error(p_file_stat_base) \
 { \
 	rcu_read_lock();\
 	if((unsigned long)p_file_stat_base != (p_file_stat_base)->mapping->rh_reserved1){  \
+		smp_rmb();\
+		if(file_stat_in_delete_base(p_file_stat_base)){\
+			rcu_read_unlock(); \
+			printk(KERN_WARNING "%s file_stat:0x%llx status:0x%x mapping:0x%llx delete!!!!!!!!!!!!\n",__func__,(u64)p_file_stat_base,(p_file_stat_base)->file_stat_status,(u64)((p_file_stat_base)->mapping)); \
+			goto out;\
+		} \
+		else \
+		panic("%s file_stat:0x%llx match mapping:0x%llx 0x%llx error\n",__func__,(u64)p_file_stat_base,(u64)((p_file_stat_base)->mapping),(u64)((p_file_stat_base)->mapping->rh_reserved1)); \
+	}\
+	rcu_read_unlock();\
+	out:	\
+}
+ * BUG！BUG！BUG！上一个方案以为rcu_read_lock();if((unsigned long)p_file_stat_base != (p_file_stat_base)->mapping->rh_reserved1) 这个
+ * 用法没问题。如果文件inode和mapping被释放了，p_file_stat_base->mapping->rh_reserved1就是无效内存访问！上一个方案竟然以为
+ * "p_file_stat_base->mapping->rh_reserved1岂不是无效内存访问？没关系，又不向这个内存写数据，只是读" 真搞不清楚当初咋想的。无效内存
+ * 就是无效内存，绝对读都不能读。深入想一想，如果mapping被属内存被某一个slab分配，mapping->rh_reserved1内存出的数据还碰巧就是
+ * p_file_stat_base指针，那is_file_stat_mapping_error()就失效了。因此"无效内存读是决定不能读的!!!!!!"要想解决这个问题，可以把
+ * is_file_stat_mapping_error()放到file_inode_lock()后边，file_inode_lock()能防护inode被释放。但是我想让is_file_stat_mapping_error()
+ * 独立于file_inode_lock()之外。完全可以，就像file_inode_lock()的实现:"先rcu_read_lock，再smp_rmb()，再立即判断file_stat有in_delete"
+ * 标记。这就重复造车了。于是决定把 is_file_stat_mapping_error()移动到file_inode_lock()里"rcu_read_lock，再smp_rmb()，再立即判断file_stat有in_delete"
+ * 后边。is_file_stat_mapping_error()源码还维持原版
+ * */
+#define is_file_stat_mapping_error(p_file_stat_base) \
+{ \
+	rcu_read_lock();\
+	if((unsigned long)p_file_stat_base != READ_ONCE((p_file_stat_base)->mapping->rh_reserved1)){  \
 		smp_rmb();\
 		if(file_stat_in_delete_base(p_file_stat_base)){\
 			rcu_read_unlock(); \
@@ -3062,11 +3088,16 @@ static int inline file_inode_lock(struct file_stat_base *p_file_stat_base)
 	//lock_file_stat(p_file_stat,0);
 	rcu_read_lock();
 	smp_rmb();
-	if(file_stat_in_delete_base(p_file_stat_base) || (NULL == p_file_stat_base->mapping)){
+	if(file_stat_in_delete_base(p_file_stat_base) || (NULL == READ_ONCE(p_file_stat_base->mapping))){
 		//不要忘了异常return要先释放锁
 		rcu_read_unlock();
 		return 0;
 	}
+
+	/* 判断file_stat和file_stat->mapping->rh_reserved1是否匹配，不匹配则crash。注意，到这里rcu_read_lock可以确保该文件
+	 * inode和mapping结构体不会被立即释放掉，可以放心使用file_stat->mapping->rh_reserved1*/
+	is_file_stat_mapping_error(p_file_stat_base);
+
 	inode = p_file_stat_base->mapping->host;
 
 	spin_lock(&inode->i_lock);

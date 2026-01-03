@@ -390,7 +390,7 @@ static inline int cold_file_area_delete_lock(struct hot_cold_file_global *p_hot_
 	rcu_read_lock();
 
 	smp_mb();
-	if(0 == p_file_area->mapping || file_area_in_mapping_exit(p_file_area)){
+	if(0 == READ_ONCE(p_file_area->mapping) || file_area_in_mapping_exit(p_file_area)){
 		printk("%s file_stat:0x%llx  file_area:0x%llx status:0x%x mapping:0x%llx in_exit !!!!!!!\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,(u64)p_file_area->mapping);
 		rcu_read_unlock();
 		return -1;
@@ -451,7 +451,7 @@ static inline int cold_file_area_delete_lock(struct hot_cold_file_global *p_hot_
 	/* 如果p_file_area->mapping是NULL，说明此时该文件并发被iput()，截断文件pagecache执行的find_get_entry_for_file_area函数，
 	 * 或者文件iput()流程，kswapd执行page_cache_delete_for_file_area函数里，并发把p_file_area->mapping设置NULL，并
 	 * 把file_area从xarray tree剔除，这里就不再重复剔除，也不能释放file_area，因为它被移动到了global_file_stat_delete链表*/
-	if(p_file_area->mapping){
+	if(READ_ONCE(p_file_area->mapping)){
 		/*从xarray tree剔除。注意，xas_store不仅只是把保存file_area指针的xarray tree的父节点xa_node的槽位设置NULL。
 		 *还有一个隐藏重要作用，如果父节点node没有成员了，还是向上逐级释放父节点xa_node，直至xarray tree全被释放*/
 		old_file_area = xas_store(&xas, NULL);
@@ -840,7 +840,9 @@ err:
 	 * 没有执行list_del_rcu(&p_file_stat_del->hot_cold_file_list)，那这里不能执行call_rcu()*/
 	if(mapping->rh_reserved1){
 			
-		/*file_stat被rcu异步释放了，但是提前rcu_read_lock了，这里置1，等到确定file_stat不会被释放再rcu_read_unlock放开*/
+		/*file_stat被rcu异步释放了，但是提前rcu_read_lock了，这里置1，等到确定file_stat不会被释放再rcu_read_unlock放开。
+		 *注意，这个rcu_read_lock()很重要。因为调用cold_file_stat_delete()的地方，还会使用该file_stat。因此这里这里
+		 *不能立即释放掉file_stat，rcu_read_lock()就保证call_rcu()释放file_stat后，不会立即释放掉file_stat.*/
 		rcu_read_lock();
 
 		if(FILE_STAT_NORMAL == file_type){
@@ -3586,11 +3588,13 @@ static noinline void file_stat_has_zero_file_area_manage(struct hot_cold_file_gl
 
 		/*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug。
 		 *这个检测必须放到遍历file_stat最开头，防止跳过。global_file_stat不会走到这个流程，不用做限制*/
-		is_file_stat_mapping_error(p_file_stat_base);
+		//is_file_stat_mapping_error(p_file_stat_base);这个判断放到下边file_inode_lock()里了，原因看注释
 
 		/* 遍历global zero链表上的file_stat时，正好被iput()了。iput()只是标记delete，并不会把file_stat移动到global delete链表。
-		 * 于是这里遍历到global zero链表上的file_stat时，必须移动到global delete链表*/
-		if(file_stat_in_delete_base(p_file_stat_base)){
+		 * 于是这里遍历到global zero链表上的file_stat时，必须移动到global delete链表。该函数将来可能会用file_stat->mapping->nrpages，
+		 * 因此必须用file_inode_lock()确保inode和mapping不能被iput()释放掉*/
+		//if(file_stat_in_delete_base(p_file_stat_base)){
+		if(file_inode_lock(p_file_stat_base) <= 0){
 			printk("%s file_stat:0x%llx delete status:0x%x file_type:%d\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_type);
 			move_file_stat_to_global_delete_list(p_hot_cold_file_global,p_file_stat_base,file_type,is_cache_file);
 			goto next_file_stat;
@@ -3734,6 +3738,8 @@ file_stat_access:
 			}
 			spin_unlock(cache_or_mmap_file_global_lock);
 		}
+
+		file_inode_unlock(p_file_stat_base);
 
 next_file_stat:
 		file_stat_delete_protect_lock(1);
@@ -8699,8 +8705,8 @@ static inline void old_file_stat_wait_print_file_stat(struct file_stat_base *p_f
 	/*如果file_stat是print_file_stat，则file_stat马上要rcu del了，则必须把print_file_stat清NULL，
 	 *保证将来不再使用这个马上要释放的file_stat*/
 	smp_mb();
-	if(p_file_stat_base_old == hot_cold_file_global_info.print_file_stat){
-		hot_cold_file_global_info.print_file_stat = NULL; 
+	if(p_file_stat_base_old == READ_ONCE(hot_cold_file_global_info.print_file_stat)){
+		WRITE_ONCE(hot_cold_file_global_info.print_file_stat, NULL); 
 		printk("%s file_stat:0x%llx status:0x%x is print_file_stat!!!\n",__func__,(u64)p_file_stat_base_old,p_file_stat_base_old->file_stat_status);
 	}
 	/* 这里非常关键，如果正在print_file_stat_all_file_area_info_write()中通过proc设置
@@ -8713,7 +8719,7 @@ static inline void old_file_stat_wait_print_file_stat(struct file_stat_base *p_f
 }
 static inline void old_file_stat_change_to_new(struct file_stat_base *p_file_stat_base_old,struct file_stat_base *p_file_stat_base_new)
 {
-	p_file_stat_base_old->mapping->rh_reserved1 =  (unsigned long)p_file_stat_base_new;
+	WRITE_ONCE(p_file_stat_base_old->mapping->rh_reserved1,  (unsigned long)p_file_stat_base_new);
 	smp_wmb();
 	/* 加这个synchronize_rcu()是为了保证此时正读写文件，执行__filemap_add_folio->file_area_alloc_and_init()的进程
 	 * 退出rcu宽限期，等新的进程再来，看到的该文件的mapping->rh_reserved1一定是新的file_area，老的file_stat就不会
@@ -9271,7 +9277,7 @@ static inline unsigned int tiny_small_file_area_move_to_global_file_stat(struct 
 		  list_splice_init(&p_file_stat_base->file_area_temp,&p_hot_cold_file_global->global_file_stat.file_area_warm);
 		  spin_unlock(&p_file_stat_base->file_stat_lock);*/
 
-		p_file_stat_base->mapping->rh_reserved1 = (u64)(&p_hot_cold_file_global->global_file_stat.file_stat.file_stat_base);
+		WRITE_ONCE(p_file_stat_base->mapping->rh_reserved1, (u64)(&p_hot_cold_file_global->global_file_stat.file_stat.file_stat_base));
 		p_global_lock = &p_hot_cold_file_global->global_lock;
 		p_global_file_stat = &p_hot_cold_file_global->global_file_stat;
 	}else{
@@ -9279,11 +9285,13 @@ static inline unsigned int tiny_small_file_area_move_to_global_file_stat(struct 
 		  list_splice_init(&p_file_stat_base->file_area_temp,&p_hot_cold_file_global->global_mmap_file_stat.file_area_warm);
 		  spin_unlock(&p_file_stat_base->file_stat_lock);*/
 
-		p_file_stat_base->mapping->rh_reserved1 = (u64)(&p_hot_cold_file_global->global_mmap_file_stat.file_stat.file_stat_base);
+		WRITE_ONCE(p_file_stat_base->mapping->rh_reserved1, (u64)(&p_hot_cold_file_global->global_mmap_file_stat.file_stat.file_stat_base));
 		p_global_lock = &p_hot_cold_file_global->mmap_file_global_lock;
 		p_global_file_stat = &p_hot_cold_file_global->global_mmap_file_stat;
 	}
-
+	/* 这里要加上smp_wmb()，等synchronize_rcu执行后。新的进程读写文件，执行__filemap_add_folio()，rcu_read_lock后smp_rmb，从mapping->rh_reserved1
+	 * 得到的时上边新赋值的global_file_stat*/
+	smp_wmb();
 	/* 如果有进程正在mapping_get_entry()、filemap_get_read_batch()、__filemap_add_folio()函数里使用老的p_file_stat_base，
 	 * 这些函数都有rcu_read_lock()，这里等待这些进程退出rcu宽限期。等新的进程再执行这些函数，就会从mapping->rh_reserved1
 	 * 得到刚赋值的p_hot_cold_file_global->global_file_stat、p_hot_cold_file_global->global_mmap_file_stat*/
@@ -10061,17 +10069,9 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 		/*如果文件mapping->rh_reserved1保存的file_stat指针不相等，crash，这个检测很关键，遇到过bug。
 		 *这个检测必须放到遍历file_stat最开头，防止跳过。global_file_stat不做这个判断，或者再做个其他判断???????
 		 *但是global_file_stat肯定不会执行这个函数流程，因此不再做限制了*/
-		//if(!file_stat_in_global_base(p_file_stat_base))
-		is_file_stat_mapping_error(p_file_stat_base);
+		//is_file_stat_mapping_error(p_file_stat_base); 这个判断放到file_inode_lock()里了，原因看该函数注释
 
-		/*黑名单文件不扫描，后续最好时把这种file_stat单独移动到一个专有的global file_stat链表上，避免干扰*/
-		if(file_stat_in_blacklist_base(p_file_stat_base)){
-			if(FILE_STAT_NORMAL == file_type)
-				normal_file_stat_no_scan = 1;
-
-			goto next_file_stat;
-		}
-
+		
 		/* 重大隐藏bug：在下边遍历文件file_stat过程，有多出会用到该文件mapping、xarray tree、mapping->i_mmap.rb_root。
 		 * 比如cold_file_stat_delete()、cold_file_area_delete()、cache_file_change_to_mmap_file()。这些都得确保该文件inode不能被iput()释放了，
 		 * 否则就是无效内存访问。实际测试时确实遇到过上边两处，因为inode被释放了而crash。当然可以单独在这两处单独
@@ -10101,6 +10101,15 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 
 		if(p_file_stat_base->recent_traverse_age < p_hot_cold_file_global->global_age)
 			p_file_stat_base->recent_traverse_age = p_hot_cold_file_global->global_age;
+
+		/*黑名单文件不扫描，后续最好时把这种file_stat单独移动到一个专有的global file_stat链表上，避免干扰*/
+		if(file_stat_in_blacklist_base(p_file_stat_base)){
+			if(FILE_STAT_NORMAL == file_type)
+				normal_file_stat_no_scan = 1;
+
+			goto next_file_stat_unlock;
+		}
+
 
 		/* 在内存紧张模式，如果file_stat的file_area个数很多，但该文件实际的nr_pages个数很少，跳过这种文件，遍历这种文件的file_area浪费时间收益太低
 		 * 把IS_IN_MEMORY_EMERGENCY_RECLAIM改为 !IS_MEMORY_ENOUGH()了，只要内存不充足，就不回收mapping->nrpages少的文件的文件页*/
