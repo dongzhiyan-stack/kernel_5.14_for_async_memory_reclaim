@@ -137,3 +137,4 @@ obj-$(CONFIG_GENERIC_IOREMAP) += ioremap.o
 #obj-y += async_memory_reclaim_for_cold_mmap_file_area.o
 obj-y += async_memory_reclaim_for_cold_file_area_new.o
 obj-y += async_memory_reclaim_for_cold_file_area_common.o
+obj-y += filemap_common.o

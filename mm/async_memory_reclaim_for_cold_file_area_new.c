@@ -3554,6 +3554,7 @@ static noinline void file_stat_has_zero_file_area_manage(struct hot_cold_file_gl
 	char file_stat_delete_lock = 0;
 	char rcu_read_lock_flag = 0;
 	spinlock_t *cache_or_mmap_file_global_lock;
+	struct address_space *mapping;
 
 	/*cache文件使用global_lock锁，mmap文件用的mmap_file_global_lock锁*/
 	if(is_cache_file)
@@ -3599,9 +3600,8 @@ static noinline void file_stat_has_zero_file_area_manage(struct hot_cold_file_gl
 			move_file_stat_to_global_delete_list(p_hot_cold_file_global,p_file_stat_base,file_type,is_cache_file);
 			goto next_file_stat;
 		}
+		mapping = p_file_stat_base->mapping;
 
-		if(scan_file_stat_count++ > scan_file_stat_max)
-			break;
 
 		//如果file_stat对应文件长时间不被访问杂释放掉file_stat结构，这个过程不用spin_lock(&p_hot_cold_file_global->global_lock)加锁
 		if(p_file_stat_base->file_area_count == 0 && p_hot_cold_file_global->global_age - p_file_stat_base->recent_access_age > p_hot_cold_file_global->file_stat_delete_age_dx){
@@ -3739,13 +3739,19 @@ file_stat_access:
 			spin_unlock(cache_or_mmap_file_global_lock);
 		}
 
-		file_inode_unlock(p_file_stat_base);
+		/*file_stat可能在上边cold_file_stat_delete()释放了，并且赋值file_stat->mapping=0。然后不能再使用file_inode_unlock()，因为它会使用file_stat->mapping->host获取inode，此时是非法内存访问*/
+		//file_inode_unlock(p_file_stat_base);
+		file_inode_unlock_mapping(mapping);
 
 next_file_stat:
 		file_stat_delete_protect_lock(1);
 		file_stat_delete_lock = 1;
 		/*如果遍历到global zero链表头，或者下一次遍历的file_stat被delete了，立即跳出遍历*/
 		if(&p_file_stat_base_temp->hot_cold_file_list == file_stat_zero_list_head  || file_stat_in_delete_file_base(p_file_stat_base_temp))
+			break;
+
+		/*这个scan_file_stat_count超过max则break的判断，要放到for循环下边，原因看get_file_area_from_file_stat_list()。还有一个原因是for循环上边break会错过file_inode_unlock()解锁*/
+		if++(scan_file_stat_count > scan_file_stat_max)
 			break;
 
 		if(rcu_read_lock_flag){
@@ -10236,7 +10242,7 @@ next_file_stat:
 		if(&p_file_stat_base_temp->hot_cold_file_list == file_stat_temp_head  || file_stat_in_delete_file_base(p_file_stat_base_temp))
 			break;
 		
-		/* break必须放到这里，不能当道for循环的上边。否则因为scan_file_area_count > scan_file_area_max 而break后，
+		/* break必须放到这里，不能放到for循环的上边。否则因为scan_file_area_count > scan_file_area_max 而break后，
 		 * 当前的p_file_stat_base对应的文件，就无法遍历，内存回收。并且，如果这个file_stat如果还是链表头的，就会
 		 * 在下边list_move_enhance()失败，因为它是链表头的file_stat。如此导致file_stat长时间无法遍历到，对它内存回收*/
 		if(scan_file_area_count >= scan_file_area_max || ++scan_file_stat_count > scan_file_stat_max)

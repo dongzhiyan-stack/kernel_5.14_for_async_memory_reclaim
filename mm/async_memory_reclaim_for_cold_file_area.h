@@ -3681,4 +3681,30 @@ extern noinline int hot_cold_file_print_all_file_stat(struct hot_cold_file_globa
 extern noinline void printk_shrink_param(struct hot_cold_file_global *p_hot_cold_file_global,struct seq_file *m,int is_proc_print);
 extern int hot_cold_file_thread(void *p);
 extern int async_memory_reclaim_main_thread(void *p);
+
+void page_cache_delete_for_file_area(struct address_space *mapping,struct folio *folio, void *shadow);
+void page_cache_delete_batch_for_file_area(struct address_space *mapping,struct folio_batch *fbatch);
+bool filemap_range_has_page_for_file_area(struct address_space *mapping,loff_t start_byte, loff_t end_byte);
+bool filemap_range_has_writeback_for_file_area(struct address_space *mapping,loff_t start_byte, loff_t end_byte);
+void replace_page_cache_page_for_file_area(struct page *old, struct page *new);
+noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,struct folio *folio, pgoff_t index, gfp_t gfp, void **shadowp);
+pgoff_t page_cache_next_miss_for_file_area(struct address_space *mapping,pgoff_t index, unsigned long max_scan);
+pgoff_t page_cache_prev_miss_for_file_area(struct address_space *mapping,pgoff_t index, unsigned long max_scan);
+extern void *mapping_get_entry_for_file_area(struct address_space *mapping, pgoff_t index);
+//void *get_folio_from_file_area_for_file_area(struct address_space *mapping,pgoff_t index);
+inline struct folio *find_get_entry_for_file_area(struct xa_state *xas, pgoff_t max,xa_mark_t mark,struct file_area **p_file_area,unsigned int *page_offset_in_file_area,struct address_space *mapping);
+unsigned find_get_entries_for_file_area(struct address_space *mapping, pgoff_t start,pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices);
+unsigned find_lock_entries_for_file_area(struct address_space *mapping, pgoff_t start,pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices);
+unsigned find_get_pages_range_for_file_area(struct address_space *mapping, pgoff_t *start,pgoff_t end, unsigned int nr_pages,struct page **pages);
+unsigned find_get_pages_contig_for_file_area(struct address_space *mapping, pgoff_t index,unsigned int nr_pages, struct page **pages);
+unsigned find_get_pages_range_tag_for_file_area(struct address_space *mapping, pgoff_t *index,pgoff_t end, xa_mark_t tag, unsigned int nr_pages,struct page **pages);
+void filemap_get_read_batch_for_file_area(struct address_space *mapping,pgoff_t index, pgoff_t max, struct folio_batch *fbatch);
+//loff_t mapping_seek_hole_data_for_file_area(struct address_space *mapping, loff_t start,loff_t end, int whence);
+//vm_fault_t filemap_map_pages_for_file_area(struct vm_fault *vmf,pgoff_t start_pgoff, pgoff_t end_pgoff);
+//bool inode_do_switch_wbs_for_file_area(struct inode *inode,struct bdi_writeback *old_wb,struct bdi_writeback *new_wb);
+//int folio_migrate_mapping_for_file_area(struct address_space *mapping,struct folio *newfolio, struct folio *folio, int extra_count);
+//void tag_pages_for_writeback_for_file_area(struct address_space *mapping,pgoff_t start, pgoff_t end);
+//void __folio_mark_dirty_for_file_area(struct folio *folio, struct address_space *mapping,int warn);
+//bool __folio_end_writeback_for_file_area(struct folio *folio);
+//bool __folio_start_writeback_for_file_area(struct folio *folio, bool keep_write);
 #endif
