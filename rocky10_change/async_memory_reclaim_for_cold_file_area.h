@@ -3656,7 +3656,7 @@ static inline unsigned int move_small_file_area_to_normal_file(struct hot_cold_f
 }
 #endif
 
-#if LINUX_VERSION_CODE > KERNEL_VERSION(6,1,0) || defined(CONFIG_ASYNC_MEMORY_RECLAIM_FEATURE)
+#if LINUX_VERSION_CODE > KERNEL_VERSION(6,1,0)
 #define folio_try_get_rcu folio_try_get
 #endif
 //extern void can_tiny_small_file_change_to_small_normal_file(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_tiny_small *p_file_stat_tiny_small,char is_cache_file);
@@ -3690,36 +3690,34 @@ void page_cache_delete_for_file_area(struct address_space *mapping,struct folio 
 void page_cache_delete_batch_for_file_area(struct address_space *mapping,struct folio_batch *fbatch);
 bool filemap_range_has_page_for_file_area(struct address_space *mapping,loff_t start_byte, loff_t end_byte);
 bool filemap_range_has_writeback_for_file_area(struct address_space *mapping,loff_t start_byte, loff_t end_byte);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,1,0) || defined(CONFIG_ASYNC_MEMORY_RECLAIM_FEATURE)
-void replace_page_cache_folio_for_file_area(struct folio *old, struct folio *new);
-#else
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,1,0)
 void replace_page_cache_page_for_file_area(struct page *old, struct page *new);
+#else
+void replace_page_cache_folio_for_file_area(struct folio *old, struct folio *new);
 #endif
 noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,struct folio *folio, pgoff_t index, gfp_t gfp, void **shadowp);
 pgoff_t page_cache_next_miss_for_file_area(struct address_space *mapping,pgoff_t index, unsigned long max_scan);
 pgoff_t page_cache_prev_miss_for_file_area(struct address_space *mapping,pgoff_t index, unsigned long max_scan);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,1,0) || defined(CONFIG_ASYNC_MEMORY_RECLAIM_FEATURE)
-void *filemap_get_entry_for_file_area(struct address_space *mapping, pgoff_t index);
-#else
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,1,0)
 void *mapping_get_entry_for_file_area(struct address_space *mapping, pgoff_t index);
+#else
+void *filemap_get_entry_for_file_area(struct address_space *mapping, pgoff_t index);
 #endif
 //void *get_folio_from_file_area_for_file_area(struct address_space *mapping,pgoff_t index);
 inline struct folio *find_get_entry_for_file_area(struct xa_state *xas, pgoff_t max,xa_mark_t mark,struct file_area **p_file_area,unsigned int *page_offset_in_file_area,struct address_space *mapping);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,1,0) || defined(CONFIG_ASYNC_MEMORY_RECLAIM_FEATURE)
-unsigned find_get_entries_for_file_area(struct address_space *mapping, pgoff_t *start,pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices);
-unsigned find_lock_entries_for_file_area(struct address_space *mapping, pgoff_t *start,pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices);
-unsigned filemap_get_folios_contig_for_file_area(struct address_space *mapping,pgoff_t *start, pgoff_t end, struct folio_batch *fbatch);
-unsigned filemap_get_folios_tag_for_file_area(struct address_space *mapping, pgoff_t *start,pgoff_t end, xa_mark_t tag, struct folio_batch *fbatch);
-unsigned filemap_get_folios_for_file_area(struct address_space *mapping, pgoff_t *start,pgoff_t end, struct folio_batch *fbatch);
-#else
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,1,0)
 unsigned find_get_entries_for_file_area(struct address_space *mapping, pgoff_t start,pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices);
 unsigned find_lock_entries_for_file_area(struct address_space *mapping, pgoff_t start,pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices);
 unsigned find_get_pages_range_for_file_area(struct address_space *mapping, pgoff_t *start,pgoff_t end, unsigned int nr_pages,struct page **pages);
 unsigned find_get_pages_contig_for_file_area(struct address_space *mapping, pgoff_t index,unsigned int nr_pages, struct page **pages);
 unsigned find_get_pages_range_tag_for_file_area(struct address_space *mapping, pgoff_t *index,pgoff_t end, xa_mark_t tag, unsigned int nr_pages,struct page **pages);
+#else
+unsigned find_get_entries_for_file_area(struct address_space *mapping, pgoff_t *start,pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices);
+unsigned find_lock_entries_for_file_area(struct address_space *mapping, pgoff_t *start,pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices);
+unsigned filemap_get_folios_contig_for_file_area(struct address_space *mapping,pgoff_t *start, pgoff_t end, struct folio_batch *fbatch);
+unsigned filemap_get_folios_tag_for_file_area(struct address_space *mapping, pgoff_t *start,pgoff_t end, xa_mark_t tag, struct folio_batch *fbatch);
 #endif
 void filemap_get_read_batch_for_file_area(struct address_space *mapping,pgoff_t index, pgoff_t max, struct folio_batch *fbatch);
-
 //loff_t mapping_seek_hole_data_for_file_area(struct address_space *mapping, loff_t start,loff_t end, int whence);
 //vm_fault_t filemap_map_pages_for_file_area(struct vm_fault *vmf,pgoff_t start_pgoff, pgoff_t end_pgoff);
 //bool inode_do_switch_wbs_for_file_area(struct inode *inode,struct bdi_writeback *old_wb,struct bdi_writeback *new_wb);

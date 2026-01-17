@@ -56,6 +56,7 @@
 #include "async_memory_reclaim_for_cold_file_area.h"
 
 
+
 #define AGE_DX_CHANGE_REFAULT_SLIGHT 0 
 #define AGE_DX_CHANGE_REFAULT_SERIOUS 1
 #define AGE_DX_CHANGE_REFAULT_CRITIAL 2
@@ -10840,7 +10841,7 @@ static noinline void walk_throuth_all_file_area(struct hot_cold_file_global *p_h
 	//return 0;
 }
 /*6.12内核sysctl_extfrag_threshold不再是全局变量，这里单独定义*/
-#if LINUX_VERSION_CODE > KERNEL_VERSION(6,1,0) || defined(CONFIG_ASYNC_MEMORY_RECLAIM_FEATURE)
+#if LINUX_VERSION_CODE > KERNEL_VERSION(6,1,0)
 static int sysctl_extfrag_threshold = 500;
 #endif
 inline static int memory_zone_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct zone *zone,unsigned long zone_free_page,int *zone_memory_tiny_count)
