@@ -791,7 +791,7 @@ struct memory_reclaim_info_for_one_warm_list{
 	unsigned int scan_file_area_count_in_reclaim;
 	unsigned int scan_zero_page_file_area_count_in_reclaim;
 	unsigned int scan_warm_file_area_count;
-
+	unsigned int scan_file_area_count_reclaim_fail;
 	unsigned int reclaim_pages_count;
 };
 struct memory_reclaim_info{
@@ -818,6 +818,7 @@ struct memory_reclaim_info{
 	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_warm_cold_list;
 	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_warm_middle_list;
 	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_warm_list;
+	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_direct_reclaim;
 };
 #define CURRENT_SCAN_FILE_STAT_INFO_TEMP 0
 #define CURRENT_SCAN_FILE_STAT_INFO_MIDDLE 1
@@ -829,6 +830,31 @@ struct memory_reclaim_info{
 //热点文件统计信息全局结构体
 struct hot_cold_file_global
 {
+	unsigned int free_pages_from_cache_global_writeonly_or_cold_list;
+	unsigned int free_pages_from_cache_global_warm_cold_list;
+	unsigned int free_pages_from_cache_global_warm_middle_list;
+	unsigned int free_pages_from_cache_global_warm_list;
+	unsigned int free_pages_from_mmap_global_writeonly_or_cold_list;
+	unsigned int free_pages_from_mmap_global_warm_cold_list;
+	unsigned int free_pages_from_mmap_global_warm_middle_list;
+	unsigned int free_pages_from_mmap_global_warm_list;
+	
+	unsigned int free_pages_from_cache_writeonly_or_cold_list;
+	unsigned int free_pages_from_cache_warm_cold_list;
+	unsigned int free_pages_from_cache_warm_middle_list;
+	unsigned int free_pages_from_cache_warm_list;
+	unsigned int free_pages_from_mmap_writeonly_or_cold_list;
+	unsigned int free_pages_from_mmap_warm_cold_list;
+	unsigned int free_pages_from_mmap_warm_middle_list;
+	unsigned int free_pages_from_mmap_warm_list;
+
+	unsigned int try_to_unmap_page_fail_count;
+	unsigned int memory_tiny_count;
+	/*控制判断内存紧张的内存zone 阈值*/
+	unsigned int memory_zone_solve_age_order;
+	/* 目前主要针对mmap文件的file_area，在最终内存回收前，如果file-area的age_dx大于file_stat_file_area_free_age_dx才允许回收该file_area
+	 * 每个文件内存回收前都要对该变量清0*/
+	unsigned int file_stat_file_area_free_age_dx;
 	/*指向每次遍历的current_scan_file_stat_info结构体，调试用*/
 	struct current_scan_file_stat_info *p_struct_current_scan_file_stat_info;
 	struct memory_reclaim_info memory_reclaim_info;
@@ -2719,9 +2745,14 @@ inline static void update_file_stat_next_multi_level_warm_or_writeonly_list(stru
 		case POS_WARM_HOT:
 			/* 遍历过file_stat->warm_hot链表上的file_area后，不再允许异步内存回收线程traverse_file_stat_multi_level_warm_list()遍历
 			 * file_stat->writeonly链表上的file_area了。因为现在判定有点浪费性能，反正异步内存回收时，遍历file_stat->writeonly
-			 * 链表上的file_area进行内存回收时。如果file_area最近访问过，直接移动到file_stat->warm链表。*/
-			//p_file_stat->traverse_warm_list_num = POS_WIITEONLY_OR_COLD;
-			p_file_stat->traverse_warm_list_num = POS_WARM_COLD;
+			 * 链表上的file_area进行内存回收时。如果file_area最近访问过，直接移动到file_stat->warm链表。
+			 * 但是针对mmap文件，writeonly链表上的file_area，异步内存回收线程不遍历该链表上的file_area，即使该file_area被访问了
+			 * 也无法更新file_area_age，等内存紧张时就会被回收掉，于是决定mmap要遍历writeonly链表上的file_area。具体看update_global_file_stat_next_multi_level_warm_or_writeonly_list()*/
+			if(file_stat_in_cache_file_base(&p_file_stat->file_stat_base))
+				p_file_stat->traverse_warm_list_num = POS_WARM_COLD;
+			else
+				p_file_stat->traverse_warm_list_num = POS_WIITEONLY_OR_COLD;
+
 			break;
 		case POS_WARM:
 			p_file_stat->traverse_warm_list_num = POS_WARM_HOT;
