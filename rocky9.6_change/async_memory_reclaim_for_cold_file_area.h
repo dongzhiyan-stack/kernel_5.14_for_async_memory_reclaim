@@ -827,9 +827,20 @@ struct memory_reclaim_info{
 /*真TM傻逼，要定义一个有4个成员的数组，竟然直接用CURRENT_SCAN_FILE_STAT_INFO_MAX(3)，好低级的错误，不过脑子的思考就容易犯错呀!!!!!!!!*/
 //#define CURRENT_SCAN_FILE_STAT_INFO_MAX  CURRENT_SCAN_FILE_STAT_INFO_WRITEONLY
 #define CURRENT_SCAN_FILE_STAT_INFO_MAX  (CURRENT_SCAN_FILE_STAT_INFO_WRITEONLY + 1)
+
+#define MAX_PAGES_ZONE 0
+#define SECOND_PAGES_ZONE 1
+#define THIRD_PAGES_ZONE 2
+#define MAX_ZONE (THIRD_PAGES_ZONE + 1)
 //热点文件统计信息全局结构体
 struct hot_cold_file_global
 {
+	struct zone *zone[MAX_ZONE];
+	struct zone *normal_zone;
+	unsigned int normal_zone_high_wmark_reclaim;
+	unsigned int is_memory_idle_but_normal_zone_memory_tiny_count;
+
+	unsigned int file_stat_in_move_free_list_file_area_count;
 	unsigned int free_pages_from_cache_global_writeonly_or_cold_list;
 	unsigned int free_pages_from_cache_global_warm_cold_list;
 	unsigned int free_pages_from_cache_global_warm_middle_list;
@@ -1252,6 +1263,7 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	F_file_stat_in_file_area_in_tmp_list,
     F_file_stat_in_writeonly,//该文件只有write 的page，没有读page，这种文件即便file_area个数少也要移动到middel或large文件，内存回收优先回收这种文件。
 	F_file_stat_invalid_start_index,
+
 	F_file_stat_in_delete_file,//标识该file_stat被移动到了global delete链表	
 	F_file_stat_in_delete,//仅仅表示该file_stat被触发delete了，并不能说明file_stat被移动到了global delete链表
 	//F_file_stat_in_drop_cache,
@@ -1260,6 +1272,7 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	//F_file_stat_in_large_file,
 	//F_file_stat_in_from_small_file,//该文件是从small文件的global small_temp链表移动过来的
 	F_file_stat_in_replaced_file,//file_stat_tiny_small或file_stat_small转成更大的文件时，老的file_stat被标记replaced
+	F_file_stat_in_move_free_list_file_area,
 	F_file_stat_max_index,
 	//F_file_stat_lock,
 	//F_file_stat_lock_not_block,//这个bit位置1，说明inode在删除的，但是获取file_stat锁失败
@@ -1415,6 +1428,7 @@ FILE_STATUS_BASE(writeonly)
 FILE_STATUS_BASE(global)
 FILE_STATUS_BASE(tiny_small_to_tail)
 FILE_STATUS_BASE(file_area_in_tmp_list)
+FILE_STATUS_BASE(move_free_list_file_area)
 
 
 /*设置/清除file_stat状态使用test_and_set_bit/clear_bit，是异步内存回收1.0版本的产物，现在不再需要。

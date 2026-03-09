@@ -779,6 +779,64 @@ static void inline async_and_kswapd_refault_page_count(struct file_stat_base *p_
 			p_file_stat_base->refault_page_count_last ++;
 	}
 }
+/* 有些writeonly文件内存回收后，file_area移动到了file_stat->free链表，这种file_area有几千个。后续这些file_area又被访问了，
+ * 属于write page refault。这些有大量page的file-area零散的分布在file_stat->free链表各处，导致内存紧张时，很难连续的从file_stat->free
+ * 链表遍历到这些file_area并回收page，强制把file_stat->free链表遍历一遍，浪费cpu。于是想到这些write refalt的file_area，再add_folio把
+ * page添加到file_area时，直接把file_area移动到file_stat->free链表尾。但是我不想使用file_stat_lock，浪费性能。但是异步内存回收线程
+ * 此时也会向file_stat->free链表移入file_area，或者把file_stat->free链表上的file_area移动到file_stat->refault链表，或者释放掉
+ * file_area且把file_area从file_stat->free链表剔除。不加锁也有解决办法。异步内存回收线程有这些操作时，
+ * while(test_and_set_bit(file_area_stat,F_file_stat_in_move_free_list_file_area))
+ *     msleep(1);
+ *
+ *    1:把file_aeea移动到file_stat->free链表
+ *    2:把file_area移动到其他file_stat->refault链表
+ *    3:把file-area从file_stat->free链表移除掉并释放
+ *  clear_file_area_in_move_free_list_file_area
+ *
+ * add_folio函数里
+ * if(0 == test_and_set_bit(file_area_stat,F_file_stat_in_move_free_list_file_area)){
+ *     把write page refault的file_area移动到file_stat->free链表尾
+ *     clear_file_area_in_move_free_list_file_area
+ * }
+ * 异步内存回收线程 跟 add_folio函数的线程，test_and_set_bit(file_area_stat,F_file_stat_in_move_free_list_file_area)抢占锁
+ * 如果异步内存回收线程抢占成功，则add_folio不再把该file_area移动到file_stat->free链表尾。如果add_folio的线程先抢占成功，则
+ * 该file_area移动到file_stat->free链表尾。此时异步内存回收线程msleep(1)休眠，避免并发操作file_stat->free链表的file_area
+ */
+inline void move_writeonly_file_area_to_free_list_tail(struct file_stat_base *p_file_stat_base,struct file_area *p_file_area)
+{
+	/* 不能用file_stat_in_writeonly_base()，file_stat_in_writeonly_base，会被第3个线程在读写文件时清理掉。此时异步内存回收线程，
+	 * 发现file_stat没有了file_stat_in_writeonly_base(p_file_stat_base)标记，异步内存线程就不会在操作file_stat->free链表的
+	 * file_area前，对file_area_state上F_file_stat_in_move_free_list_file_area。但是add_folio线程因为数据没有及时同步到，
+	 * 依然看到file_stat_in_writeonly_base(p_file_stat_base)，导致执行下边的list_move把file_area移动到file_stat->free链表
+	 * 尾，而此时异步内存回收线程也会操作该file_stat->free链表上的file_area。相当于两个进程在无锁状态同时操作同一个链表
+	 * 的file_area，那就要出并发问题了。而最后使用的file_stat_in_file_stat_writeonly_file_head_list_base，只有异步内存回收
+	 * 线程会执行，只要异步内存线程在操作file_stat->free链表的file_area前，执行
+	 * if(file_stat_in_file_stat_writeonly_file_head_list_base(p_file_stat_base))，if成立，然后接着操作file_stat->free链表
+	 * 上的file_area，file_stat_in_file_stat_writeonly_file_head_list_base标记一直存在，不用担心被清理掉。这个过程add_folio下边
+	 * list_move_tail()把write page refault的file-area移动到file_stat->free链表，该file_stat标记一直存在。我只要保证
+	 * 异步内存回收线程操作file_stat->free链表上的file_area时，file_stat_in_file_stat_writeonly_file_head_list_base标记一直存在就行*/
+
+	/*突然又想到一个隐藏很深的bug。比如，此时这个file_area的4个page正在异步内存回收线程cold_file_isolate_lru_pages_and_shrink()函数里回收。
+	 *第一步先设置file_area的in_free标记。然后回收掉page0。接着回收page1。此时page0发生refault。此时该file_area没有移动到file_stat->free链表。
+	 *那这里就不能把file_area移动file_stat->free链表!!!。没事的，。在执行cold_file_isolate_lru_pages_and_shrink()前的
+	 file_stat_multi_level_warm_or_writeonly_list_file_area_solve->direct_recliam_file_area_for_file_stat函数里，先执行了
+	 test_and_set_bit(F_file_stat_in_move_free_list_file_area,file_stat_status)加锁，不可能存在add_folio在move_writeonly_file_area_to_free_list_tail()
+	 把file_area移动到file_stat->free链表尾，异步内存回收线程在cold_file_isolate_lru_pages_and_shrink()函数回收该file_area的page。没错，
+	 凡是异步内存回收线程有遍历这些有in_free标记的地方，都有F_file_stat_in_move_free_list_file_area加锁防护。*/
+    //if(file_stat_in_writeonly_base(p_file_stat_base) && 不能用file_stat_in_writeonly_base，会被第3个进程读写文件时并发清理掉
+    if(file_stat_in_file_stat_writeonly_file_head_list_base(p_file_stat_base) &&
+			0 == test_and_set_bit(F_file_stat_in_move_free_list_file_area,(void *)(&p_file_stat_base->file_stat_status))){
+
+	    struct file_stat *p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
+		/*必须得保证异步内存回收线程先设置file_area的in_free标记，再把file_area移动到file_stat->free链表*/
+		if(!file_area_in_free_list(p_file_area))
+			panic("%s file_stat:0x%llx  status:0x%x file_area:0x%llx state:0x%x file_area not in_free\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,(u64)p_file_area,p_file_area->file_area_state);
+        smp_rmb();
+
+		list_move_tail(&p_file_area->file_area_list,&p_file_stat->file_area_free);
+		clear_file_stat_in_move_free_list_file_area_base(p_file_stat_base);
+    }
+}
 noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 		struct folio *folio, pgoff_t index, gfp_t gfp, void **shadowp)
 {
@@ -913,8 +971,14 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 					if((file_stat_in_test_base(p_file_stat_base) || is_global_file_stat_file_in_debug(mapping)) && (1 == (u64)folio_temp)){
 						printk("%s refault file_stat:0x%llx file_area:0x%llx status:0x%x index:%ld  %s\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,index,get_file_name_no_lock_from_mapping(mapping));
 					}
+					/*folio_temp等于1说明是异步内存回收线程回收的page，此时的file_area才有in_free标记，在file_stat->free链表。否则，
+					 *如果page是kswapd回收的，此时folio_temp是shadow值，file_area没有in_free标记，也不在file_stat->free链表，此时不能把file_area移动到file_stat->free链表尾*/
+				}else if(1 == (u64)folio_temp){
+					/* write page发生refault把file_area移动到file_stat->free链表尾。file_area的每个page发生refault，都会执行一次，这个没啥好办法。
+					 * 其实可以第一次设置in_refault标记，后续有in_refault标记就不再把file_area移动到file_stat->free链表尾了。但是等再次回收file-area
+					 * 的page，还得再清理掉in_refault标记，弄得有点麻烦???????*/
+					move_writeonly_file_area_to_free_list_tail(p_file_stat_base,p_file_area);
 				}
-
 			}
 
 			//file_area已经添加到xarray tree，但是page还没有赋值到file_area->pages[]数组
