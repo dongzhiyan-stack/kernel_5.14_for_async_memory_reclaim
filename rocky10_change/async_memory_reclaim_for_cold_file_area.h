@@ -791,7 +791,7 @@ struct memory_reclaim_info_for_one_warm_list{
 	unsigned int scan_file_area_count_in_reclaim;
 	unsigned int scan_zero_page_file_area_count_in_reclaim;
 	unsigned int scan_warm_file_area_count;
-
+	unsigned int scan_file_area_count_reclaim_fail;
 	unsigned int reclaim_pages_count;
 };
 struct memory_reclaim_info{
@@ -818,6 +818,7 @@ struct memory_reclaim_info{
 	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_warm_cold_list;
 	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_warm_middle_list;
 	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_warm_list;
+	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_direct_reclaim;
 };
 #define CURRENT_SCAN_FILE_STAT_INFO_TEMP 0
 #define CURRENT_SCAN_FILE_STAT_INFO_MIDDLE 1
@@ -826,9 +827,45 @@ struct memory_reclaim_info{
 /*真TM傻逼，要定义一个有4个成员的数组，竟然直接用CURRENT_SCAN_FILE_STAT_INFO_MAX(3)，好低级的错误，不过脑子的思考就容易犯错呀!!!!!!!!*/
 //#define CURRENT_SCAN_FILE_STAT_INFO_MAX  CURRENT_SCAN_FILE_STAT_INFO_WRITEONLY
 #define CURRENT_SCAN_FILE_STAT_INFO_MAX  (CURRENT_SCAN_FILE_STAT_INFO_WRITEONLY + 1)
+
+#define MAX_PAGES_ZONE 0
+#define SECOND_PAGES_ZONE 1
+#define THIRD_PAGES_ZONE 2
+#define MAX_ZONE (THIRD_PAGES_ZONE + 1)
 //热点文件统计信息全局结构体
 struct hot_cold_file_global
 {
+	struct zone *zone[MAX_ZONE];
+	struct zone *normal_zone;
+	unsigned int normal_zone_high_wmark_reclaim;
+	unsigned int is_memory_idle_but_normal_zone_memory_tiny_count;
+
+	unsigned int file_stat_in_move_free_list_file_area_count;
+	unsigned int free_pages_from_cache_global_writeonly_or_cold_list;
+	unsigned int free_pages_from_cache_global_warm_cold_list;
+	unsigned int free_pages_from_cache_global_warm_middle_list;
+	unsigned int free_pages_from_cache_global_warm_list;
+	unsigned int free_pages_from_mmap_global_writeonly_or_cold_list;
+	unsigned int free_pages_from_mmap_global_warm_cold_list;
+	unsigned int free_pages_from_mmap_global_warm_middle_list;
+	unsigned int free_pages_from_mmap_global_warm_list;
+	
+	unsigned int free_pages_from_cache_writeonly_or_cold_list;
+	unsigned int free_pages_from_cache_warm_cold_list;
+	unsigned int free_pages_from_cache_warm_middle_list;
+	unsigned int free_pages_from_cache_warm_list;
+	unsigned int free_pages_from_mmap_writeonly_or_cold_list;
+	unsigned int free_pages_from_mmap_warm_cold_list;
+	unsigned int free_pages_from_mmap_warm_middle_list;
+	unsigned int free_pages_from_mmap_warm_list;
+
+	unsigned int try_to_unmap_page_fail_count;
+	unsigned int memory_tiny_count;
+	/*控制判断内存紧张的内存zone 阈值*/
+	unsigned int memory_zone_solve_age_order;
+	/* 目前主要针对mmap文件的file_area，在最终内存回收前，如果file-area的age_dx大于file_stat_file_area_free_age_dx才允许回收该file_area
+	 * 每个文件内存回收前都要对该变量清0*/
+	unsigned int file_stat_file_area_free_age_dx;
 	/*指向每次遍历的current_scan_file_stat_info结构体，调试用*/
 	struct current_scan_file_stat_info *p_struct_current_scan_file_stat_info;
 	struct memory_reclaim_info memory_reclaim_info;
@@ -1226,6 +1263,7 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	F_file_stat_in_file_area_in_tmp_list,
     F_file_stat_in_writeonly,//该文件只有write 的page，没有读page，这种文件即便file_area个数少也要移动到middel或large文件，内存回收优先回收这种文件。
 	F_file_stat_invalid_start_index,
+
 	F_file_stat_in_delete_file,//标识该file_stat被移动到了global delete链表	
 	F_file_stat_in_delete,//仅仅表示该file_stat被触发delete了，并不能说明file_stat被移动到了global delete链表
 	//F_file_stat_in_drop_cache,
@@ -1234,6 +1272,7 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	//F_file_stat_in_large_file,
 	//F_file_stat_in_from_small_file,//该文件是从small文件的global small_temp链表移动过来的
 	F_file_stat_in_replaced_file,//file_stat_tiny_small或file_stat_small转成更大的文件时，老的file_stat被标记replaced
+	F_file_stat_in_move_free_list_file_area,
 	F_file_stat_max_index,
 	//F_file_stat_lock,
 	//F_file_stat_lock_not_block,//这个bit位置1，说明inode在删除的，但是获取file_stat锁失败
@@ -1389,6 +1428,7 @@ FILE_STATUS_BASE(writeonly)
 FILE_STATUS_BASE(global)
 FILE_STATUS_BASE(tiny_small_to_tail)
 FILE_STATUS_BASE(file_area_in_tmp_list)
+FILE_STATUS_BASE(move_free_list_file_area)
 
 
 /*设置/清除file_stat状态使用test_and_set_bit/clear_bit，是异步内存回收1.0版本的产物，现在不再需要。
@@ -2719,9 +2759,14 @@ inline static void update_file_stat_next_multi_level_warm_or_writeonly_list(stru
 		case POS_WARM_HOT:
 			/* 遍历过file_stat->warm_hot链表上的file_area后，不再允许异步内存回收线程traverse_file_stat_multi_level_warm_list()遍历
 			 * file_stat->writeonly链表上的file_area了。因为现在判定有点浪费性能，反正异步内存回收时，遍历file_stat->writeonly
-			 * 链表上的file_area进行内存回收时。如果file_area最近访问过，直接移动到file_stat->warm链表。*/
-			//p_file_stat->traverse_warm_list_num = POS_WIITEONLY_OR_COLD;
-			p_file_stat->traverse_warm_list_num = POS_WARM_COLD;
+			 * 链表上的file_area进行内存回收时。如果file_area最近访问过，直接移动到file_stat->warm链表。
+			 * 但是针对mmap文件，writeonly链表上的file_area，异步内存回收线程不遍历该链表上的file_area，即使该file_area被访问了
+			 * 也无法更新file_area_age，等内存紧张时就会被回收掉，于是决定mmap要遍历writeonly链表上的file_area。具体看update_global_file_stat_next_multi_level_warm_or_writeonly_list()*/
+			if(file_stat_in_cache_file_base(&p_file_stat->file_stat_base))
+				p_file_stat->traverse_warm_list_num = POS_WARM_COLD;
+			else
+				p_file_stat->traverse_warm_list_num = POS_WIITEONLY_OR_COLD;
+
 			break;
 		case POS_WARM:
 			p_file_stat->traverse_warm_list_num = POS_WARM_HOT;
@@ -3656,7 +3701,7 @@ static inline unsigned int move_small_file_area_to_normal_file(struct hot_cold_f
 }
 #endif
 
-#if LINUX_VERSION_CODE > KERNEL_VERSION(6,1,0)
+#if LINUX_VERSION_CODE > KERNEL_VERSION(6,1,0) || defined(CONFIG_ASYNC_MEMORY_RECLAIM_FEATURE)
 #define folio_try_get_rcu folio_try_get
 #endif
 //extern void can_tiny_small_file_change_to_small_normal_file(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_tiny_small *p_file_stat_tiny_small,char is_cache_file);
@@ -3690,34 +3735,36 @@ void page_cache_delete_for_file_area(struct address_space *mapping,struct folio 
 void page_cache_delete_batch_for_file_area(struct address_space *mapping,struct folio_batch *fbatch);
 bool filemap_range_has_page_for_file_area(struct address_space *mapping,loff_t start_byte, loff_t end_byte);
 bool filemap_range_has_writeback_for_file_area(struct address_space *mapping,loff_t start_byte, loff_t end_byte);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,1,0)
-void replace_page_cache_page_for_file_area(struct page *old, struct page *new);
-#else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,1,0) || defined(CONFIG_ASYNC_MEMORY_RECLAIM_FEATURE)
 void replace_page_cache_folio_for_file_area(struct folio *old, struct folio *new);
+#else
+void replace_page_cache_page_for_file_area(struct page *old, struct page *new);
 #endif
 noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,struct folio *folio, pgoff_t index, gfp_t gfp, void **shadowp);
 pgoff_t page_cache_next_miss_for_file_area(struct address_space *mapping,pgoff_t index, unsigned long max_scan);
 pgoff_t page_cache_prev_miss_for_file_area(struct address_space *mapping,pgoff_t index, unsigned long max_scan);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,1,0)
-void *mapping_get_entry_for_file_area(struct address_space *mapping, pgoff_t index);
-#else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,1,0) || defined(CONFIG_ASYNC_MEMORY_RECLAIM_FEATURE)
 void *filemap_get_entry_for_file_area(struct address_space *mapping, pgoff_t index);
+#else
+void *mapping_get_entry_for_file_area(struct address_space *mapping, pgoff_t index);
 #endif
 //void *get_folio_from_file_area_for_file_area(struct address_space *mapping,pgoff_t index);
 inline struct folio *find_get_entry_for_file_area(struct xa_state *xas, pgoff_t max,xa_mark_t mark,struct file_area **p_file_area,unsigned int *page_offset_in_file_area,struct address_space *mapping);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,1,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,1,0) || defined(CONFIG_ASYNC_MEMORY_RECLAIM_FEATURE)
+unsigned find_get_entries_for_file_area(struct address_space *mapping, pgoff_t *start,pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices);
+unsigned find_lock_entries_for_file_area(struct address_space *mapping, pgoff_t *start,pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices);
+unsigned filemap_get_folios_contig_for_file_area(struct address_space *mapping,pgoff_t *start, pgoff_t end, struct folio_batch *fbatch);
+unsigned filemap_get_folios_tag_for_file_area(struct address_space *mapping, pgoff_t *start,pgoff_t end, xa_mark_t tag, struct folio_batch *fbatch);
+unsigned filemap_get_folios_for_file_area(struct address_space *mapping, pgoff_t *start,pgoff_t end, struct folio_batch *fbatch);
+#else
 unsigned find_get_entries_for_file_area(struct address_space *mapping, pgoff_t start,pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices);
 unsigned find_lock_entries_for_file_area(struct address_space *mapping, pgoff_t start,pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices);
 unsigned find_get_pages_range_for_file_area(struct address_space *mapping, pgoff_t *start,pgoff_t end, unsigned int nr_pages,struct page **pages);
 unsigned find_get_pages_contig_for_file_area(struct address_space *mapping, pgoff_t index,unsigned int nr_pages, struct page **pages);
 unsigned find_get_pages_range_tag_for_file_area(struct address_space *mapping, pgoff_t *index,pgoff_t end, xa_mark_t tag, unsigned int nr_pages,struct page **pages);
-#else
-unsigned find_get_entries_for_file_area(struct address_space *mapping, pgoff_t *start,pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices);
-unsigned find_lock_entries_for_file_area(struct address_space *mapping, pgoff_t *start,pgoff_t end, struct folio_batch *fbatch, pgoff_t *indices);
-unsigned filemap_get_folios_contig_for_file_area(struct address_space *mapping,pgoff_t *start, pgoff_t end, struct folio_batch *fbatch);
-unsigned filemap_get_folios_tag_for_file_area(struct address_space *mapping, pgoff_t *start,pgoff_t end, xa_mark_t tag, struct folio_batch *fbatch);
 #endif
 void filemap_get_read_batch_for_file_area(struct address_space *mapping,pgoff_t index, pgoff_t max, struct folio_batch *fbatch);
+
 //loff_t mapping_seek_hole_data_for_file_area(struct address_space *mapping, loff_t start,loff_t end, int whence);
 //vm_fault_t filemap_map_pages_for_file_area(struct vm_fault *vmf,pgoff_t start_pgoff, pgoff_t end_pgoff);
 //bool inode_do_switch_wbs_for_file_area(struct inode *inode,struct bdi_writeback *old_wb,struct bdi_writeback *new_wb);
