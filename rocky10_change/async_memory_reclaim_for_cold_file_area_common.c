@@ -1737,7 +1737,7 @@ static const struct proc_ops async_memory_reclaime_info_fops = {
 	.proc_release	= async_memory_reclaime_info_release,
 };
 
-int hot_cold_file_proc_init(struct hot_cold_file_global *p_hot_cold_file_global)
+static int hot_cold_file_proc_init(struct hot_cold_file_global *p_hot_cold_file_global)
 {
 	struct proc_dir_entry *p,*hot_cold_file_proc_root;
 
@@ -1874,7 +1874,7 @@ int hot_cold_file_proc_init(struct hot_cold_file_global *p_hot_cold_file_global)
 
 	return 0;
 }
-int hot_cold_file_proc_exit(struct hot_cold_file_global *p_hot_cold_file_global)
+/*static int hot_cold_file_proc_exit(struct hot_cold_file_global *p_hot_cold_file_global)
 {
 	//"file_area_hot_to_temp_age_dx"节点不存在也不会crash，自身做了防护
 	remove_proc_entry("file_area_hot_to_temp_age_dx",p_hot_cold_file_global->hot_cold_file_proc_root);
@@ -1908,7 +1908,7 @@ int hot_cold_file_proc_exit(struct hot_cold_file_global *p_hot_cold_file_global)
 	
 	remove_proc_entry("async_memory_reclaime",NULL);
 	return 0;
-}
+}*/
 static void global_file_stat_init(void)
 {
 	memset(&hot_cold_file_global_info.global_file_stat,0,sizeof(struct global_file_stat));
@@ -2154,7 +2154,7 @@ static int __init hot_cold_file_init(void)
 }
 subsys_initcall(hot_cold_file_init);
 
-int one_fs_uuid_string_convert(char **src_buf,unsigned char *dst_buf)
+static int one_fs_uuid_string_convert(char **src_buf,unsigned char *dst_buf)
 {
 	char hex_buf[2];
 	unsigned char hex_buf_count = 0;
@@ -2205,7 +2205,7 @@ int one_fs_uuid_string_convert(char **src_buf,unsigned char *dst_buf)
 	}
 	return 0;
 }
-int uuid_string_convert(char *buf)
+static int uuid_string_convert(char *buf)
 {
 	int ret = 0;
 	int support_fs_uuid_count = 0;

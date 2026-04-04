@@ -70,13 +70,13 @@ void page_cache_delete_for_file_area(struct address_space *mapping,
 	XA_STATE(xas, &mapping->i_pages, folio->index >>PAGE_COUNT_IN_AREA_SHIFT);
 	long nr = 1;
 	struct file_area *p_file_area; 
-	struct file_stat_base *p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+	//struct file_stat_base *p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
 
 	//令page索引与上0x3得到它在file_area的pages[]数组的下标
 	unsigned int page_offset_in_file_area = folio->index & PAGE_COUNT_IN_AREA_MASK;
-#if 0
-	mapping_set_update(&xas, mapping);//xarray shadow 的处理，先不管
-#endif
+
+	mapping_set_update(&xas, mapping);//xarray shadow 的处理，先不管。重新评估需要
+
 	/* hugetlb pages are represented by a single entry in the xarray */
 	if (!folio_test_hugetlb(folio)) {
 		if(folio_nr_pages(folio) > 1){
@@ -301,7 +301,7 @@ void page_cache_delete_batch_for_file_area(struct address_space *mapping,
 	unsigned int page_offset_in_file_area = fbatch->folios[0]->index & PAGE_COUNT_IN_AREA_MASK;
 	struct file_stat_base *p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
 
-	//mapping_set_update(&xas, mapping); 不需要设置shadow operation
+	mapping_set_update(&xas, mapping);// 不需要设置shadow operation。重新评估需要
 
 	/*查找start_byte~end_byte地址范围内的有效page并返回，一直查找max索引的page结束。因为，xas_for_each()里调用的
 	 *xas_find()和xas_next_entry()都是以xas->xa_offset为起始索引从xarray tree查找page，找不到则xas->xa_offset加1继续查找，
@@ -836,7 +836,8 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 	VM_BUG_ON_FOLIO(folio_test_swapbacked(folio), folio);
-	//mapping_set_update(&xas, mapping); shadow 操作，这里不再设置
+	mapping_set_update(&xas, mapping); //shadow 操作，这里不再设置。重新评估需要
+
 	FILE_AREA_PRINT("%s mapping:0x%llx folio:0x%llx index:%ld area_index_for_page:%d\n",__func__,(u64)mapping,(u64)folio,index,area_index_for_page);
 	
 	/* 这段代码有个隐藏很深的bug!!!!!!!!!!!!，如果进程1文件open后，mmap映射，然后读写映射的地址产生缺页异常。

@@ -96,12 +96,12 @@ void page_cache_delete_for_file_area(struct address_space *mapping,
 	XA_STATE(xas, &mapping->i_pages, folio->index >>PAGE_COUNT_IN_AREA_SHIFT);
 	long nr = 1;
 	struct file_area *p_file_area; 
-	struct file_stat_base *p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+	//struct file_stat_base *p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
 
 	//令page索引与上0x3得到它在file_area的pages[]数组的下标
 	unsigned int page_offset_in_file_area = folio->index & PAGE_COUNT_IN_AREA_MASK;
 
-	mapping_set_update(&xas, mapping);//xarray shadow 的处理，先不管
+	mapping_set_update(&xas, mapping);//xarray shadow 的处理，先不管。重新评估需要
 
 
 	if(folio_nr_pages(folio) > 1){
@@ -323,9 +323,9 @@ void page_cache_delete_batch_for_file_area(struct address_space *mapping,
 	struct file_area *p_file_area;
 	//令page索引与上0x3得到它在file_area的pages[]数组的下标
 	unsigned int page_offset_in_file_area = fbatch->folios[0]->index & PAGE_COUNT_IN_AREA_MASK;
-	struct file_stat_base *p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+	//struct file_stat_base *p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
 
-	//mapping_set_update(&xas, mapping); 不需要设置shadow operation
+	mapping_set_update(&xas, mapping); //不需要设置shadow operation，重新评估需要
 
 	/*查找start_byte~end_byte地址范围内的有效page并返回，一直查找max索引的page结束。因为，xas_for_each()里调用的
 	 *xas_find()和xas_next_entry()都是以xas->xa_offset为起始索引从xarray tree查找page，找不到则xas->xa_offset加1继续查找，
@@ -719,7 +719,7 @@ void replace_page_cache_folio_for_file_area(struct folio *old, struct folio *new
 
 	p_file_area = entry_to_file_area(p_file_area);
 	//if(old != (struct page *)p_file_area->pages[page_offset_in_file_area]){
-	if(old != (struct page *)rcu_dereference(p_file_area->pages[page_offset_in_file_area])){
+	if(old != (struct folio *)rcu_dereference(p_file_area->pages[page_offset_in_file_area])){
 		panic("%s mapping:0x%llx old:0x%llx != p_file_area->pages:0x%llx\n",__func__,(u64)mapping,(u64)old,(u64)p_file_area->pages[page_offset_in_file_area]);
 	}
 	//p_file_area->pages[page_offset_in_file_area] = fnew;
@@ -742,7 +742,7 @@ void replace_page_cache_folio_for_file_area(struct folio *old, struct folio *new
 	folio_put(old);
 }
 EXPORT_SYMBOL(replace_page_cache_folio_for_file_area);
-static void inline async_and_kswapd_refault_page_count(struct file_stat_base *p_file_stat_base,struct folio *folio_temp,void **shadowp)
+inline static void async_and_kswapd_refault_page_count(struct file_stat_base *p_file_stat_base,struct folio *folio_temp,void **shadowp)
 {
 	/* 统计发生refault的page数，跟workingset_refault_file同一个含义。但是有个问题，只有被异步内存回收线程
 	 * 回收的page的file_area才会被标记in_free，被kswapd内存回收的page的file_area，就不会标记in_free
@@ -862,7 +862,7 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 	VM_BUG_ON_FOLIO(folio_test_swapbacked(folio), folio);
 	VM_BUG_ON_FOLIO(folio_order(folio) < mapping_min_folio_order(mapping),
 			folio);
-	mapping_set_update(&xas, mapping);
+	mapping_set_update(&xas, mapping);//重新评估需要
 
 	VM_BUG_ON_FOLIO(index & (folio_nr_pages(folio) - 1), folio);
 	/*xas_set_order()里会把page索引重新赋值给xas.xa_index，而xas.xa_index正确应该是file_area索引*/
@@ -1906,7 +1906,8 @@ put:
 	return folio_batch_count(fbatch);
 }
 EXPORT_SYMBOL(find_lock_entries_for_file_area);
-unsigned find_get_pages_range_for_file_area(struct address_space *mapping, pgoff_t *start,
+#if 0
+unsigned long find_get_pages_range_for_file_area(struct address_space *mapping, pgoff_t *start,
 		pgoff_t end, unsigned int nr_pages,
 		struct page **pages)
 {
@@ -1982,6 +1983,7 @@ out:
 	return ret;
 }
 EXPORT_SYMBOL(find_get_pages_range_for_file_area);
+#endif
 #define  folio_index_for_file_area(xas,page_offset_in_file_area) ((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area)
 unsigned filemap_get_folios_contig_for_file_area(struct address_space *mapping,
 		pgoff_t *start, pgoff_t end, struct folio_batch *fbatch)
@@ -1991,7 +1993,7 @@ unsigned filemap_get_folios_contig_for_file_area(struct address_space *mapping,
 	XA_STATE(xas, &mapping->i_pages, *start >> PAGE_COUNT_IN_AREA_SHIFT);
 	unsigned long nr;
 	struct folio *folio;
-	unsigned int ret = 0;
+	//unsigned int ret = 0;
 
 	struct file_area *p_file_area;
 	struct file_stat_base *p_file_stat_base;
@@ -2078,7 +2080,7 @@ find_page_from_file_area:
 		if(folio_nr_pages(folio) > 1){
 			panic("%s folio:0x%llx folio_nr_pages:%ld\n",__func__,(u64)folio,folio_nr_pages(folio));
 		}
-next_folio:
+//next_folio:
 		page_offset_in_file_area ++;
 
 		/*如果file_area里还有page没遍历到，goto find_page_from_file_area去查找file_area里的下一个page。否则到for循环开头
@@ -2101,7 +2103,7 @@ retry:
 		xas_reset(&xas);
 	}
 	
-update_start:
+//update_start:
 	nr = folio_batch_count(fbatch);
 
 	if (nr) {
@@ -2118,7 +2120,7 @@ unsigned filemap_get_folios_tag_for_file_area(struct address_space *mapping, pgo
 {
 	XA_STATE(xas, &mapping->i_pages, *start >> PAGE_COUNT_IN_AREA_SHIFT);
 	struct folio *folio;
-	unsigned ret = 0;
+	//unsigned ret = 0;
 	//令page索引与上0x3得到它在file_area的pages[]数组的下标
 	unsigned int page_offset_in_file_area = *start & PAGE_COUNT_IN_AREA_MASK;
 	/*必须赋初值NULL，表示file_area无效，这样find_get_entry_for_file_area()里才会xas_find()查找*/
