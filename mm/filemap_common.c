@@ -39,9 +39,6 @@
 //#define CREATE_TRACE_POINTS
 //#include <trace/events/filemap.h>
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,1,0)
-
-#else
 /*
 /// mm/filemap.c
 1:page_cache_delete_for_file_area
@@ -114,8 +111,8 @@ void page_cache_delete_for_file_area(struct address_space *mapping,
 	 * 里保存的page是NULL，就不会再判断page在file_area->file_area_statue的对应的bit位是否是1了*/
 	//clear_file_area_page_bit(p_file_area,page_offset_in_file_area);
 	//smp_wmb();
-#ifndef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
-#ifndef FILE_AREA_IN_FREE_KSWAPD_AND_SHADOW
+//#ifndef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
+//#ifndef FILE_AREA_IN_FREE_KSWAPD_AND_SHADOW
 	/*1:kswapd进程内存回收 2:进程直接内存回收 shadow非NULL。 3:shadow是NULL，但current->mm非NULL，说明是文件截断
 	 * 剩下的就是异步内存回收线程，该if才成立*/
 	if(shadow)
@@ -132,18 +129,18 @@ void page_cache_delete_for_file_area(struct address_space *mapping,
 			printk("%s %s %d async memory errror!!!!!!!!!\n",__func__,current->comm,current->pid);
 	}
 	rcu_assign_pointer(p_file_area->pages[page_offset_in_file_area], shadow);
-#else
-	/* 如果是异步内存回收线程回收的page，传入的shadow是NULL，此时是否有必要向file_area->pages[]写入一个非0值呢？
+/*#else
+	/ * 如果是异步内存回收线程回收的page，传入的shadow是NULL，此时是否有必要向file_area->pages[]写入一个非0值呢？
 	 * 表示该page被回收了，将来被访问则判定为refault。完全可以我直接执行shadow = workingset_eviction(folio, target_memcg)
-	 * 计算shadow值呀，先不搞了，异步内存回收线程回收page 跟 kswapd内存回收page，完全是两码事*/
-	if(shadow)/*1:kswapd进程内存回收 2:进程直接内存回收*/
-		/*bit1清0表示是kswapd内存回收的该page。将来该page将来再被访问发生refault，在workingset_refault()函数要依照shadow值
-		  决定是否把该page移动到active lru链表。但是我这里将shadow的bit1清0了，破坏了原生shadow值，有问题????????但只是bit1，影响不大吧??????????????????*/
+	 * 计算shadow值呀，先不搞了，异步内存回收线程回收page 跟 kswapd内存回收page，完全是两码事* /
+	if(shadow)//1:kswapd进程内存回收 2:进程直接内存回收
+		/ *bit1清0表示是kswapd内存回收的该page。将来该page将来再被访问发生refault，在workingset_refault()函数要依照shadow值
+		  决定是否把该page移动到active lru链表。但是我这里将shadow的bit1清0了，破坏了原生shadow值，有问题????????但只是bit1，影响不大吧??????????????????* /
 		//shadow = shadow & ~(1 << 1);
 	    test_and_clear_bit(1,(unsigned long *)(&shadow));
 	else{
-		/*1:用户态进程截断文件，赋值NULL。
-		 *2:异步内存回收线程，bit1置1 。不行，bit0也必须置1。否则将会逃过folio_is_file_area_index_or_shadow的判断，被判定是folio指针，而crash*/
+		/ *1:用户态进程截断文件，赋值NULL。
+		 *2:异步内存回收线程，bit1置1 。不行，bit0也必须置1。否则将会逃过folio_is_file_area_index_or_shadow的判断，被判定是folio指针，而crash* /
 		if(!current->mm){
 			shadow = (void *)(0x3);
 			if(strncmp(current->comm,"async_memory",12))
@@ -161,7 +158,7 @@ void page_cache_delete_for_file_area(struct address_space *mapping,
 		rcu_assign_pointer(p_file_area->pages[page_offset_in_file_area], file_area_shadow_bit_set);
 	else
 		rcu_assign_pointer(p_file_area->pages[page_offset_in_file_area], NULL);
-#endif
+#endif*/
 
 	FILE_AREA_PRINT1("%s mapping:0x%llx folio:0x%llx index:%ld p_file_area:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)folio,folio->index,(u64)p_file_area,page_offset_in_file_area);
 
@@ -169,9 +166,9 @@ void page_cache_delete_for_file_area(struct address_space *mapping,
 	mapping->nrpages -= nr;
 
 	/*是调试的文件，打印调试信息*/
-	if(mapping->rh_reserved3){
+	/*if(mapping->rh_reserved3){
 		printk("%s delete mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
-	}
+	}*/
     
 	smp_wmb();
 	//清理这个page在file_area->file_area_statue的对应的bit位，表示这个page被释放了
@@ -189,21 +186,21 @@ void page_cache_delete_for_file_area(struct address_space *mapping,
 	if(file_area_have_page(p_file_area))
 		return;
 
-#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
-	/*file_stat tiny模式，为了节省内存把file_area->start_index成员删掉了。但是在file_area的page全释放后，
+/*#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
+	/ *file_stat tiny模式，为了节省内存把file_area->start_index成员删掉了。但是在file_area的page全释放后，
 	 *会把file_area的索引(file_area->start_index >> PAGE_COUNT_IN_AREA_SHIFT)保存到p_file_area->pages[0/1]里.
-	 *将来cold_file_area_delete将是从p_file_area->pages[0/1]获取file_area的索引*/
+	 *将来cold_file_area_delete将是从p_file_area->pages[0/1]获取file_area的索引* /
 	//p_file_area->pages[0] = (struct folio *)(xas.xa_index >> 32);
 	//p_file_area->pages[1] = (struct folio *)(xas.xa_index & ((1UL << 32) - 1));
 
-	/* p_file_area->pages[0]可能还保存了shadow bit，因此不能直接给p_file_area->pages[0]赋值，要或上老的值
-	 * 并且最新的方案，file_area_index成立，要bit62置1，因此，还要或上file_area_index_bit_set，令bit62置1*/
+	/ * p_file_area->pages[0]可能还保存了shadow bit，因此不能直接给p_file_area->pages[0]赋值，要或上老的值
+	 * 并且最新的方案，file_area_index成立，要bit62置1，因此，还要或上file_area_index_bit_set，令bit62置1* /
 	p_file_area->pages[0] =   (struct folio *)(((xas.xa_index >> 32) | file_area_index_bit_set) | (u64)p_file_area->pages[0]);
 	p_file_area->pages[1] =  (struct folio *)(((xas.xa_index & ((1UL << 32) - 1)) | file_area_index_bit_set) | (u64)p_file_area->pages[1]);
-#endif	
+#endif*/
 
-#ifdef ASYNC_MEMORY_RECLAIM_DEBUG	
-	/*如果待删除的page所属file_area的父节点是cache node，则清理掉cache node。还必须把p_file_stat->xa_node_cache_base_index成
+/*#ifdef ASYNC_MEMORY_RECLAIM_DEBUG	
+	/ *如果待删除的page所属file_area的父节点是cache node，则清理掉cache node。还必须把p_file_stat->xa_node_cache_base_index成
 	 * 64位最大数。确保 find_file_area_from_xarray_cache_node()里的if((index >= p_file_stat->xa_node_cache_base_index) 一定不
 	 * 成立。并且p_file_stat->xa_node_cache = NULL要放到p_file_stat->xa_node_cache_base_index = -1后边，这样 
 	 * find_file_area_from_xarray_cache_node()里if(p_file_stat->xa_node_cache)看到p_file_stat->xa_node_cache是NULL时，
@@ -216,14 +213,14 @@ void page_cache_delete_for_file_area(struct address_space *mapping,
 	 * 添加到rcu异步队列，等rcu宽限期过了才会真正删除node结构。此时正在mapping_get_entry/filemap_get_read_batch访问
 	 * p_file_stat->xa_node_cache的进程，不用担心，因为rcu宽限期还没过。等新的进程再执行这两个函数，再去访问p_file_stat->xa_node_cache，
 	 * 此时要先执行smp_rmb()从无效队列获取最新的p_file_stat->xa_node_cache_base_index和p_file_stat->xa_node_cache，总能感知到一个无效，
-	 * 然后就不会访问p_file_stat->xa_node_cache指向的node节点了*/
+	 * 然后就不会访问p_file_stat->xa_node_cache指向的node节点了* /
 	if(p_file_stat_base->xa_node_cache == xas.xa_node){
 		//p_file_stat->xa_node_cache_base_index = -1;
 		//p_file_stat->xa_node_cache = NULL;
 		p_file_stat_base->xa_node_cache_base_index = -1;
 		p_file_stat_base->xa_node_cache = NULL;
 	}
-#endif	
+#endif*/
 
 	//xas_store(&xas, shadow);不再使用shadow机制
 	/*这里有个隐藏很深的坑?????????在file_area的page都释放后，file_area还要一直停留在xarray tree。因为后续如果file_area的page又被
@@ -249,11 +246,11 @@ void page_cache_delete_for_file_area(struct address_space *mapping,
 				/*这个写屏障保证异步内存回收线程cold_file_area_delete()函数里，立即看到file_area->mapping是NULL*/
 				smp_wmb();
 				//文件iput了，此时file_area一个page都没有，于是把file_area移动到global_file_stat.file_area_delete_list链表
-#if 0
+/*#if 0
 				move_file_area_to_global_delete_list((struct file_stat_base *)mapping->rh_reserved1,p_file_area);
-#else
+#else*/
 				set_file_area_in_mapping_delete(p_file_area);
-#endif
+
 			}else{
 				printk("%s file_area:0x%llx mapping NULL\n",__func__,(u64)p_file_area);
 			}
@@ -281,14 +278,14 @@ void page_cache_delete_for_file_area(struct address_space *mapping,
 	 * 遍历和移动都不加锁，遵循历史设计吧。最终决策，这里标记file_stat的in_free_kswaped标记，异步内存回收线程
 	 * 针对有in_free_kswaped标记的file_area，特殊处理*/
 
-#ifdef FILE_AREA_IN_FREE_KSWAPD_AND_SHADOW
-	/*可能一个file_area被异步内存回收线程回收标记in_free后，然后 kswapd再回收它里边的新读写产生的page，此时就不用再标记file_area in_free_kswaped了*/
-	if(/*shadow && !file_area_in_free_list(p_file_area) &&*/ !file_area_in_free_kswapd(p_file_area) && shadow){
+/*#ifdef FILE_AREA_IN_FREE_KSWAPD_AND_SHADOW
+	//可能一个file_area被异步内存回收线程回收标记in_free后，然后 kswapd再回收它里边的新读写产生的page，此时就不用再标记file_area in_free_kswaped了
+	if(/ *shadow && !file_area_in_free_list(p_file_area) &&* / !file_area_in_free_kswapd(p_file_area) && shadow){
 		set_file_area_in_free_kswapd(p_file_area);
 		hot_cold_file_global_info.kswapd_free_page_count ++;
 	}else if(file_area_in_free_list(p_file_area))
 		hot_cold_file_global_info.async_thread_free_page_count ++;
-#endif	
+#endif*/
 }
 EXPORT_SYMBOL(page_cache_delete_for_file_area);
 void page_cache_delete_batch_for_file_area(struct address_space *mapping,
@@ -378,13 +375,13 @@ find_page_from_file_area:
 		//p_file_area->pages[page_offset_in_file_area] = NULL;
 		rcu_assign_pointer(p_file_area->pages[page_offset_in_file_area], NULL);
 		total_pages += folio_nr_pages(folio);
-#ifdef ASYNC_MEMORY_RECLAIM_DEBUG
-		/*page_cache_delete_for_file_area函数有详细说明*/
+/*#ifdef ASYNC_MEMORY_RECLAIM_DEBUG
+		//page_cache_delete_for_file_area函数有详细说明
 		if(p_file_stat_base->xa_node_cache == xas.xa_node){
 			p_file_stat_base->xa_node_cache_base_index = -1;
 			p_file_stat_base->xa_node_cache = NULL;
 		}
-#endif		
+#endif*/
 		FILE_AREA_PRINT1("%s mapping:0x%llx folio:0x%llx index:%ld p_file_area:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)folio,folio->index,(u64)p_file_area,page_offset_in_file_area);
 
 		smp_wmb();
@@ -430,29 +427,29 @@ find_page_from_file_area:
 						/*这个写屏障保证异步内存回收线程cold_file_area_delete()函数里，立即看到file_area->mapping是NULL*/
 						smp_wmb();
 						/*文件iput了，此时file_area一个page都没有，于是把file_area移动到global_file_stat.file_area_delete_list链表*/
-#if 0	
+/*#if 0	
 						move_file_area_to_global_delete_list((struct file_stat_base *)mapping->rh_reserved1,p_file_area);
-#else
+#else*/
 						set_file_area_in_mapping_delete(p_file_area);
-#endif
+
 					}else{
 						printk("%s file_area:0x%llx mapping NULL\n",__func__,(u64)p_file_area);
 					}
 				}
 			}
 
-#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
-			/*file_stat tiny模式，为了节省内存把file_area->start_index成员删掉了。但是在file_area的page全释放后，
+/*#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
+			/ *file_stat tiny模式，为了节省内存把file_area->start_index成员删掉了。但是在file_area的page全释放后，
 			 *会把file_area的索引(file_area->start_index >> PAGE_COUNT_IN_AREA_SHIFT)保存到p_file_area->pages[0/1]里.
-			 *将来cold_file_area_delete将是从p_file_area->pages[0/1]获取file_area的索引*/
+			 *将来cold_file_area_delete将是从p_file_area->pages[0/1]获取file_area的索引* /
 			//p_file_area->pages[0] = (struct folio *)(xas.xa_index >> 32);
 			//p_file_area->pages[1] = (struct folio *)(xas.xa_index & ((1UL << 32) - 1));
 
-			/* p_file_area->pages[0]可能还保存了shadow bit，因此不能直接给p_file_area->pages[0]赋值，要或上老的值
-			 * 并且最新的方案，file_area_index成立，要bit62置1，因此，还要或上file_area_index_bit_set，令bit62置1*/
+			/ * p_file_area->pages[0]可能还保存了shadow bit，因此不能直接给p_file_area->pages[0]赋值，要或上老的值
+			 * 并且最新的方案，file_area_index成立，要bit62置1，因此，还要或上file_area_index_bit_set，令bit62置1* /
 			p_file_area->pages[0] =   (struct folio *)(((xas.xa_index >> 32) | file_area_index_bit_set) | (u64)p_file_area->pages[0]);
 			p_file_area->pages[1] =  (struct folio *)(((xas.xa_index & ((1UL << 32) - 1)) | file_area_index_bit_set) | (u64)p_file_area->pages[1]);
-#endif	
+#endif*/
 		}
 
 		/*是调试的文件，打印调试信息*/
@@ -490,14 +487,14 @@ bool filemap_range_has_page_for_file_area(struct address_space *mapping,
 	pgoff_t max = (end_byte >> PAGE_SHIFT) >> PAGE_COUNT_IN_AREA_SHIFT;
 	struct file_area* p_file_area;
 	struct file_stat_base* p_file_stat_base;
-#if 0	
-	/*要查找的最后一个page在file_area里的偏移*/
+/*#if 0	
+	//要查找的最后一个page在file_area里的偏移
 	pgoff_t max_page_offset_in_file_area = (end_byte >> PAGE_SHIFT) & PAGE_COUNT_IN_AREA_MASK;
-	/*要查找的第一个page在file_area里的偏移*/
+	//要查找的第一个page在file_area里的偏移
 	pgoff_t start_page_offset_in_file_area = (start_byte >> PAGE_SHIFT) & PAGE_COUNT_IN_AREA_MASK;
 	//要查找的第一个page在file_area->pages[]数组里的偏移，令page索引与上0x3得到它在file_area的pages[]数组的下标
 	unsigned int page_offset_in_file_area = (start_byte >> PAGE_SHIFT) & PAGE_COUNT_IN_AREA_MASK;
-#endif
+#endif*/
 
 	if (end_byte < start_byte)
 		return false;
@@ -848,7 +845,7 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 	 * file_stat并赋值给mapping->rh_reserved1。因为cache文件mmap文件用的global锁不一样，所以无法避免同时分配
 	 * file_stat并赋值给mapping->rh_reserved1，这位就错乱了。依次，这段分配file_stat并赋值给mapping->rh_reserved1
 	 * 的代码要放到xas_lock_irq(&xas)这个锁里，可以避免这种情况*/
-#if 0
+/*#if 0
 	p_file_stat = (struct file_stat *)mapping->rh_reserved1;
 	if(!p_file_stat){
 		//分配file_stat
@@ -861,7 +858,8 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 			goto error; 
 		}
 	}
-#endif
+#endif*/
+
 	if (!huge) {
 		int error = mem_cgroup_charge(folio, NULL, gfp);
 		VM_BUG_ON_FOLIO(index & (folio_nr_pages(folio) - 1), folio);
@@ -1273,8 +1271,8 @@ void *mapping_get_entry_for_file_area(struct address_space *mapping, pgoff_t ind
 	 * */
 	smp_rmb();
 
-#ifdef ASYNC_MEMORY_RECLAIM_DEBUG
-	/*mapping->rh_reserved1必须大于1，跟file_stat_in_delete(p_file_stat)一个效果，只用一个*/
+/*#ifdef ASYNC_MEMORY_RECLAIM_DEBUG
+	//mapping->rh_reserved1必须大于1，跟file_stat_in_delete(p_file_stat)一个效果，只用一个
 	//if(!file_stat_in_delete(p_file_stat) && IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)){
 	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)){
 		//如果此时这个file_area正在被释放，这里还能正常被使用吗？用了rcu机制做防护，后续会写详细分析!!!!!!!!!!!!!!!!!!!!!
@@ -1282,20 +1280,21 @@ void *mapping_get_entry_for_file_area(struct address_space *mapping, pgoff_t ind
 		if(p_file_area){
 			//令page索引与上0x3得到它在file_area的pages[]数组的下标
 			folio = p_file_area->pages[page_offset_in_file_area];
-			/*如果folio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
+			//如果folio是file_area的索引，则对folio清NULL，避免folio干扰后续判断
 			folio_is_file_area_index_or_shadow_and_clear_NULL(folio);
 			if(folio && folio->index == index){
 				xarray_tree_node_cache_hit ++;
 				goto find_folio;
 			}
-			/*走到这里，说明找到了file_area但没有找到匹配索引的page。那就重置xas，重新重xarray tree查找。能否这里直接返回NULL，
+			/ *走到这里，说明找到了file_area但没有找到匹配索引的page。那就重置xas，重新重xarray tree查找。能否这里直接返回NULL，
 			 *即判断为查找page失败呢?不能，因为此时其他进程可能也在并发执行__filemap_add_folio、mapping_get_entry、page_cache_delete
-			 *并发修改p_file_stat->xa_node_cache和p_file_stat->xa_node_cache_base_index，导致二者不匹配，即不代表同一个node节点。只能重置重新查找了*/
+			 *并发修改p_file_stat->xa_node_cache和p_file_stat->xa_node_cache_base_index，导致二者不匹配，即不代表同一个node节点。只能重置重新查找了* /
 			xas.xa_offset = area_index_for_page;
 			xas.xa_node = XAS_RESTART;
 		}
 	}
-#endif	
+#endif*/
+
     /*执行到这里，可能mapping->rh_reserved1指向的file_stat被释放了，该文件的文件页page都被释放了。用不用这里直接return NULL，不再执行下边的
 	 * p_file_area = xas_load(&xas)遍历xarray tree？怕此时遍历xarray tree有问题!没事，因为此时xarray tree是空树，p_file_area = xas_load(&xas)
 	 * 直接返回NULL，和直接return NULL一样的效果*/
@@ -1320,12 +1319,12 @@ repeat:
 		if(xa_is_value(p_file_area))
 			goto out;
 	}
-#if 0
+/*#if 0
 	if (xas_retry(&xas, p_file_area))
 		goto repeat;
 	if (!folio || xa_is_value(folio))
 		goto out;
-#endif
+#endif*/
 
 	p_file_area = entry_to_file_area(p_file_area);
 	//folio = p_file_area->pages[page_offset_in_file_area];
@@ -1337,9 +1336,9 @@ repeat:
 	if (!folio /*|| xa_is_value(folio)*/)//xa_is_value()只是看bit0是否是1，其他bit位不用管
 		goto out;
 
-#ifdef ASYNC_MEMORY_RECLAIM_DEBUG
+/*#ifdef ASYNC_MEMORY_RECLAIM_DEBUG
 find_folio:
-#endif
+#endif*/
 
 	/* 检测查找到的page是否正确，不是则crash。由于最新版本，还会判断查找到的page对应的file_area->file_area_state的
 	 * bit位是否置1了，表示该page保存到了file_area->pages[]数组，没有置1就要crash。但是有个并发问题，如果
@@ -1362,29 +1361,28 @@ find_folio:
 	//hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,1,FILE_AREA_PAGE_IS_WRITE/*,folio->index*/);
 	hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,FILE_AREA_PAGE_IS_WRITE);
 
-#ifdef ASYNC_MEMORY_RECLAIM_DEBUG
-	/*如果本次查找的page所在xarray tree的父节点变化了，则把最新的保存到mapping->rh_reserved2。
-	 *同时必须判断父节点的合法性，分析见filemap_get_read_batch_for_file_area()。其实这里不用判断，走到这里肯定父节点合法.*/
+/*#ifdef ASYNC_MEMORY_RECLAIM_DEBUG
+	/ *如果本次查找的page所在xarray tree的父节点变化了，则把最新的保存到mapping->rh_reserved2。
+	 *同时必须判断父节点的合法性，分析见filemap_get_read_batch_for_file_area()。其实这里不用判断，走到这里肯定父节点合法.* /
 	//if(xa_is_node(xas.xa_node) && p_file_stat->xa_node_cache != xas.xa_node){
 	if(p_file_stat_base->xa_node_cache != xas.xa_node){
-		/*保存父节点node和这个node节点slots里最小的page索引。这两个赋值可能被多进程并发赋值，导致
+		/ *保存父节点node和这个node节点slots里最小的page索引。这两个赋值可能被多进程并发赋值，导致
 		 *mapping->rh_reserved2和mapping->rh_reserved3 可能不是同一个node节点的，错乱了。这就有大问题了！
-		 *没事，这种情况上边的if(page && page->index == offset)就会不成立了*/
+		 *没事，这种情况上边的if(page && page->index == offset)就会不成立了* /
 		//p_file_stat->xa_node_cache = xas.xa_node;
 		//p_file_stat->xa_node_cache_base_index = index & (~FILE_AREA_PAGE_COUNT_MASK);
 		p_file_stat_base->xa_node_cache = xas.xa_node;
 		p_file_stat_base->xa_node_cache_base_index = index & (~FILE_AREA_PAGE_COUNT_MASK);
 	}
-#endif
+#endif*/
 
 out:
 	rcu_read_unlock();
 
-#ifdef ASYNC_MEMORY_RECLAIM_DEBUG
+/*#ifdef ASYNC_MEMORY_RECLAIM_DEBUG
 	FILE_AREA_PRINT("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx index:%ld xa_node_cache:0x%llx cache_base_index:%ld\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,index,(u64)p_file_stat_base->xa_node_cache,p_file_stat_base->xa_node_cache_base_index);
-#else
+#else*/
 	FILE_AREA_PRINT("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx index:%ld\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,index);
-#endif
 
 	return folio;
 }
@@ -1634,11 +1632,11 @@ retry:
 	//if(!file_area_have_page(*p_file_area) && mapping_exiting(mapping)){
 	if((*p_file_area)->mapping && !file_area_have_page(*p_file_area) && mapping_exiting(mapping)){
 		/*为了不干扰原有的xas，重新定义一个xas_del*/
-#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
+/*#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
 		XA_STATE(xas_del, &mapping->i_pages, get_file_area_start_index(*p_file_area));
 
-		/* p_file_area->pages[0/1]的bit63必须是file_area的索引，非0。而p_file_area->pages[2/3]必须是0，否则crash。心在不适用了
-		 * 最新方案，file_area->pages[0/1]不是file_area_inde也不是shadow时，才会触发crash。file_area->pages[2/3]可能是NULL或者shasow，其他情况触发crash*/
+		/ * p_file_area->pages[0/1]的bit63必须是file_area的索引，非0。而p_file_area->pages[2/3]必须是0，否则crash。心在不适用了
+		 * 最新方案，file_area->pages[0/1]不是file_area_inde也不是shadow时，才会触发crash。file_area->pages[2/3]可能是NULL或者shasow，其他情况触发crash* /
 		if(!folio_is_file_area_index_or_shadow((*p_file_area)->pages[0]) || !folio_is_file_area_index_or_shadow((*p_file_area)->pages[1]) 
 				|| ((*p_file_area)->pages[2] && !(file_area_shadow_bit_set & (u64)((*p_file_area)->pages[2]))) || ((*p_file_area)->pages[3] && !(file_area_shadow_bit_set & (u64)((*p_file_area)->pages[3])))){
 			for (int i = 0;i < PAGE_COUNT_IN_AREA;i ++)
@@ -1646,10 +1644,10 @@ retry:
 
 			panic("%s file_area:0x%llx pages[] error\n",__func__,(u64)p_file_area);
 		}
-#else		
+#else*/
 		//XA_STATE(xas_del, &mapping->i_pages, (*p_file_area)->start_index >> PAGE_COUNT_IN_AREA_SHIFT);
 		XA_STATE(xas_del, &mapping->i_pages, (*p_file_area)->start_index);
-#endif	
+		
 		WRITE_ONCE((*p_file_area)->mapping, 0);
 		smp_wmb();
 		/*需要用文件xarray tree的lock加锁，因为xas_store()操作必须要xarray tree加锁*/
@@ -1687,13 +1685,13 @@ retry:
 		 *移动到global_file_stat_delete链表，保证此时file_area已经被从xarray tree剔除掉*/	
 		if(/*old_entry && */file_stat_in_global_base((struct file_stat_base *)mapping->rh_reserved1)){
 			if(old_entry){
-#if 0
+/*#if 0
 				move_file_area_to_global_delete_list((struct file_stat_base *)mapping->rh_reserved1,*p_file_area);
-#else
+#else*/
 				/*注意，set_file_area_in_mapping_delete必须放到这里做，确保该file_area没有因为长时间没访问，被判定是冷file_area，
 				 *而被异步内存回收线程主动执行cold_file_area_delete()释放掉*/
 				set_file_area_in_mapping_delete(*p_file_area);
-#endif		
+		
 			}else{
 				/*如果old_entry是NULL，但file_area->mapping不是NULL则panic。不可能，因为上边已经清NULL了*/
 				/*if(NULL != (*p_file_area)->mapping)
@@ -1714,13 +1712,13 @@ retry:
 		/*goto retry分支里执行xas_find()，会自动令xas->xa_offset++，进而查找下一个索引的file_area*/
 		goto retry;
 	}
-#if 0	
-	/*如果file_area没有page，直接continue遍历下一个file_area，这段代码是否多余?????????????得额外判断file_area的索引是否超出最大值!*/
+/*#if 0	
+	//如果file_area没有page，直接continue遍历下一个file_area，这段代码是否多余?????????????得额外判断file_area的索引是否超出最大值!
 	if(!file_area_have_page(*p_file_area)){
 		*page_offset_in_file_area = 0;
 		goto retry;
 	}
-#endif	
+#endif*/
 
 find_page_from_file_area:
 	if(*page_offset_in_file_area >= PAGE_COUNT_IN_AREA){
@@ -1751,13 +1749,14 @@ find_page_from_file_area:
 	//if(!folio || folio->index > max)
 	if(!folio)
 		goto next_folio;
-#if 0
+/*#if 0
 	//这段代码放到上边合适点，更贴合原版代码逻辑
-	if((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + *page_offset_in_file_area > max /*folio->index > max*/){
+	if((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + *page_offset_in_file_area > max / *folio->index > max* /){
 		FILE_AREA_PRINT("%s p_file_area:0x%llx folio:0x%llx folio->index:%ld max:%ld xas.xa_index:%ld\n",__func__,(u64)*p_file_area,(u64)folio,folio->index,max,xas->xa_index);
 		return NULL;
 	}
-#endif
+#endif*/
+
 	/*检测查找到的page是否正确，不是则crash*/
 	//CHECK_FOLIO_FROM_FILE_AREA_VALID(xas,folio,*p_file_area,*page_offset_in_file_area,folio_index_from_xa_index);
 
@@ -2220,11 +2219,11 @@ void filemap_get_read_batch_for_file_area(struct address_space *mapping,
 			if (xa_is_sibling(p_file_area))
 				break;
         }
-#if 0	
+/*#if 0	
 		if (xas_retry(&xas, folio))
 			continue;
-		/*if(xas.xa_index > max)判断放到下边了，因为这里只能file_area的索引，不能判断page的索引。
-		 *另外两个判断放到一起，其实这两个判断可以放到__filemap_add_folio()里，在保存file_area到xarray tree时就判断，在查询时不再判断*/
+		/ *if(xas.xa_index > max)判断放到下边了，因为这里只能file_area的索引，不能判断page的索引。
+		 *另外两个判断放到一起，其实这两个判断可以放到__filemap_add_folio()里，在保存file_area到xarray tree时就判断，在查询时不再判断* /
 		if (xas.xa_index > max || xa_is_value(folio))
 	    		break;
 		if (xa_is_sibling(folio))
@@ -2232,15 +2231,14 @@ void filemap_get_read_batch_for_file_area(struct address_space *mapping,
         
         if(xa_is_sibling(p_file_area))
 			break;
-#endif
+#endif*/
 		p_file_area = entry_to_file_area(p_file_area);
 
 		
-#ifdef ASYNC_MEMORY_RECLAIM_DEBUG
+/*#ifdef ASYNC_MEMORY_RECLAIM_DEBUG
 		FILE_AREA_PRINT("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld xas->xa_offset:%d xa_node_cache:0x%llx cache_base_index:%ld index:%ld\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index,xas.xa_offset,(u64)p_file_stat_base->xa_node_cache,p_file_stat_base->xa_node_cache_base_index,index);
-#else
+#else*/
 		FILE_AREA_PRINT("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld xas->xa_offset:%d index:%ld\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index,xas.xa_offset,index);
-#endif		
 
 find_page_from_file_area:
 		//folio = p_file_area->pages[page_offset_in_file_area];
@@ -2297,11 +2295,12 @@ find_page_from_file_area:
 			page_offset_in_file_area ++;
 			break;
 		}
-#if 0/*这个早期的调试信息先去掉*/
+/*#if 0//这个早期的调试信息先去掉
         if(folio_nr_pages(folio) > 1){
             panic("%s index:%ld folio_nr_pages:%ld!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,index,folio_nr_pages(folio));
 		}
-#endif		
+#endif*/
+
         /*folio代表单个page时，看着本质是xas->xa_index = folio->index，xas->xa_offset= folio->index & XA_CHUNK_MASK。
 		 *这里的核心操作是，当folio->index大于64时，folio->index & XA_CHUNK_MASK后只取出不足64的部分，即在xarray tree槽位的偏移.
 		 *但是folio = xas_next(&xas)里会判断出xas->xa_offset == 63后，会自动取下一个父节点查找page*/		
@@ -2346,1071 +2345,3 @@ retry:
 	rcu_read_unlock();
 }
 EXPORT_SYMBOL(filemap_get_read_batch_for_file_area);
-/*以下函数因为依赖原始文件的其他函数，不在这里单独列了*/
-#if 0
-loff_t mapping_seek_hole_data_for_file_area(struct address_space *mapping, loff_t start,
-		loff_t end, int whence)
-{
-	//XA_STATE(xas, &mapping->i_pages, start >> PAGE_SHIFT);
-	XA_STATE(xas, &mapping->i_pages, (start >> PAGE_SHIFT) >> PAGE_COUNT_IN_AREA_SHIFT);
-	//令page索引与上0x3得到它在file_area的pages[]数组的下标
-	unsigned int page_offset_in_file_area = (start >> PAGE_SHIFT) & PAGE_COUNT_IN_AREA_MASK;
-	pgoff_t max = (end - 1) >> PAGE_SHIFT;
-	bool seek_data = (whence == SEEK_DATA);
-	struct folio *folio;
-	struct file_area *p_file_area = NULL;
-
-	if (end <= start)
-		return -ENXIO;
-
-	rcu_read_lock();
-	//while ((folio = find_get_entry(&xas, max, XA_PRESENT))) {
-	while ((folio = find_get_entry_for_file_area(&xas, max, XA_PRESENT,&p_file_area,&page_offset_in_file_area,mapping))) {
-		//loff_t pos = (u64)xas.xa_index << PAGE_SHIFT;
-		loff_t pos = (((u64)xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area) << PAGE_SHIFT;
-		size_t seek_size;
-
-		printk("%s %s %d p_file_area:0x%llx file_area_state:0x%x folio:0x%llx xas.xa_index:%ld page_offset_in_file_area:%d folio->index:%ld\n",__func__,current->comm,current->pid,(u64)p_file_area, p_file_area != NULL ? p_file_area->file_area_state:-1,(u64)folio,xas.xa_index,page_offset_in_file_area,folio->index);
-
-		if (start < pos) {
-			if (!seek_data)
-				goto unlock;
-			start = pos;
-		}
-		/*seek_folio_size()会会判断xa_is_value(folio)，这里提前判断，是则crash*/
-		if (xa_is_value(folio))
-			panic("%s %s %d mapping:0x%llx p_file_area:0x%llx folio:0x%llx xa_is_value error\n",__func__,current->comm,current->pid,(u64)mapping,(u64)p_file_area,(u64)folio);
-
-		/*本质就是一个page的大小,4K*/
-		seek_size = seek_folio_size(&xas, folio);
-		pos = round_up((u64)pos + 1, seek_size);
-		/*这个函数看着不用动，保持原样*/
-		start = folio_seek_hole_data(&xas, mapping, folio, start, pos,
-				seek_data);
-		if (start < pos)
-			goto unlock;
-		if (start >= end)
-			break;
-		//if (seek_size > PAGE_SIZE)
-		//	xas_set(&xas, pos >> PAGE_SHIFT);
-		if (seek_size > PAGE_SIZE){
-			/* 要把最新的pos文件地址除以4转换成file_area的索引，然后保存到xas.xa_index。还要把pos不足4的部分更新到
-			 * page_offset_in_file_area，然后执行find_get_entry_for_file_area()才会按照最新的pos索引查找page*/
-			xas_set(&xas, (pos >> PAGE_SHIFT) >> PAGE_COUNT_IN_AREA_SHIFT);
-			page_offset_in_file_area = (pos >> PAGE_SHIFT) & PAGE_COUNT_IN_AREA_MASK;
-		}
-		if (!xa_is_value(folio))
-			folio_put(folio);
-	}
-	if (seek_data)
-		start = -ENXIO;
-unlock:
-	rcu_read_unlock();
-	if (folio && !xa_is_value(folio))
-		folio_put(folio);
-	if (start > end)
-		return end;
-	return start;
-}
-
-//static struct folio *next_uptodate_page_for_file_area(struct folio *folio,
-static struct folio *next_uptodate_page_for_file_area(struct file_area **p_file_area_ori,
-		struct address_space *mapping,
-		struct xa_state *xas, pgoff_t end_pgoff,unsigned int *page_offset_in_file_area,int get_page_from_file_area)
-{
-	unsigned long max_idx;
-	//令page索引与上0x3得到它在file_area的pages[]数组的下标
-	unsigned int page_offset_in_file_area_temp = *page_offset_in_file_area;
-	struct folio *folio;
-	struct file_area *p_file_area = *p_file_area_ori;
-	unsigned long folio_index_from_xa_index = 0;
-
-	FILE_AREA_PRINT("1:%s %s %d xas.xa_index:%ld page_offset_in_file_area_temp:%d get_page_from_file_area:%d end_pgoff:%ld\n",__func__,current->comm,current->pid,xas->xa_index,page_offset_in_file_area_temp,get_page_from_file_area,end_pgoff);
-
-	/*file_area还有剩下page没有遍历完，直接goto find_page_from_file_area获取剩下的page*/
-	if(get_page_from_file_area)
-		goto next_folio;
-		//goto find_page_from_file_area;
-
-	do {
-		//if (!folio)
-		if (!p_file_area)
-			return NULL;
-		/*xas_retry()里会重置xas.xa_node=XAS_RESTART，continue后xas_next_entry()按照当前索再查找一下file_area*/
-		//if (xas_retry(xas, folio))
-		if (xas_retry(xas, p_file_area))
-			continue;
-		//if (xa_is_value(folio))
-		//	continue;
-		if (xa_is_value(p_file_area) || !is_file_area_entry(p_file_area))
-			panic("1:%s %s %d mapping:0x%llx p_file_area:0x%llx file_area_state:0x%x error\n",__func__,current->comm,current->pid,(u64)mapping,(u64)p_file_area,p_file_area->file_area_state);
-
-		p_file_area = entry_to_file_area(p_file_area);
-
-find_page_from_file_area:
-		if(page_offset_in_file_area_temp >= PAGE_COUNT_IN_AREA)
-			panic("2:%s %s %d mapping:0x%llx p_file_area:0x%llx page_offset_in_file_area_temp:%d error\n",__func__,current->comm,current->pid,(u64)mapping,(u64)p_file_area,page_offset_in_file_area_temp);
-
-		folio_index_from_xa_index = (xas->xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area_temp;
-		/*原函数在xas_next_entry()里判断要查找的page索引是否超出end_pgoff，超出的话就退出循环。这里因为
-		 *xas_next_entry()查找的是file_area，故在这里要专门判断超找的page索引是否超出end_pgoff*/
-		//if((xas->xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area_temp > end_pgoff){
-		if(folio_index_from_xa_index > end_pgoff){
-			FILE_AREA_PRINT("2:%s %s %d p_file_area:0x%llx file_area_state:0x%x xas.xa_index:%ld page_offset_in_file_area_temp:%d return NULL\n",__func__,current->comm,current->pid,(u64)p_file_area,p_file_area->file_area_state,xas->xa_index,page_offset_in_file_area_temp);
-
-			return NULL;
-		}
-
-		//folio = p_file_area->pages[page_offset_in_file_area_temp];
-		folio = rcu_dereference(p_file_area->pages[page_offset_in_file_area_temp]);
-		/*如果fiolio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
-		folio_is_file_area_index_or_shadow_and_clear_NULL(folio);
-		FILE_AREA_PRINT("3:%s %s %d p_file_area:0x%llx file_area_state:0x%x folio:0x%llx xas.xa_index:%ld page_offset_in_file_area_temp:%d folio->index:%ld\n",__func__,current->comm,current->pid,(u64)p_file_area,p_file_area->file_area_state,(u64)folio,xas->xa_index,page_offset_in_file_area_temp,folio != NULL ?folio->index:-1);
-
-		if(!folio)
-			goto next_folio;
-
-		/*检测查找到的page是否正确，不是则crash*/
-		//CHECK_FOLIO_FROM_FILE_AREA_VALID(xas,folio,p_file_area,page_offset_in_file_area_temp,folio_index_from_xa_index);
-
-		if (folio_test_locked(folio))
-			goto next_folio;
-		//continue;不能continue，此时是去查找下一个file_area了，要goto next_folio查找file_area里的下一个page
-		if (!folio_try_get_rcu(folio))
-			goto next_folio;
-		//continue;
-		/* Has the page moved or been split? */
-		//if (unlikely(folio != xas_reload(xas)))
-		if (unlikely(folio != rcu_dereference(p_file_area->pages[page_offset_in_file_area_temp]))) 
-			goto skip;
-		if (!folio_test_uptodate(folio) || folio_test_readahead(folio))
-			goto skip;
-		if (!folio_trylock(folio))
-			goto skip;
-		if (folio->mapping != mapping)
-			goto unlock;
-		if (!folio_test_uptodate(folio))
-			goto unlock;
-		max_idx = DIV_ROUND_UP(i_size_read(mapping->host), PAGE_SIZE);
-
-		CHECK_FOLIO_FROM_FILE_AREA_VALID(xas,mapping,folio,p_file_area,page_offset_in_file_area_temp,folio_index_from_xa_index);
-
-		/*隐藏很深的问题:原函数在xas_next_entry()里判断要查找的page索引是否超出max_idx，超出的话就goto unlock。这里因为
-		 *xas_next_entry()查找的是file_area，故在这里要专门判断超找的page索引是否超出max_idx*/
-		//if (xas->xa_index >= max_idx)
-		//if (((xas->xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area_temp) >= max_idx)
-		if (folio_index_from_xa_index >= max_idx)
-			goto unlock;
-
-#if 0
-		/*page_offset_in_file_area保存当前查找到的page在file_area的索引，下次filemap_map_pages再次执行next_map_page()
-		 *时，直接令page_offset_in_file_area加1而从file_area查找到下一个索引的page，不用再查找xarray tree得到page。但是有个
-		 *前提，page_offset_in_file_area_temp必须小于3。因为如果page_offset_in_file_area_temp是3，说明当前file_area里的
-		 page都遍历过了，下次再执行filemap_map_pages->next_map_page()时，必须从xarray tree查找新的下一个索引的file_area了，
-		 *此时就要*page_offset_in_file_area = 0清0，表示从新的file_area的第一个page开始查找。并且还要把p_file_area_ori清NULL，
-		 *令上一次传入的file_area失效，这样filemap_map_pages->next_map_page()才会查找新的file_area*/
-		if(page_offset_in_file_area_temp < (PAGE_COUNT_IN_AREA -1)){
-			/*page_offset_in_file_area_temp加1再赋值，下次执行该函数才会从file_area的下一个page开始查找*/
-			*page_offset_in_file_area = page_offset_in_file_area_temp + 1;
-			if(p_file_area != *p_file_area_ori)
-				*p_file_area_ori = p_file_area;
-		}
-		else{
-			*page_offset_in_file_area = 0;
-			*p_file_area_ori = NULL;
-		}
-#else
-		/*上边的方案有个重大bug，就是令page_offset_in_file_area_temp加1后赋值给*page_offset_in_file_area。这直接导致回到
-		 *filemap_map_pages_for_file_area()函数里执行 
-		 folio_index_for_xa_index = (xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area;
-		 addr += (folio_index_for_xa_index - last_pgoff) << PAGE_SHIFT;
-		 计算page映射的用户态虚拟地址addr就有问题了。因为令page_offset_in_file_area_temp加1后赋值给*page_offset_in_file_area了。
-		 这导致计算出来的page索引folio_index_for_xa_index 比 page真实索引大1，然后page映射的用户态虚拟地址addr也就大了
-		 PAGE_SHIFT即4K。这样就出大问题了，映射page的用户态虚拟地址addr与page 就不一直了，虚拟地址映射的物理地址错乱了！
-		 这导致mmap映射文件后，从0地址读到的4K数据，不是文件地址0~4k的文件数据，而是4k~8K的文件地址数据。因此，这里绝对要
-		 保持page_offset_in_file_area_temp的现在的数据复制给page_offset_in_file_area，保持原值!这样回到
-		 filemap_map_pages_for_file_area()函数里执行folio_index_for_xa_index = (xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area
-		 计算出的page索引folio_index_for_xa_index与page的真实索引是相等的。
-		 **/
-		*page_offset_in_file_area = page_offset_in_file_area_temp;
-		/*即便page_offset_in_file_area是3页不再对*p_file_area_ori=NULL设置NULL了。下次执行next_map_page_for_file_area()函数中处理，
-		 *发现p_file_area有效，但page_offset_in_file_area是3，说明当前file_area的page都用过了，直接查找下一个file_area。*/
-		*p_file_area_ori = p_file_area;
-#endif
-		FILE_AREA_PRINT("4:%s %s %d p_file_area:0x%llx find folio:0x%llx xas page index:%ld folio->index:%ld\n",__func__,current->comm,current->pid,(u64)p_file_area,(u64)folio,(xas->xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area_temp,folio->index);
-
-		return folio;
-
-		/*重点，遇到非法的page，不能直接执行下次循环，而是要去next_folio分支，令page_offset_in_file_area_temp加1，查询file_area的下一个page是否合法*/
-unlock:
-		folio_unlock(folio);
-
-	    FILE_AREA_PRINT("5:%s %s %d unlock\n",__func__,current->comm,current->pid);
-skip:
-		folio_put(folio);
-	    FILE_AREA_PRINT("5:%s %s %d skip\n",__func__,current->comm,current->pid);
-
-next_folio:
-	    FILE_AREA_PRINT("6:%s %s %d next_folio xas page index:%ld\n",__func__,current->comm,current->pid,(xas->xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area_temp);
-
-		page_offset_in_file_area_temp ++;
-		/*如果page_offset_in_file_area_temp小于4则goto find_page_from_file_area查找file_area里的下一个page。否则
-		 *按顺序执行xas_next_entry()去查找下一个索引的file_area*/
-		if(page_offset_in_file_area_temp < PAGE_COUNT_IN_AREA){
-			goto find_page_from_file_area;
-		}
-		else{
-			page_offset_in_file_area_temp = 0;
-		}
-
-	//} while ((folio = xas_next_entry(xas, end_pgoff)) != NULL);
-	} while ((p_file_area = xas_next_entry(xas, end_pgoff >> PAGE_COUNT_IN_AREA_SHIFT)) != NULL);
-
-	return NULL;
-}
-
-static inline struct folio *first_map_page_for_file_area(struct address_space *mapping,
-		struct xa_state *xas,
-		pgoff_t end_pgoff,unsigned int *page_offset_in_file_area,struct file_area **p_file_area)
-{
-	/*找到第一个有效page，一直向后找,直至找到传入的最大索引，依然找不到返回NULL*/
-	//return next_uptodate_page_for_file_area(xas_find(xas, end_pgoff),
-	//			  mapping, xas, end_pgoff);
-
-	/*找到第一个有效file_area，一直向后找，直至找到传入的最大索引，依然找不到返回NULL*/
-	*p_file_area = xas_find(xas, end_pgoff >> PAGE_COUNT_IN_AREA_SHIFT);
-	return next_uptodate_page_for_file_area(p_file_area,
-			mapping, xas, end_pgoff,page_offset_in_file_area,0);
-}
-#if 0
-static inline struct folio *next_map_page_for_file_area(struct address_space *mapping,
-		struct xa_state *xas,
-		pgoff_t end_pgoff,unsigned int *page_offset_in_file_area,struct file_area **p_file_area)
-{
-	//return next_uptodate_page(xas_next_entry(xas, end_pgoff),
-	//			  mapping, xas, end_pgoff);
-
-	/*如果p_file_area不是NULL，说明上一次执行当前函数找到的file_area还有剩下的page没使用，这个page在file_area的
-	 *起始索引是page_offset_in_file_area，本次执行该函数直接使用这个page*/
-	if(*p_file_area)
-		return next_uptodate_page_for_file_area(p_file_area,mapping, xas, end_pgoff,page_offset_in_file_area,1);
-	else{
-		*p_file_area = xas_next_entry(xas, end_pgoff >> PAGE_COUNT_IN_AREA_SHIFT);
-		return next_uptodate_page_for_file_area(p_file_area,mapping, xas, end_pgoff,page_offset_in_file_area,0);
-	}
-}
-#else
-static inline struct folio *next_map_page_for_file_area(struct address_space *mapping,
-		struct xa_state *xas,
-		pgoff_t end_pgoff,unsigned int *page_offset_in_file_area,struct file_area **p_file_area)
-{
-	//return next_uptodate_page(xas_next_entry(xas, end_pgoff),
-	//			  mapping, xas, end_pgoff);
-
-	/*如果p_file_area不是NULL且page_offset_in_file_area小于3，说明上一次执行当前函数或第一次执行first_map_page_for_file_area()函数，
-	 *找到的file_area还有剩下的page没使用，本次要查找的page在是file_page->pages[page_offset_in_file_area+1]。否则走else分支查找下一个file_area*/
-	if(*p_file_area && *page_offset_in_file_area < (PAGE_COUNT_IN_AREA - 1))
-		return next_uptodate_page_for_file_area(p_file_area,mapping, xas, end_pgoff,page_offset_in_file_area,1);
-	else{
-		/*到这个分支，有两种情况，一种是*p_file_area本身是NULL，必须查找新的file_area。另一种是它非NULL，但是*page_offset_in_file_area是3，此时
-		 * 也要查找下一个file_area，因此它的page都遍历过了。但是需要对 *page_offset_in_file_area强制清0，表示从下一个file_area的第1个page开始遍历*/
-		if(*p_file_area && *page_offset_in_file_area == (PAGE_COUNT_IN_AREA - 1))
-			*page_offset_in_file_area = 0;
-
-		*p_file_area = xas_next_entry(xas, end_pgoff >> PAGE_COUNT_IN_AREA_SHIFT);
-		return next_uptodate_page_for_file_area(p_file_area,mapping, xas, end_pgoff,page_offset_in_file_area,0);
-	}
-}
-#endif
-vm_fault_t filemap_map_pages_for_file_area(struct vm_fault *vmf,
-		pgoff_t start_pgoff, pgoff_t end_pgoff)
-{
-	struct vm_area_struct *vma = vmf->vma;
-	struct file *file = vma->vm_file;
-	struct address_space *mapping = file->f_mapping;
-	pgoff_t last_pgoff = start_pgoff;//上一次判断的page索引
-	unsigned long addr;
-	//XA_STATE(xas, &mapping->i_pages, start_pgoff);
-	XA_STATE(xas, &mapping->i_pages, start_pgoff >> PAGE_COUNT_IN_AREA_SHIFT);
-	struct folio *folio;
-	struct page *page;
-	unsigned int mmap_miss = READ_ONCE(file->f_ra.mmap_miss);
-	vm_fault_t ret = 0;
-
-	/*初值必须赋于NULL，表示file_area无效，否则会令first_map_page_for_file_area()错误使用这个file_area*/
-	struct file_area *p_file_area = NULL;
-	struct file_stat_base *p_file_stat_base;
-	//令page索引与上0x3得到它在file_area的pages[]数组的下标，记录第一个page在第一个file_area里的偏移
-	unsigned int page_offset_in_file_area = start_pgoff & PAGE_COUNT_IN_AREA_MASK;
-	unsigned long folio_index_for_xa_index;
-
-	rcu_read_lock();
-	//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
-	p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
-	/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
-	 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
-	 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
-	 * smp_rmb()是要立即感知到mapping->rh_reserved1的最新值——即1。还有，p_file_stat = (struct file_stat *)mapping->rh_reserved1
-	 * 赋值必须放到smp_rmb()内存屏障前边，因为可能这里赋值时mapping->rh_reserved1还是正常，smp_rmb()执行后，
-	 * IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)执行时mapping->rh_reserved1已经被cold_file_stat_delete()赋值1了。
-	 * 如果不用smp_rmb()内存屏障隔开，可能会出现if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping))先执行，此时
-	 * mapping->rh_reserved1还是正常的，但是再等执行p_file_stat = (struct file_stat *)mapping->rh_reserved1就是1了，
-	 * 此时就错过判断mapping->rh_reserved1非法了，然后执行mapping->rh_reserved1这个file_stat而crash!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-	 * */
-	smp_rmb();
-	if(unlikely(!IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)))
-        printk("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,mapping->rh_reserved1);
-
-	//folio = first_map_page(mapping, &xas, end_pgoff);
-	folio = first_map_page_for_file_area(mapping, &xas, end_pgoff,&page_offset_in_file_area,&p_file_area);
-	if (!folio)
-		goto out;
-
-	if (filemap_map_pmd(vmf, &folio->page)) {
-		ret = VM_FAULT_NOPAGE;
-		goto out;
-	}
-    /*addr是映射start_pgoff这个索引page对应的用户态虚拟地址*/
-	addr = vma->vm_start + ((start_pgoff - vma->vm_pgoff) << PAGE_SHIFT);
-	vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, addr, &vmf->ptl);
-	do {
-again:
-		/*之前xas.xa_index代表page索引，现在代表file_area索引，乘以4再加上page_offset_in_file_area才是page索引*/
-		folio_index_for_xa_index = (xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area;
-
-		//page = folio_file_page(folio, xas.xa_index);
-		page = folio_file_page(folio, folio_index_for_xa_index);
-		if (PageHWPoison(page))
-			goto unlock;
-
-		if (mmap_miss > 0)
-			mmap_miss--;
-
-
-		//addr += (xas.xa_index - last_pgoff) << PAGE_SHIFT;
-		addr += (folio_index_for_xa_index - last_pgoff) << PAGE_SHIFT;
-		//vmf->pte += xas.xa_index - last_pgoff;
-		vmf->pte += folio_index_for_xa_index - last_pgoff;
-		//last_pgoff = xas.xa_index;
-		last_pgoff = folio_index_for_xa_index;
-
-		if (!pte_none(*vmf->pte))
-			goto unlock;
-
-		/* We're about to handle the fault */
-		if (vmf->address == addr)
-			ret = VM_FAULT_NOPAGE;
-
-		do_set_pte(vmf, page, addr);
-		/* no need to invalidate: a not-present page won't be cached */
-		update_mmu_cache(vma, addr, vmf->pte);
-		//if (folio_more_pages(folio, xas.xa_index, end_pgoff)) {
-		if (folio_more_pages(folio, folio_index_for_xa_index, end_pgoff)) {
-			panic("1:%s %s %d mapping:0x%llx folio:0x%llx folio_nr_pages:%ld > 1\n",__func__,current->comm,current->pid,(u64)mapping,(u64)folio,folio_nr_pages(folio));
-			xas.xa_index++;
-			folio_ref_inc(folio);
-			goto again;
-		}
-		folio_unlock(folio);
-		continue;
-unlock:
-		//if (folio_more_pages(folio, xas.xa_index, end_pgoff)) {
-		if (folio_more_pages(folio, folio_index_for_xa_index, end_pgoff)) {
-			panic("2:%s %s %d mapping:0x%llx folio:0x%llx folio_nr_pages:%ld > 1\n",__func__,current->comm,current->pid,(u64)mapping,(u64)folio,folio_nr_pages(folio));
-			xas.xa_index++;
-			goto again;
-		}
-		folio_unlock(folio);
-		folio_put(folio);
-	//} while ((folio = next_map_page(mapping, &xas, end_pgoff)) != NULL);
-	} while ((folio = next_map_page_for_file_area(mapping, &xas, end_pgoff,&page_offset_in_file_area,&p_file_area)) != NULL);
-	pte_unmap_unlock(vmf->pte, vmf->ptl);
-out:
-	rcu_read_unlock();
-	WRITE_ONCE(file->f_ra.mmap_miss, mmap_miss);
-	return ret;
-}
-
-/*
-/// fs/fs-writeback.c
-1:inode_do_switch_wbs_for_file_area
-*/
-bool inode_do_switch_wbs_for_file_area(struct inode *inode,
-		struct bdi_writeback *old_wb,
-		struct bdi_writeback *new_wb)
-{
-	struct address_space *mapping = inode->i_mapping;
-	XA_STATE(xas, &mapping->i_pages, 0);
-	struct folio *folio;
-	bool switched = false;
-
-	struct file_area *p_file_area;
-	struct file_stat_base *p_file_stat_base;
-	//unsigned int page_offset_in_file_area = 0;
-	int i;
-	int mark_page_count = 0;
-
-	spin_lock(&inode->i_lock);
-	/*该函数没有rcu_read_lock，但是有xa_lock_irq，也能防止并发delete file_stat和file_area*/
-	xa_lock_irq(&mapping->i_pages);
-
-	//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
-	p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
-	/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
-	 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
-	 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
-	 * smp_rmb()是要立即感知到mapping->rh_reserved1的最新值——即1。还有，p_file_stat = (struct file_stat *)mapping->rh_reserved1
-	 * 赋值必须放到smp_rmb()内存屏障前边，因为可能这里赋值时mapping->rh_reserved1还是正常，smp_rmb()执行后，
-	 * IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)执行时mapping->rh_reserved1已经被cold_file_stat_delete()赋值1了。
-	 * 如果不用smp_rmb()内存屏障隔开，可能会出现if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping))先执行，此时
-	 * mapping->rh_reserved1还是正常的，但是再等执行p_file_stat = (struct file_stat *)mapping->rh_reserved1就是1了，
-	 * 此时就错过判断mapping->rh_reserved1非法了，然后执行mapping->rh_reserved1这个file_stat而crash!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-	 * */
-	smp_rmb();
-	if(unlikely(!IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)))
-        printk("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,mapping->rh_reserved1);
-
-	/*
-	 * Once I_FREEING or I_WILL_FREE are visible under i_lock, the eviction
-	 * path owns the inode and we shouldn't modify ->i_io_list.
-	 */
-	if (unlikely(inode->i_state & (I_FREEING | I_WILL_FREE)))
-		goto skip_switch;
-
-	trace_inode_switch_wbs(inode, old_wb, new_wb);
-
-	FILE_AREA_PRINT("%s %s %d mapping:0x%llx inode:0x%llx\n",__func__,current->comm,current->pid,(u64)mapping,(u64)inode);
-	/*
-	 * Count and transfer stats.  Note that PAGECACHE_TAG_DIRTY points
-	 * to possibly dirty folios while PAGECACHE_TAG_WRITEBACK points to
-	 * folios actually under writeback.
-	 */
-	//xas_for_each_marked(&xas, folio, ULONG_MAX, PAGECACHE_TAG_DIRTY) {
-	xas_for_each_marked(&xas, p_file_area, ULONG_MAX, PAGECACHE_TAG_DIRTY) {
-		long nr;
-		if(!is_file_area_entry(p_file_area))
-			panic("%s mapping:0x%llx p_file_area:0x%llx  error\n",__func__,(u64)mapping,(u64)p_file_area);
-
-		p_file_area = entry_to_file_area(p_file_area);
-		/*原有for循环是遍历保存page指针的xarray tree，统计有多少个dirty mark的page。现在是先统计有多少个有
-		 *dirty mark的file_area，再统计file_area有多少个有dirty mark的page，效果一样。mark_page_count是有dirty mark的page有效性判断*/
-		mark_page_count = 0;
-		for(i = 0;i < PAGE_COUNT_IN_AREA;i ++){
-			//folio = p_file_area->pages[i];
-			folio = rcu_dereference(p_file_area->pages[i]);
-			/*如果folio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
-			folio_is_file_area_index_or_shadow_and_clear_NULL(folio);
-			if (folio && folio_test_dirty(folio)) {
-				nr = folio_nr_pages(folio);
-				wb_stat_mod(old_wb, WB_RECLAIMABLE, -nr);
-				wb_stat_mod(new_wb, WB_RECLAIMABLE, nr);
-
-				mark_page_count ++;
-			}
-		}
-		if(mark_page_count != file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_DIRTY)){
-			panic("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld dirty page count %d %d error\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index,mark_page_count,file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_DIRTY));
-		}
-		/*这里有个for循环退出的问题需要深思。原本for循环是一直查找page，直至查找的page索引是ULONG_MAX才退出。这里该怎么处理？
-		 *假如一共5个page，对应2个file_area。这个for循环里的代码会执行两次，判断这两个file_area所有page，这样正好不会有遗漏。额外代码不用添加*/
-	}
-
-	xas_set(&xas, 0);
-	//xas_for_each_marked(&xas, folio, ULONG_MAX, PAGECACHE_TAG_WRITEBACK) {
-	xas_for_each_marked(&xas, p_file_area, ULONG_MAX, PAGECACHE_TAG_WRITEBACK) {
-		long nr;
-		if(!is_file_area_entry(p_file_area))
-			panic("%s mapping:0x%llx p_file_area:0x%llx  error\n",__func__,(u64)mapping,(u64)p_file_area);
-
-		p_file_area = entry_to_file_area(p_file_area);
-
-		if(0 == file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_WRITEBACK)){
-			panic("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld dirty page count error\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index);
-		}
-		mark_page_count = 0;
-		for(i = 0;i < PAGE_COUNT_IN_AREA;i ++){
-			//folio = p_file_area->pages[i];
-			folio = rcu_dereference(p_file_area->pages[i]);
-			/*如果folio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
-			folio_is_file_area_index_or_shadow_and_clear_NULL(folio);
-			if(folio && folio_test_writeback(folio)){
-				nr = folio_nr_pages(folio);
-				/*这个异常判断用两个panic替代*/
-				//WARN_ON_ONCE(!folio_test_writeback(folio));
-				wb_stat_mod(old_wb, WB_WRITEBACK, -nr);
-				wb_stat_mod(new_wb, WB_WRITEBACK, nr);
-
-				mark_page_count ++;
-			}
-		}
-		if(!mark_page_count || (mark_page_count != file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_WRITEBACK))){
-			panic("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld writeback page count %d_%d error\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index,mark_page_count,file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_WRITEBACK));
-		}
-	}
-
-	if (mapping_tagged(mapping, PAGECACHE_TAG_WRITEBACK)) {
-		atomic_dec(&old_wb->writeback_inodes);
-		atomic_inc(&new_wb->writeback_inodes);
-	}
-
-	wb_get(new_wb);
-
-	/*
-	 * Transfer to @new_wb's IO list if necessary.  If the @inode is dirty,
-	 * the specific list @inode was on is ignored and the @inode is put on
-	 * ->b_dirty which is always correct including from ->b_dirty_time.
-	 * The transfer preserves @inode->dirtied_when ordering.  If the @inode
-	 * was clean, it means it was on the b_attached list, so move it onto
-	 * the b_attached list of @new_wb.
-	 */
-	if (!list_empty(&inode->i_io_list)) {
-		inode->i_wb = new_wb;
-
-		if (inode->i_state & I_DIRTY_ALL) {
-			struct inode *pos;
-
-			list_for_each_entry(pos, &new_wb->b_dirty, i_io_list)
-				if (time_after_eq(inode->dirtied_when,
-							pos->dirtied_when))
-					break;
-			inode_io_list_move_locked(inode, new_wb,
-					pos->i_io_list.prev);
-		} else {
-			inode_cgwb_move_to_attached(inode, new_wb);
-		}
-	} else {
-		inode->i_wb = new_wb;
-	}
-
-	/* ->i_wb_frn updates may race wbc_detach_inode() but doesn't matter */
-	inode->i_wb_frn_winner = 0;
-	inode->i_wb_frn_avg_time = 0;
-	inode->i_wb_frn_history = 0;
-	switched = true;
-skip_switch:
-	/*
-	 * Paired with load_acquire in unlocked_inode_to_wb_begin() and
-	 * ensures that the new wb is visible if they see !I_WB_SWITCH.
-	 */
-	smp_store_release(&inode->i_state, inode->i_state & ~I_WB_SWITCH);
-
-	xa_unlock_irq(&mapping->i_pages);
-	spin_unlock(&inode->i_lock);
-
-	return switched;
-}
-
-/* 
-/// mm/migrate.c
-1:folio_migrate_mapping_for_file_area
-*/
-int folio_migrate_mapping_for_file_area(struct address_space *mapping,
-		struct folio *newfolio, struct folio *folio, int extra_count)
-{
-	//XA_STATE(xas, &mapping->i_pages, folio_index(folio));
-	XA_STATE(xas, &mapping->i_pages, folio_index(folio) >> PAGE_COUNT_IN_AREA_SHIFT);
-	struct zone *oldzone, *newzone;
-	int dirty;
-	int expected_count = expected_page_refs(mapping, &folio->page) + extra_count;
-	long nr = folio_nr_pages(folio);
-
-	struct file_area *p_file_area;
-	//令page索引与上0x3得到它在file_area的pages[]数组的下标
-	unsigned int page_offset_in_file_area = folio_index(folio) & PAGE_COUNT_IN_AREA_MASK;
-
-	if (!mapping) {
-		/* Anonymous page without mapping */
-		if (folio_ref_count(folio) != expected_count)
-			return -EAGAIN;
-
-		/* No turning back from here */
-		newfolio->index = folio->index;
-		newfolio->mapping = folio->mapping;
-		if (folio_test_swapbacked(folio))
-			__folio_set_swapbacked(newfolio);
-
-		return MIGRATEPAGE_SUCCESS;
-	}
-
-	oldzone = folio_zone(folio);
-	newzone = folio_zone(newfolio);
-
-	xas_lock_irq(&xas);
-	if (!folio_ref_freeze(folio, expected_count)) {
-		xas_unlock_irq(&xas);
-		return -EAGAIN;
-	}
-
-	/*
-	 * Now we know that no one else is looking at the folio:
-	 * no turning back from here.
-	 */
-	newfolio->index = folio->index;
-	newfolio->mapping = folio->mapping;
-	folio_ref_add(newfolio, nr); /* add cache reference */
-	if (folio_test_swapbacked(folio)) {
-		__folio_set_swapbacked(newfolio);
-		if (folio_test_swapcache(folio)) {
-			folio_set_swapcache(newfolio);
-			newfolio->private = folio_get_private(folio);
-		}
-	} else {
-		VM_BUG_ON_FOLIO(folio_test_swapcache(folio), folio);
-	}
-
-	/* Move dirty while page refs frozen and newpage not yet exposed */
-	dirty = folio_test_dirty(folio);
-	if (dirty) {
-		folio_clear_dirty(folio);
-		folio_set_dirty(newfolio);
-	}
-
-	//xas_store(&xas, newfolio);
-	/*如果此时file_stat或者file_area cold_file_stat_delete()、cold_file_area_delete被释放了，那肯定是不合理的
-	 *这里会触发panic*/
-	if(unlikely(!IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)))
-        panic("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,mapping->rh_reserved1);
-
-	p_file_area = (struct file_area *)xas_load(&xas);
-	if(!p_file_area || !is_file_area_entry(p_file_area))
-		panic("%s mapping:0x%llx p_file_area:0x%llx error\n",__func__,(u64)mapping,(u64)p_file_area);
-
-	p_file_area = entry_to_file_area(p_file_area);
-	//if(folio != (struct folio *)p_file_area->pages[page_offset_in_file_area]){
-	if(folio != (struct folio *)rcu_dereference(p_file_area->pages[page_offset_in_file_area])){
-		panic("%s mapping:0x%llx folio:0x%llx != p_file_area->pages:0x%llx\n",__func__,(u64)mapping,(u64)folio,(u64)p_file_area->pages[page_offset_in_file_area]);
-	}
-	//p_file_area->pages[page_offset_in_file_area] = newfolio;
-	rcu_assign_pointer(p_file_area->pages[page_offset_in_file_area],newfolio);
-	FILE_AREA_PRINT1("%s mapping:0x%llx p_file_area:0x%llx folio:0x%llx newfolio:0x%llx page_offset_in_file_area:%d\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio,(u64)newfolio,page_offset_in_file_area);
-
-
-	/*
-	 * Drop cache reference from old page by unfreezing
-	 * to one less reference.
-	 * We know this isn't the last reference.
-	 */
-	folio_ref_unfreeze(folio, expected_count - nr);
-
-	xas_unlock(&xas);
-	/* Leave irq disabled to prevent preemption while updating stats */
-
-	/*
-	 * If moved to a different zone then also account
-	 * the page for that zone. Other VM counters will be
-	 * taken care of when we establish references to the
-	 * new page and drop references to the old page.
-	 *
-	 * Note that anonymous pages are accounted for
-	 * via NR_FILE_PAGES and NR_ANON_MAPPED if they
-	 * are mapped to swap space.
-	 */
-	if (newzone != oldzone) {
-		struct lruvec *old_lruvec, *new_lruvec;
-		struct mem_cgroup *memcg;
-
-		memcg = folio_memcg(folio);
-		old_lruvec = mem_cgroup_lruvec(memcg, oldzone->zone_pgdat);
-		new_lruvec = mem_cgroup_lruvec(memcg, newzone->zone_pgdat);
-
-		__mod_lruvec_state(old_lruvec, NR_FILE_PAGES, -nr);
-		__mod_lruvec_state(new_lruvec, NR_FILE_PAGES, nr);
-		if (folio_test_swapbacked(folio) && !folio_test_swapcache(folio)) {
-			__mod_lruvec_state(old_lruvec, NR_SHMEM, -nr);
-			__mod_lruvec_state(new_lruvec, NR_SHMEM, nr);
-		}
-#ifdef CONFIG_SWAP
-		if (folio_test_swapcache(folio)) {
-			__mod_lruvec_state(old_lruvec, NR_SWAPCACHE, -nr);
-			__mod_lruvec_state(new_lruvec, NR_SWAPCACHE, nr);
-		}
-#endif
-		if (dirty && mapping_can_writeback(mapping)) {
-			__mod_lruvec_state(old_lruvec, NR_FILE_DIRTY, -nr);
-			__mod_zone_page_state(oldzone, NR_ZONE_WRITE_PENDING, -nr);
-			__mod_lruvec_state(new_lruvec, NR_FILE_DIRTY, nr);
-			__mod_zone_page_state(newzone, NR_ZONE_WRITE_PENDING, nr);
-		}
-	}
-	local_irq_enable();
-
-	return MIGRATEPAGE_SUCCESS;
-}
-
-/*
-/// mm/page-writeback.c
-1:tag_pages_for_writeback_for_file_area
-2:__folio_mark_dirty_for_file_area
-3:__folio_end_writeback_for_file_area
-4:__folio_start_writeback_for_file_area
-*/
-void tag_pages_for_writeback_for_file_area(struct address_space *mapping,
-		pgoff_t start, pgoff_t end)
-{
-	//XA_STATE(xas, &mapping->i_pages, start);
-	XA_STATE(xas, &mapping->i_pages, start >> PAGE_COUNT_IN_AREA_SHIFT);
-	unsigned int tagged = 0;
-	void *page;
-
-	struct file_area *p_file_area;
-	struct file_stat_base *p_file_stat_base;
-	//令page索引与上0x3得到它在file_area的pages[]数组的下标
-	unsigned int page_offset_in_file_area = start & PAGE_COUNT_IN_AREA_MASK;
-	pgoff_t file_area_end_index = end >> PAGE_COUNT_IN_AREA_SHIFT;
-
-	FILE_AREA_PRINT("%s %s %d mapping:0x%llx start:%ld end:%ld\n",__func__,current->comm,current->pid,(u64)mapping,start,end);
-	/*该函数没有rcu_read_lock，但是有xa_lock_irqsave加锁，也能防止file_stat被方法delete*/
-	xas_lock_irq(&xas);
-
-	//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
-	p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
-	/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
-	 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
-	 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
-	 * smp_rmb()是要立即感知到mapping->rh_reserved1的最新值——即1。还有，p_file_stat = (struct file_stat *)mapping->rh_reserved1
-	 * 赋值必须放到smp_rmb()内存屏障前边，因为可能这里赋值时mapping->rh_reserved1还是正常，smp_rmb()执行后，
-	 * IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)执行时mapping->rh_reserved1已经被cold_file_stat_delete()赋值1了。
-	 * 如果不用smp_rmb()内存屏障隔开，可能会出现if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping))先执行，此时
-	 * mapping->rh_reserved1还是正常的，但是再等执行p_file_stat = (struct file_stat *)mapping->rh_reserved1就是1了，
-	 * 此时就错过判断mapping->rh_reserved1非法了，然后执行mapping->rh_reserved1这个file_stat而crash!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-	 * */
-	smp_rmb();
-	if(unlikely(!IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)))
-		printk("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,mapping->rh_reserved1);
-
-	//xas_for_each_marked(&xas, page, end, PAGECACHE_TAG_DIRTY) {
-	xas_for_each_marked(&xas, p_file_area, file_area_end_index, PAGECACHE_TAG_DIRTY) {
-		if(!is_file_area_entry(p_file_area))
-			panic("%s mapping:0x%llx p_file_area:0x%llx  error\n",__func__,(u64)mapping,(u64)p_file_area);
-
-		p_file_area = entry_to_file_area(p_file_area);
-		/*file_area可能会重复设置towrite mark，这个函数里做的有防护，为了不大改，维持老代码*/
-		xas_set_mark(&xas, PAGECACHE_TAG_TOWRITE);
-
-find_page_from_file_area:
-		/*有个重大bug需要注意。这里是模拟原for循环里page索引大于end后就退出，现在for循环是搜索file_area，判断page索引是否
-		 * 超出end必须在这里单独判断。但是，xas->xa_index索引是file_area的，不是page的，要乘以4才是page的索引*/
-		//if(xas->xa_index + page_offset_in_file_area > ){
-		if((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area > end){
-			break;
-		}
-
-		/*是调试的文件，打印调试信息*/
-		if(mapping->rh_reserved3){
-			printk("%s mark_towrite mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)page);
-		}
-
-		/*file_area里的4个page都是dirty页吗，那可不一定，必须检测是否有脏页mark的page，才能在file_area里设置towrite mark*/
-		if(is_file_area_page_mark_bit_set(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY)){
-			//page = p_file_area->pages[page_offset_in_file_area];
-			page = rcu_dereference(p_file_area->pages[page_offset_in_file_area]);
-			/*如果folio是file_area的索引，则对folio清NULL，避免folio干扰后续判断*/
-			folio_is_file_area_index_or_shadow_and_clear_NULL(page);
-			/*实际测试表明，存在并发情况，file_area有dirty mark但是page没有dirty标记，因为page dirty标记被另外的进程先清理了，后续它会再清理ditry mark标记*/
-			if(!page/* || !PageDirty(page)*/){
-				panic("%s mapping:0x%llx p_file_area:0x%llx page:0x%llx not dirty\n",__func__,(u64)mapping,(u64)p_file_area,(u64)page);
-			}
-			/*检测查找到的page是否正确，不是则crash*/
-			CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,mapping,(struct page *)page,p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
-
-			set_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_TOWRITE);
-		}
-
-		page_offset_in_file_area ++;
-		if(page_offset_in_file_area < PAGE_COUNT_IN_AREA)
-			goto find_page_from_file_area;
-		else
-			page_offset_in_file_area = 0;
-
-		if (++tagged % XA_CHECK_SCHED)
-			continue;
-
-		/*重置xas->xa_node=XAS_RESTART，更新xas->xa_index，确定下次查找的page的索引!!!!!!!!!!!!!!*/
-		xas_pause(&xas);
-		xas_unlock_irq(&xas);
-		cond_resched();
-		xas_lock_irq(&xas);
-	}
-	xas_unlock_irq(&xas);
-}
-
-void __folio_mark_dirty_for_file_area(struct folio *folio, struct address_space *mapping,
-		int warn)
-{
-	unsigned long flags;
-    struct file_stat_base *p_file_stat_base;
-	FILE_AREA_PRINT("%s %s %d mapping:0x%llx folio:0x%llx\n",__func__,current->comm,current->pid,(u64)mapping,(u64)folio);
-
-	/*该函数没有rcu_read_lock，但是有xa_lock_irqsave加锁，也能防止file_stat被方法delete*/
-	xa_lock_irqsave(&mapping->i_pages, flags);
-	//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
-	p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
-	/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
-	 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
-	 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
-	 * smp_rmb()是要立即感知到mapping->rh_reserved1的最新值——即1。还有，p_file_stat = (struct file_stat *)mapping->rh_reserved1
-	 * 赋值必须放到smp_rmb()内存屏障前边，因为可能这里赋值时mapping->rh_reserved1还是正常，smp_rmb()执行后，
-	 * IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)执行时mapping->rh_reserved1已经被cold_file_stat_delete()赋值1了。
-	 * 如果不用smp_rmb()内存屏障隔开，可能会出现if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping))先执行，此时
-	 * mapping->rh_reserved1还是正常的，但是再等执行p_file_stat = (struct file_stat *)mapping->rh_reserved1就是1了，
-	 * 此时就错过判断mapping->rh_reserved1非法了，然后执行mapping->rh_reserved1这个file_stat而crash!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-	 * */
-	smp_rmb();
-	if(unlikely(!IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)))
-        printk("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,mapping->rh_reserved1);
-
-	if (folio->mapping) {	/* Race with truncate? */
-		XA_STATE(xas, &mapping->i_pages, folio_index(folio) >> PAGE_COUNT_IN_AREA_SHIFT);
-		struct file_area *p_file_area;
-		//令page索引与上0x3得到它在file_area的pages[]数组的下标
-		unsigned int page_offset_in_file_area = folio_index(folio) & PAGE_COUNT_IN_AREA_MASK;
-
-		WARN_ON_ONCE(warn && !folio_test_uptodate(folio));
-		folio_account_dirtied(folio, mapping);
-		//__xa_set_mark(&mapping->i_pages, folio_index(folio),
-		//		PAGECACHE_TAG_DIRTY);
-		p_file_area = xas_load(&xas);
-		if(!is_file_area_entry(p_file_area)){
-			panic("%s mapping:0x%llx p_file_area:0x%llx  error\n",__func__,(u64)mapping,(u64)p_file_area);
-		}
-		p_file_area = entry_to_file_area(p_file_area);
-
-		/*检测查找到的page是否正确，不是则crash*/
-		CHECK_FOLIO_FROM_FILE_AREA_VALID_MARK(&xas,mapping,folio,p_file_area->pages[page_offset_in_file_area],p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
-
-		/*先标记file_area是dirtry，然后在file_area的page的dirty*/
-		xas_set_mark(&xas, PAGECACHE_TAG_DIRTY);
-		/*存在page被多次标记writeback的情况，这里不做page多次标记writeback就panic的判断*/
-		set_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY);
-
-		/*是调试的文件，打印调试信息*/
-		if(mapping->rh_reserved3){
-			printk("%s mark_dirty mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
-		}
-	}
-	xa_unlock_irqrestore(&mapping->i_pages, flags);
-}
-
-bool __folio_end_writeback_for_file_area(struct folio *folio)
-{
-	long nr = folio_nr_pages(folio);
-	struct address_space *mapping = folio_mapping(folio);
-	bool ret;
-
-	folio_memcg_lock(folio);
-	if (mapping && mapping_use_writeback_tags(mapping)) {
-		struct inode *inode = mapping->host;
-		struct backing_dev_info *bdi = inode_to_bdi(inode);
-		unsigned long flags;
-        struct file_stat_base *p_file_stat_base;
-		FILE_AREA_PRINT("%s %s %d mapping:0x%llx folio:0x%llx index:%ld\n",__func__,current->comm,current->pid,(u64)mapping,(u64)folio,folio->index);
-		/*该函数没有rcu_read_lock，但是有xa_lock_irqsave加锁，也能防止file_stat被方法delete*/
-		xa_lock_irqsave(&mapping->i_pages, flags);
-		
-		//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
-		p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
-		/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
-		 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
-		 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
-		 * smp_rmb()是要立即感知到mapping->rh_reserved1的最新值——即1。还有，p_file_stat = (struct file_stat *)mapping->rh_reserved1
-		 * 赋值必须放到smp_rmb()内存屏障前边，因为可能这里赋值时mapping->rh_reserved1还是正常，smp_rmb()执行后，
-		 * IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)执行时mapping->rh_reserved1已经被cold_file_stat_delete()赋值1了。
-		 * 如果不用smp_rmb()内存屏障隔开，可能会出现if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping))先执行，此时
-		 * mapping->rh_reserved1还是正常的，但是再等执行p_file_stat = (struct file_stat *)mapping->rh_reserved1就是1了，
-		 * 此时就错过判断mapping->rh_reserved1非法了，然后执行mapping->rh_reserved1这个file_stat而crash!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-		 * */
-		smp_rmb();
-		if(unlikely(!IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)))
-			printk("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,mapping->rh_reserved1);
-
-		ret = folio_test_clear_writeback(folio);
-		if (ret) {
-			XA_STATE(xas, &mapping->i_pages, folio_index(folio) >> PAGE_COUNT_IN_AREA_SHIFT);
-			struct file_area *p_file_area;
-			//令page索引与上0x3得到它在file_area的pages[]数组的下标
-			unsigned int page_offset_in_file_area = folio_index(folio) & PAGE_COUNT_IN_AREA_MASK;
-
-			//__xa_clear_mark(&mapping->i_pages, folio_index(folio),
-			//			PAGECACHE_TAG_WRITEBACK);
-			p_file_area = xas_load(&xas);
-			if(!is_file_area_entry(p_file_area)){
-				panic("%s mapping:0x%llx p_file_area:0x%llx  error\n",__func__,(u64)mapping,(u64)p_file_area);
-			}
-			p_file_area = entry_to_file_area(p_file_area);
-			/*检测查找到的page是否正确，不是则crash*/
-			CHECK_FOLIO_FROM_FILE_AREA_VALID_MARK(&xas,mapping,folio,p_file_area->pages[page_offset_in_file_area],p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
-
-			/*先清理file_area的writeback标记，再清理file_area里的page的writeback mark。错了，只有file_area的4个page的writeback
-			 * mark全被清理了，才能清理file_area的writeback mark标记位，因此把清理file_area的writeback mark放到下边了*/
-			//xas_clear_mark(&xas, PAGECACHE_TAG_WRITEBACK);
-			if(!is_file_area_page_mark_bit_set(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_WRITEBACK)){
-				panic("%s mapping:0x%llx p_file_area:0x%llx page:0x%llx not writeback\n",__func__,(u64)mapping,(u64)p_file_area,(u64)folio);
-			}
-
-			clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_WRITEBACK);
-			/*只有file_area的4个page的writebackmark全被清理了,才能清理file_area的writeback mark标记位*/
-			if(0 == file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_WRITEBACK))
-				xas_clear_mark(&xas, PAGECACHE_TAG_WRITEBACK);
-
-			if(mapping->rh_reserved3){
-				printk("%s clear_writeback mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
-			}
-
-			if (bdi->capabilities & BDI_CAP_WRITEBACK_ACCT) {
-				struct bdi_writeback *wb = inode_to_wb(inode);
-
-				wb_stat_mod(wb, WB_WRITEBACK, -nr);
-				__wb_writeout_add(wb, nr);
-				if (!mapping_tagged(mapping,
-							PAGECACHE_TAG_WRITEBACK))
-					wb_inode_writeback_end(wb);
-			}
-		}
-
-		if (mapping->host && !mapping_tagged(mapping,
-					PAGECACHE_TAG_WRITEBACK))
-			sb_clear_inode_writeback(mapping->host);
-
-		xa_unlock_irqrestore(&mapping->i_pages, flags);
-	} else {
-		ret = folio_test_clear_writeback(folio);
-	}
-	if (ret) {
-		lruvec_stat_mod_folio(folio, NR_WRITEBACK, -nr);
-		zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, -nr);
-		node_stat_mod_folio(folio, NR_WRITTEN, nr);
-	}
-	folio_memcg_unlock(folio);
-	return ret;
-}
-
-bool __folio_start_writeback_for_file_area(struct folio *folio, bool keep_write)
-{
-	long nr = folio_nr_pages(folio);
-	struct address_space *mapping = folio_mapping(folio);
-	bool ret;
-	int access_ret;
-
-	folio_memcg_lock(folio);
-	if (mapping && mapping_use_writeback_tags(mapping)) {
-		//XA_STATE(xas, &mapping->i_pages, folio_index(folio));
-		XA_STATE(xas, &mapping->i_pages, folio_index(folio) >> PAGE_COUNT_IN_AREA_SHIFT);
-		struct inode *inode = mapping->host;
-		struct backing_dev_info *bdi = inode_to_bdi(inode);
-		unsigned long flags;
-
-		struct file_area *p_file_area;
-		struct file_stat_base *p_file_stat_base;
-		//令page索引与上0x3得到它在file_area的pages[]数组的下标
-		unsigned int page_offset_in_file_area = folio_index(folio) & PAGE_COUNT_IN_AREA_MASK;
-
-		FILE_AREA_PRINT("%s %s %d mapping:0x%llx folio:0x%llx\n",__func__,current->comm,current->pid,(u64)mapping,(u64)folio);
-		/*该函数没有rcu_read_lock，但是有xa_lock_irqsave加锁，也能防止file_stat被方法delete*/
-		xas_lock_irqsave(&xas, flags);
-
-		//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
-		p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
-		/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
-		 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
-		 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
-		 * smp_rmb()是要立即感知到mapping->rh_reserved1的最新值——即1。还有，p_file_stat = (struct file_stat *)mapping->rh_reserved1
-		 * 赋值必须放到smp_rmb()内存屏障前边，因为可能这里赋值时mapping->rh_reserved1还是正常，smp_rmb()执行后，
-		 * IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)执行时mapping->rh_reserved1已经被cold_file_stat_delete()赋值1了。
-		 * 如果不用smp_rmb()内存屏障隔开，可能会出现if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping))先执行，此时
-		 * mapping->rh_reserved1还是正常的，但是再等执行p_file_stat = (struct file_stat *)mapping->rh_reserved1就是1了，
-		 * 此时就错过判断mapping->rh_reserved1非法了，然后执行mapping->rh_reserved1这个file_stat而crash!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-		 * */
-		smp_rmb();
-		if(unlikely(!IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)))
-			printk("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,mapping->rh_reserved1);
-
-		//xas_load(&xas);
-		p_file_area = xas_load(&xas);
-		/*此时file_area不可能非法*/
-		if(!is_file_area_entry(p_file_area)){
-			panic("%s mapping:0x%llx p_file_area:0x%llx  error\n",__func__,(u64)mapping,(u64)p_file_area);
-		}
-		p_file_area = entry_to_file_area(p_file_area);
-
-		/*检测查找到的page是否正确，不是则crash*/
-		CHECK_FOLIO_FROM_FILE_AREA_VALID_MARK(&xas,mapping,folio,p_file_area->pages[page_offset_in_file_area],p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
-
-		ret = folio_test_set_writeback(folio);
-		if (!ret) {
-			bool on_wblist;
-
-			on_wblist = mapping_tagged(mapping,
-					PAGECACHE_TAG_WRITEBACK);
-
-			xas_set_mark(&xas, PAGECACHE_TAG_WRITEBACK);
-			/*上边此时只是标记file_area的writeback mark，这里标记file_area里的page的writeback mark*/
-			set_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_WRITEBACK);
-			if (bdi->capabilities & BDI_CAP_WRITEBACK_ACCT) {
-				struct bdi_writeback *wb = inode_to_wb(inode);
-
-				wb_stat_mod(wb, WB_WRITEBACK, nr);
-				if (!on_wblist)
-					wb_inode_writeback_start(wb);
-			}
-
-			/*
-			 * We can come through here when swapping
-			 * anonymous folios, so we don't necessarily
-			 * have an inode to track for sync.
-			 */
-			if (mapping->host && !on_wblist)
-				sb_mark_inode_writeback(mapping->host);
-		}
-		
-		/*是调试的文件，打印调试信息*/
-		if(mapping->rh_reserved3){
-			printk("%s clear_dirty mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
-		}
-
-		if (!folio_test_dirty(folio)){
-			//xas_clear_mark(&xas, PAGECACHE_TAG_DIRTY);
-
-			/*上边此时只是标记file_area的dirty mark，这里标记file_area里的page的dirty mark。
-			 *错了，只有file_area的page的dirty mark标记位全被清理掉，才能清理file_area的mark标记*/
-			clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY);
-			if(0 == file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_DIRTY))
-				xas_clear_mark(&xas, PAGECACHE_TAG_DIRTY);
-
-			if(mapping->rh_reserved3){
-				printk("%s real_clear_dirty mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
-			}
-		}
-
-		/*是调试的文件，打印调试信息*/
-		if(mapping->rh_reserved3){
-			printk("%s clear_towrite mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx keep_write:%d\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags,keep_write);
-		}
-
-		if (!keep_write){
-			//xas_clear_mark(&xas, PAGECACHE_TAG_TOWRITE);
-			/*上边此时只是标记file_area的towrite mark，这里标记file_area里的page的towrite mark
-			 *错了，只有file_area的page的towrite mark标记位全被清理掉，才能清理file_area的mark标记*/
-			clear_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_TOWRITE);
-			if(0 == file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_TOWRITE))
-				xas_clear_mark(&xas, PAGECACHE_TAG_TOWRITE);
-		}
-		xas_unlock_irqrestore(&xas, flags);
-	} else {
-		ret = folio_test_set_writeback(folio);
-	}
-	if (!ret) {
-		lruvec_stat_mod_folio(folio, NR_WRITEBACK, nr);
-		zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, nr);
-	}
-	folio_memcg_unlock(folio);
-	access_ret = arch_make_folio_accessible(folio);
-	/*
-	 * If writeback has been triggered on a page that cannot be made
-	 * accessible, it is too late to recover here.
-	 */
-	VM_BUG_ON_FOLIO(access_ret != 0, folio);
-
-	return ret;
-}
-#endif
-#endif

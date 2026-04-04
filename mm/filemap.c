@@ -3828,15 +3828,15 @@ find_page_from_file_area:
 		if (folio_index_from_xa_index >= max_idx)
 			goto unlock;
 
-#if 0
-		/*page_offset_in_file_area保存当前查找到的page在file_area的索引，下次filemap_map_pages再次执行next_map_page()
+/*#if 0
+		/ *page_offset_in_file_area保存当前查找到的page在file_area的索引，下次filemap_map_pages再次执行next_map_page()
 		 *时，直接令page_offset_in_file_area加1而从file_area查找到下一个索引的page，不用再查找xarray tree得到page。但是有个
 		 *前提，page_offset_in_file_area_temp必须小于3。因为如果page_offset_in_file_area_temp是3，说明当前file_area里的
 		 page都遍历过了，下次再执行filemap_map_pages->next_map_page()时，必须从xarray tree查找新的下一个索引的file_area了，
 		 *此时就要*page_offset_in_file_area = 0清0，表示从新的file_area的第一个page开始查找。并且还要把p_file_area_ori清NULL，
-		 *令上一次传入的file_area失效，这样filemap_map_pages->next_map_page()才会查找新的file_area*/
+		 *令上一次传入的file_area失效，这样filemap_map_pages->next_map_page()才会查找新的file_area* /
 		if(page_offset_in_file_area_temp < (PAGE_COUNT_IN_AREA -1)){
-			/*page_offset_in_file_area_temp加1再赋值，下次执行该函数才会从file_area的下一个page开始查找*/
+			//page_offset_in_file_area_temp加1再赋值，下次执行该函数才会从file_area的下一个page开始查找
 			*page_offset_in_file_area = page_offset_in_file_area_temp + 1;
 			if(p_file_area != *p_file_area_ori)
 				*p_file_area_ori = p_file_area;
@@ -3845,7 +3845,7 @@ find_page_from_file_area:
 			*page_offset_in_file_area = 0;
 			*p_file_area_ori = NULL;
 		}
-#else
+#else*/
 		/*上边的方案有个重大bug，就是令page_offset_in_file_area_temp加1后赋值给*page_offset_in_file_area。这直接导致回到
 		 *filemap_map_pages_for_file_area()函数里执行 
 		 folio_index_for_xa_index = (xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area;
@@ -3862,7 +3862,8 @@ find_page_from_file_area:
 		/*即便page_offset_in_file_area是3页不再对*p_file_area_ori=NULL设置NULL了。下次执行next_map_page_for_file_area()函数中处理，
 		 *发现p_file_area有效，但page_offset_in_file_area是3，说明当前file_area的page都用过了，直接查找下一个file_area。*/
 		*p_file_area_ori = p_file_area;
-#endif
+//#endif
+//
 		FILE_AREA_PRINT("4:%s %s %d p_file_area:0x%llx find folio:0x%llx xas page index:%ld folio->index:%ld\n",__func__,current->comm,current->pid,(u64)p_file_area,(u64)folio,(xas->xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area_temp,folio->index);
 
 		return folio;
@@ -3908,7 +3909,7 @@ static inline struct folio *first_map_page_for_file_area(struct address_space *m
 	return next_uptodate_page_for_file_area(p_file_area,
 			mapping, xas, end_pgoff,page_offset_in_file_area,0);
 }
-#if 0
+/*#if 0
 static inline struct folio *next_map_page_for_file_area(struct address_space *mapping,
 		struct xa_state *xas,
 		pgoff_t end_pgoff,unsigned int *page_offset_in_file_area,struct file_area **p_file_area)
@@ -3916,8 +3917,8 @@ static inline struct folio *next_map_page_for_file_area(struct address_space *ma
 	//return next_uptodate_page(xas_next_entry(xas, end_pgoff),
 	//			  mapping, xas, end_pgoff);
 
-	/*如果p_file_area不是NULL，说明上一次执行当前函数找到的file_area还有剩下的page没使用，这个page在file_area的
-	 *起始索引是page_offset_in_file_area，本次执行该函数直接使用这个page*/
+	/ *如果p_file_area不是NULL，说明上一次执行当前函数找到的file_area还有剩下的page没使用，这个page在file_area的
+	 *起始索引是page_offset_in_file_area，本次执行该函数直接使用这个page* /
 	if(*p_file_area)
 		return next_uptodate_page_for_file_area(p_file_area,mapping, xas, end_pgoff,page_offset_in_file_area,1);
 	else{
@@ -3925,7 +3926,7 @@ static inline struct folio *next_map_page_for_file_area(struct address_space *ma
 		return next_uptodate_page_for_file_area(p_file_area,mapping, xas, end_pgoff,page_offset_in_file_area,0);
 	}
 }
-#else
+#else*/
 static inline struct folio *next_map_page_for_file_area(struct address_space *mapping,
 		struct xa_state *xas,
 		pgoff_t end_pgoff,unsigned int *page_offset_in_file_area,struct file_area **p_file_area)
@@ -3947,7 +3948,8 @@ static inline struct folio *next_map_page_for_file_area(struct address_space *ma
 		return next_uptodate_page_for_file_area(p_file_area,mapping, xas, end_pgoff,page_offset_in_file_area,0);
 	}
 }
-#endif
+//#endif
+
 vm_fault_t filemap_map_pages_for_file_area(struct vm_fault *vmf,
 		pgoff_t start_pgoff, pgoff_t end_pgoff)
 {
