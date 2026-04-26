@@ -148,8 +148,10 @@ void page_cache_delete_for_file_area(struct address_space *mapping,
 		/* 最新方案，异步内存回收page时，file_area_state的shadow bit不再使用。而是把1赋值给file_area->pages[]。这样bit0是1
 		 * 说明是个shadow entry，但是kswapd内存回收的的shadow又远远大于1，依此可以区分该page是被异步内存回收还是kswapd。*/
 		shadow = (void *)(0x1);
-		if(strncmp(current->comm,"async_memory",12))
-			printk("%s %s %d async memory errror!!!!!!!!!\n",__func__,current->comm,current->pid);
+		/*catch android15 execute here縤put()->...truncate_inode_pages_final->truncate_inode_pages_range->filemap_ramove_folio->__filemap_remove_folio->page_cache_delete_for_file_area*/
+		if(strncmp(current->comm,"async_memory",12)){
+			MULTI_LEVEL_FILE_AREA_PRINTK("%s %s %d async memory errror!!!!!!!!!\n",__func__,current->comm,current->pid);
+		}
 	}
 	rcu_assign_pointer(p_file_area->pages[page_offset_in_file_area], shadow);
 /*#else
