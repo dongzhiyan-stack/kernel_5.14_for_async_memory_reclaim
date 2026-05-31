@@ -964,6 +964,13 @@ struct hot_cold_file_global
 	unsigned long scan_exit_file_area_count;
 	unsigned long scan_zero_page_file_area_count;
 	unsigned long direct_reclaim_pages_form_writeonly_file;
+
+	unsigned long writeonly_file_all_free_pages;
+	unsigned char reclaim_too_small_pages_because_of_writeonly_file_dirty_pages;
+	
+	struct list_head tiny_small_file_stat_free_list_temp;
+	struct list_head small_file_stat_free_list_temp;
+	struct list_head file_stat_free_list_temp;
 };
 
 
@@ -1386,6 +1393,7 @@ extern int open_file_area_printk;
 extern int open_file_area_printk_important;
 extern int warm_list_printk;
 extern int multi_level_file_area_printk;
+extern int enable_low_cpu_consumption;
 
 #define is_global_file_stat_file_in_debug(mapping) (1 == mapping->rh_reserved2)
 #define list_num_get(p_file_area)  (p_file_area->warm_list_num_and_access_freq.val_bits.warm_list_num)
@@ -2558,8 +2566,10 @@ inline static struct current_scan_file_stat_info *get_normal_file_stat_current_s
  * 跟global->temp、middle、large、writeonly链表尾的file_stat不相等而 panic。
  * 
  * 另外，仅仅更新下一次遍历该文件file_stat时，要遍历的warm链表编号，其他的p_traverse_file_area_list_head等信息在下次遍历到该文件file_stat时再更新*/
-inline static void update_file_stat_next_multi_level_warm_or_writeonly_list(struct current_scan_file_stat_info *p_current_scan_file_stat_info,struct file_stat *p_file_stat)
+//inline static void update_file_stat_next_multi_level_warm_or_writeonly_list(struct current_scan_file_stat_info *p_current_scan_file_stat_info,struct file_stat *p_file_stat)
+inline static void update_file_stat_next_multi_level_warm_or_writeonly_list(struct current_scan_file_stat_info *p_current_scan_file_stat_info)
 {
+	struct file_stat *p_file_stat = p_current_scan_file_stat_info->p_traverse_file_stat;
 	/*如果p_traverse_file_stat已经是NULL，说明p_traverse_file_stat已经没有指向遍历过的file_stat了，直接return*/
 	if(NULL == p_current_scan_file_stat_info->p_traverse_file_stat)
 		return;
@@ -2747,7 +2757,7 @@ inline static struct file_stat_base *file_stat_alloc_and_init_other(struct addre
 				 * 该p_traverse_file_stat永远指向global->temp链表尾的file_stat，这是规定。现在要向glboal->temp链表添加
 				 * 新的file_stat了，必须令p_traverse_file_stat赋值NULL。下个周期，从global->temp链表尾得到这个新的
 				 * file_stat，再赋值p_traverse_file_stat*/
-				update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info,p_file_stat);         
+				update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info);
 				list_add_tail(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_temp_head);
 			}
 		}
@@ -3332,8 +3342,8 @@ inline static void i_file_stat_small_callback(struct rcu_head *head)
 
 	/*有必要在这里判断file_stat的temp、refault、hot、free、mapcount链表是否空，如果有残留file_area则panic。
 	 * 防止can_tiny_small_file_change_to_small_normal_file()把tiny small转换成其他文件时，因代码有问题，导致没处理干净所有的file_area*/
-	if(!list_empty(&p_file_stat_small->file_stat_base.file_area_temp) || !list_empty(&p_file_stat_small->file_area_other))
-		panic("%s file_stat_small:0x%llx status:0x%llx  list nor empty\n",__func__,(u64)p_file_stat_small,(u64)p_file_stat_small->file_stat_base.file_stat_status);
+	if(!list_empty(&p_file_stat_small->file_stat_base.file_area_temp) || !list_empty(&p_file_stat_small->file_area_other) || !file_stat_in_file_stat_small_file_head_list_base(p_file_stat_base))
+		panic("%s file_stat_small:0x%llx status:0x%llx  list nor empty or status error\n",__func__,(u64)p_file_stat_small,(u64)p_file_stat_small->file_stat_base.file_stat_status);
 
 	kmem_cache_free(hot_cold_file_global_info.file_stat_small_cachep,p_file_stat_small);
 }
@@ -3344,8 +3354,8 @@ inline static void i_file_stat_tiny_small_callback(struct rcu_head *head)
 
 	/*有必要在这里判断file_stat的temp、refault、hot、free、mapcount链表是否空，如果有残留file_area则panic。
 	 * 防止can_small_file_change_to_normal_file()把tiny small转换成其他文件时，因代码有问题，导致没处理干净所有的file_area*/
-	if(!list_empty(&p_file_stat_tiny_small->file_stat_base.file_area_temp))
-		panic("%s file_stat_small:0x%llx status:0x%llx  list nor empty\n",__func__,(u64)p_file_stat_tiny_small,(u64)p_file_stat_tiny_small->file_stat_base.file_stat_status);
+	if(!list_empty(&p_file_stat_tiny_small->file_stat_base.file_area_temp) || !file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base))
+		panic("%s file_stat_small:0x%llx status:0x%llx  list nor empty or status error\n",__func__,(u64)p_file_stat_tiny_small,(u64)p_file_stat_tiny_small->file_stat_base.file_stat_status);
 
 	kmem_cache_free(hot_cold_file_global_info.file_stat_tiny_small_cachep,p_file_stat_tiny_small);
 }

@@ -53,6 +53,13 @@
 #include <linux/fs_struct.h>
 #include <linux/kernel_read_file.h>
 
+#include <linux/sched.h>
+#include <linux/sched/types.h>
+#include <uapi/linux/sched/types.h>
+
+#include <linux/hrtimer.h>
+#include <linux/writeback.h>
+
 #include "async_memory_reclaim_for_cold_file_area.h"
 
 
@@ -133,7 +140,7 @@ int shrink_page_printk_open_important;
 int shrink_page_printk_open;
 
 int multi_level_file_area_printk;
-
+int enable_low_cpu_consumption;
 unsigned int xarray_tree_node_cache_hit;
 int open_file_area_printk = 0;
 int open_file_area_printk_important = 0;
@@ -288,8 +295,8 @@ static void i_file_stat_callback(struct rcu_head *head)
 
 	/*有必要在这里判断file_stat的temp、refault、hot、free、mapcount链表是否空，如果有残留file_area则panic。
 	 * 防止因代码有问题，导致没处理干净所有的file_area*/
-	if(!list_empty(&p_file_stat->file_stat_base.file_area_temp) || !list_empty(&p_file_stat->file_area_hot) || !list_empty(&p_file_stat->file_area_free) || !list_empty(&p_file_stat->file_area_warm_cold) || !list_empty(&p_file_stat->file_area_warm_hot) ||!list_empty(&p_file_stat->file_area_writeonly_or_cold) || !list_empty(&p_file_stat->file_area_warm))
-		panic("%s file_stat:0x%llx status:0x%x  list nor empty\n",__func__,(u64)p_file_stat,p_file_stat->file_stat_base.file_stat_status);
+	if(!list_empty(&p_file_stat->file_stat_base.file_area_temp) || !list_empty(&p_file_stat->file_area_hot) || !list_empty(&p_file_stat->file_area_free) || !list_empty(&p_file_stat->file_area_warm_cold) || !list_empty(&p_file_stat->file_area_warm_hot) ||!list_empty(&p_file_stat->file_area_writeonly_or_cold) || !list_empty(&p_file_stat->file_area_warm) || get_file_stat_type(p_file_stat_base) != FILE_STAT_NORMAL)
+		panic("%s file_stat:0x%llx status:0x%x  list nor empty or status error\n",__func__,(u64)p_file_stat,p_file_stat->file_stat_base.file_stat_status);
 
 	kmem_cache_free(hot_cold_file_global_info.file_stat_cachep,p_file_stat);
 }
@@ -661,6 +668,69 @@ int cold_file_area_delete_quick(struct hot_cold_file_global *p_hot_cold_file_glo
 
 	return 0;
 }
+/*static void real_rcu_free_file_stat(struct file_stat_base *p_file_stat_base_del,unsigned int file_type)
+{
+	if(FILE_STAT_NORMAL == file_type){
+		//if(get_file_stat_type(p_file_stat_base_del) != FILE_STAT_NORMAL)
+		if(file_stat_in_global_base(p_file_stat_base_del))
+			panic("%s file_stat:0x%llx not normal file_stat\n",__func__,(u64)p_file_stat_base_del);
+
+		//p_file_stat_del = container_of(p_file_stat_base_del,struct file_stat,file_stat_base);
+		//call_rcu(&p_file_stat_del->i_rcu, i_file_stat_callback);
+		call_rcu(&p_file_stat_base_del->i_rcu, i_file_stat_callback);
+	}else if(FILE_STAT_SMALL == file_type){
+		//p_file_stat_small_del = container_of(p_file_stat_base_del,struct file_stat_small,file_stat_base);
+		//call_rcu(&p_file_stat_small_del->i_rcu, i_file_stat_small_callback);
+		call_rcu(&p_file_stat_base_del->i_rcu, i_file_stat_small_callback);
+	}
+	else if(FILE_STAT_TINY_SMALL == file_type){
+		//p_file_stat_tiny_small_del = container_of(p_file_stat_base_del,struct file_stat_tiny_small,file_stat_base);
+		//call_rcu(&p_file_stat_tiny_small_del->i_rcu, i_file_stat_tiny_small_callback);
+		call_rcu(&p_file_stat_base_del->i_rcu, i_file_stat_tiny_small_callback);
+	}else
+		BUG();
+}*/
+static void real_rcu_free_file_stat(struct hot_cold_file_global *p_hot_cold_file_global)
+{
+	unsigned int del_file_stat_count = 0;
+	struct file_stat_base *p_file_stat_base,*p_file_stat_base_temp;
+
+	list_for_each_entry_safe_reverse(p_file_stat_base,p_file_stat_base_temp,&p_hot_cold_file_global->tiny_small_file_stat_free_list_temp,hot_cold_file_list){
+		/*防止删除file_area耗时太长*/
+		if(++ del_file_stat_count > 256)
+			break;
+
+		if(!file_stat_in_replaced_file_base(p_file_stat_base) && !file_stat_in_delete_file_base(p_file_stat_base) /*|| file_stat_in_delete_error(p_file_stat)*/)
+			panic("%s file_stat:0x%llx not delete status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+		list_del_rcu(&p_file_stat_base->hot_cold_file_list);
+		call_rcu(&p_file_stat_base->i_rcu, i_file_stat_tiny_small_callback);
+	}
+
+	list_for_each_entry_safe_reverse(p_file_stat_base,p_file_stat_base_temp,&p_hot_cold_file_global->small_file_stat_free_list_temp,hot_cold_file_list){
+		/*防止删除file_area耗时太长*/
+		if(++ del_file_stat_count > 256)
+			break;
+
+		if(!file_stat_in_replaced_file_base(p_file_stat_base) && !file_stat_in_delete_file_base(p_file_stat_base) /*|| file_stat_in_delete_error(p_file_stat)*/)
+			panic("%s file_stat:0x%llx not delete status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+		list_del_rcu(&p_file_stat_base->hot_cold_file_list);
+		call_rcu(&p_file_stat_base->i_rcu, i_file_stat_small_callback);
+	}
+
+	list_for_each_entry_safe_reverse(p_file_stat_base,p_file_stat_base_temp,&p_hot_cold_file_global->file_stat_free_list_temp,hot_cold_file_list){
+		/*防止删除file_area耗时太长*/
+		if(++ del_file_stat_count > 256)
+			break;
+
+		if(!file_stat_in_replaced_file_base(p_file_stat_base) && !file_stat_in_delete_file_base(p_file_stat_base) /*|| file_stat_in_delete_error(p_file_stat)*/)
+			panic("%s file_stat:0x%llx not delete status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+		list_del_rcu(&p_file_stat_base->hot_cold_file_list);
+		call_rcu(&p_file_stat_base->i_rcu, i_file_stat_callback);
+	}
+}
 
 /*在判定一个文件file_stat的page全部被释放，然后过了很长时间依然没人访问，执行该函数delete file_stat。必须考虑此时有进程并发访问该文件file_stat*/
 int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base_del,unsigned int file_type)
@@ -856,25 +926,38 @@ err:
 		/*file_stat被rcu异步释放了，但是提前rcu_read_lock了，这里置1，等到确定file_stat不会被释放再rcu_read_unlock放开。
 		 *注意，这个rcu_read_lock()很重要。因为调用cold_file_stat_delete()的地方，还会使用该file_stat。因此这里这里
 		 *不能立即释放掉file_stat，rcu_read_lock()就保证call_rcu()释放file_stat后，不会立即释放掉file_stat.*/
-		rcu_read_lock();
+		/* 这里rcu_read_lock，然后下边call_rcu()就不会释放掉file_stat结构体了，等回到file_stat_has_zero_file_area_manage()函数，
+		 * 确保该file_stat不会再被使用时再rcu_read_unlock放开。但是新的问题来了，rcu_read_lock后，当前file_stat文件对应的inode
+		 * 执行iput->evict->ext4_evict_inode->do_get_write_access->__wait_on_bit而休眠。这就导致
+		 * "Voluntary context switch within RCU read-side critical section"报错。因为rcu_read_lock后不能休眠！怎么解决，这里
+		 * 不再call_rcu异步释放file_stat，但是此时file_stat被标记了in_replace。回到file_stat_has_zero_file_area_manage()函数，
+		 * 检测到file_stat有in_replace标记，等该file_stat确定不再使用再执行call_rcu释放file_stat。于是把下边释放file_stat的
+		 * 代码封装到real_rcu_free_file_stat()函数
+		 * * 当然，就不再rcu_read_lock了.
+		 * 等等，这里还得ret=1返回，返回后把file_stat_has_free_flag置1。以file_stat_has_free_flag来决定释放掉file_stat标记，
+		 * 而不是file_stat有in_replacei标记，执行real_rcu_free_file_stat有说明*/
+		/* 新的问题又来了，这个新的方案依然有问题，get_file_area_from_file_stat_list和file_stat_has_zero_file_area_manage函数，遍历file_stat的
+		 * 循环结束后p_file_stat_base或p_file_stat_base_last这两file_stat都可能已经释放了，即便使用的最新的方案:file_stat_has_free_flag和
+		 * real_rcu_free_file_stat，也不能避免这个问题。最后我决定，在get_file_area_from_file_stat_list()和file_stat_has_zero_file_area_manage()
+		 * 函数不再释放file_stat了！！！而只是把要释放的file_stat从原链表移动到global->file_stat_free_list链表。然后异步内存回收线程最后，
+		 * 肯定没人使用这些file_stat了，再遍历global->file_stat_free_list链表，取出这些file_stat,一个个释放掉。后续再遇到要释放的file_stat,都
+		 * 不能直接释放掉，而是先移动到global->file_stat_free_list链表，再异步内存回收线程最后，再释放这些file_stat.*/
+		//rcu_read_lock();
 
 		if(FILE_STAT_NORMAL == file_type){
 			//if(get_file_stat_type(p_file_stat_base_del) != FILE_STAT_NORMAL)
 			if(file_stat_in_global_base(p_file_stat_base_del))
 				panic("%s file_stat:0x%llx not normal file_stat\n",__func__,(u64)p_file_stat_base_del);
 
-			//p_file_stat_del = container_of(p_file_stat_base_del,struct file_stat,file_stat_base);
-			//call_rcu(&p_file_stat_del->i_rcu, i_file_stat_callback);
-			call_rcu(&p_file_stat_base_del->i_rcu, i_file_stat_callback);
+			//call_rcu(&p_file_stat_base_del->i_rcu, i_file_stat_callback);
+			list_add(&p_file_stat_base_del->hot_cold_file_list,&p_hot_cold_file_global->file_stat_free_list_temp);
 		}else if(FILE_STAT_SMALL == file_type){
-			//p_file_stat_small_del = container_of(p_file_stat_base_del,struct file_stat_small,file_stat_base);
-			//call_rcu(&p_file_stat_small_del->i_rcu, i_file_stat_small_callback);
-			call_rcu(&p_file_stat_base_del->i_rcu, i_file_stat_small_callback);
+			//call_rcu(&p_file_stat_base_del->i_rcu, i_file_stat_small_callback);
+			list_add(&p_file_stat_base_del->hot_cold_file_list,&p_hot_cold_file_global->small_file_stat_free_list_temp);
 		}
 		else if(FILE_STAT_TINY_SMALL == file_type){
-			//p_file_stat_tiny_small_del = container_of(p_file_stat_base_del,struct file_stat_tiny_small,file_stat_base);
-			//call_rcu(&p_file_stat_tiny_small_del->i_rcu, i_file_stat_tiny_small_callback);
-			call_rcu(&p_file_stat_base_del->i_rcu, i_file_stat_tiny_small_callback);
+			//call_rcu(&p_file_stat_base_del->i_rcu, i_file_stat_tiny_small_callback);
+			list_add(&p_file_stat_base_del->hot_cold_file_list,&p_hot_cold_file_global->tiny_small_file_stat_free_list_temp);
 		}else
 			BUG();
 	}
@@ -1263,7 +1346,8 @@ unsigned int cold_file_stat_delete_all_file_area(struct hot_cold_file_global *p_
 			if(p_current_scan_file_stat_info->p_traverse_file_stat != p_file_stat_del)
 				panic("%s file_stat_del:0x%llx status:0x%x file_stat_current:0x%llx status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,(u64)p_current_scan_file_stat_info->p_traverse_file_stat,p_current_scan_file_stat_info->p_traverse_file_stat->file_stat_base.file_stat_status);
 
-			update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info,p_file_stat_del); 
+			//update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info,p_file_stat_del); 
+			update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info); 
 		}
 
 		//refault链表------多层warm去掉
@@ -2468,7 +2552,7 @@ static unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file
 					list_num_update(p_file_area,POS_WARM);
 					list_move(&p_file_area->file_area_list,p_shrink_param->file_area_warm_list);
 					scan_warm_file_area_count ++;
-					printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x access\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
+					MULTI_LEVEL_FILE_AREA_PRINTK("%s file_stat:0x%llx file_area:0x%llx status:0x%x access\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state);
 					continue;
 				}
 			}
@@ -2964,7 +3048,8 @@ static noinline void file_stat_has_zero_file_area_manage(struct hot_cold_file_gl
 	unsigned int file_stat_type;
 	char file_stat_dec = 0;
 	char file_stat_delete_lock = 0;
-	char rcu_read_lock_flag = 0;
+	//char rcu_read_lock_flag = 0;
+	//char file_stat_has_free_flag = 0;
 	spinlock_t *cache_or_mmap_file_global_lock;
 	struct address_space *mapping;
 
@@ -3025,8 +3110,10 @@ static noinline void file_stat_has_zero_file_area_manage(struct hot_cold_file_gl
 			 *标记delete标记，这种情况也认为global zero链表上的file_stat个数减少1，因为上边再次遍历这个file_stat时，会把这个
 			 *file_stat移动到global delete链表*/
 
-			/*file_stat被rcu异步释放了，但是提前rcu_read_lock了，这里置1，等到确定file_stat不会被释放再rcu_read_unlock放开*/
-			rcu_read_lock_flag = 1;
+			/* file_stat被rcu异步释放了，但是提前rcu_read_lock了，这里置1，等到确定file_stat不会被释放再rcu_read_unlock放开
+			 * 不再使用rcu_read_loc的办法控制延迟释放file-stat结构了，具体看cold_file_stat_delete()函数最后解释*/
+			//rcu_read_lock_flag = 1;
+			//file_stat_has_free_flag = 1;
 
 			del_file_stat_count ++;
 			//p_hot_cold_file_global->file_stat_count_zero_file_area --;下边统计减1了，这里不再减1
@@ -3165,11 +3252,21 @@ next_file_stat:
 		/*这个scan_file_stat_count超过max则break的判断，要放到for循环下边，原因看get_file_area_from_file_stat_list()。还有一个原因是for循环上边break会错过file_inode_unlock()解锁*/
 		if(++scan_file_stat_count > scan_file_stat_max)
 			break;
-
-		if(rcu_read_lock_flag){
+	
+		/*if(rcu_read_lock_flag){
 			rcu_read_lock_flag = 0;
 			rcu_read_unlock();
-		}
+		}*/
+		/* 上边判定该file_stat不再使用而需要释放了，标记了in_replace标记，这里等该file_stat不再被使用。if判定条件需要file_stat_has_free_flag标记，
+		 * 而不是file_stat_in_replaced_file_base标记。否则这里因为file_stat有in_replace标记，real_rcu_free_file_stat()释放一次file_stat。等执行到
+		 * 该函数最后，再因为file_stat有in_replace标记，再释放一次file_stat!!!!!!!*/
+		/*if(file_stat_has_free_flag/ *&& file_stat_in_replaced_file_base(p_file_stat_base)* /){
+			if(!file_stat_in_replaced_file_base(p_file_stat_base))
+	                    panic("%s:file_stat:0x%llx not in_replace status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+		    file_stat_has_free_flag = 0;
+		    real_rcu_free_file_stat(p_file_stat_base,file_type);
+		}*/
 	}
 
 	if(file_stat_delete_lock)
@@ -3200,10 +3297,18 @@ next_file_stat:
 	}
 	spin_unlock(cache_or_mmap_file_global_lock);
 
-	if(rcu_read_lock_flag){
-		rcu_read_lock_flag = 0;
-		rcu_read_unlock();
-	}
+	/*if(rcu_read_lock_flag){
+	  rcu_read_lock_flag = 0;
+	  rcu_read_unlock();
+	  }*/
+	/*if(file_stat_has_free_flag/ *&& file_stat_in_replaced_file_base(p_file_stat_base)* /){
+		if(!file_stat_in_replaced_file_base(p_file_stat_base))
+			panic("%s:file_stat:0x%llx not in_replace status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+		file_stat_has_free_flag = 0;
+		real_rcu_free_file_stat(p_file_stat_base,file_type);
+	}*/
+
 
 	if(is_cache_file){
 		p_hot_cold_file_global->hot_cold_file_shrink_counter.del_zero_file_area_file_stat_count += del_file_stat_count;
@@ -5527,7 +5632,8 @@ get_next_file_area:
 			 * 然后下个周期遍历时，发现它是NULL，才会遍历的新的文件file_stat*/
 			//p_current_scan_file_stat_info->p_traverse_file_stat = NULL;
 			//p_current_scan_file_stat_info->p_traverse_file_area_list_head = NULL;
-			update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info,p_file_stat);
+			//update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info,p_file_stat);
+			update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info);
 		}
 	}else{
 		/* 否则说明遍历的file_area超过max导致的遍历结束，则把查询到的最后一个但还没遍历的file_area保存到
@@ -6098,7 +6204,7 @@ static noinline unsigned int file_stat_multi_level_warm_or_writeonly_list_file_a
 	 * 的文件mapping不一致而crash。*/
 	char scan_file_area_max_has_changed = 0;
 
-
+	
 	/*if(is_cache_file)这个检查要放到后边，因为要对最终p_current_scan_file_stat_info->p_traverse_file_stat的检查
 		check_cache_file_current_scan_file_stat_info_invalid(p_hot_cold_file_global,p_file_stat_base,p_current_scan_file_stat_info);
 	else
@@ -6295,7 +6401,8 @@ current_scan_file_stat_delete:
 			 * 因此，基于以上两个问题，在这里增加执行update_file_stat_next_multi_level_warm_or_writeonly_list()即可，既清理
 			 * 已iput的file_stat1的file_stat_in_file_area_in_tmp_list_base标记，又把p_current_scan_file_stat_info->temp_head
 			 * 遍历过的该file_stat的file_area移动回该file_stat1的warm等链表*/
-			update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info,p_current_scan_file_stat_info->p_traverse_file_stat);
+			//update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info,p_current_scan_file_stat_info->p_traverse_file_stat);
+			update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info);
 
 			update_normal_file_stat_current_scan_file_stat_info(p_current_scan_file_stat_info,p_file_stat);
         }
@@ -7376,8 +7483,20 @@ static int  can_tiny_small_file_change_to_small_normal_file(struct hot_cold_file
 		/*可能此时该文件被iput delete了，要防护,老的和新的file_stat都可能会被并发删除。没有必要再判断新的file_stat的是否delete了。两个文件不应该互相影响*/
 		if(!file_stat_in_delete_base(p_file_stat_base_tiny_small) /*&& !file_stat_in_delete(p_file_stat)*/){
 			/* 这里rcu_read_lock，然后下边call_rcu()就不会释放掉file_stat结构体了，等回到get_file_area_from_file_stat_list()函数，
-			 * 确保该file_stat不会再被使用时再rcu_read_unlock放开*/
-			rcu_read_lock();
+			 * 确保该file_stat不会再被使用时再rcu_read_unlock放开。但是新的问题来了，rcu_read_lock后，当前file_stat文件对应的inode
+			 * 执行iput->evict->ext4_evict_inode->do_get_write_access->__wait_on_bit而休眠。这就导致
+			 * "Voluntary context switch within RCU read-side critical section"报错。因为rcu_read_lock后不能休眠！怎么解决，这里
+			 * 不再call_rcu异步释放file_stat，但是此时file_stat被标记了in_replace。回到get_file_area_from_file_stat_list()函数，
+			 * 检测到file_stat有in_replace标记，等该file_stat确定不再使用再执行call_rcu释放file_stat。当然，就不再rcu_read_lock了。
+			 * 等等，这里还得ret=1返回，返回后把file_stat_has_free_flag置1。以file_stat_has_free_flag来决定释放掉file_stat标记，
+			 * 而不是file_stat有in_replacei标记，执行real_rcu_free_file_stat有说明*/
+			/* 新的问题又来了，这个新的方案依然有问题，get_file_area_from_file_stat_list和file_stat_has_zero_file_area_manage函数，遍历file_stat的
+			 * 循环结束后p_file_stat_base或p_file_stat_base_last这两file_stat都可能已经释放了，即便使用的最新的方案:file_stat_has_free_flag和
+			 * real_rcu_free_file_stat，也不能避免这个问题。最后我决定，在get_file_area_from_file_stat_list()和file_stat_has_zero_file_area_manage()
+			 * 函数不再释放file_stat了！！！而只是把要释放的file_stat从原链表移动到global->file_stat_free_list链表。然后异步内存回收线程最后，
+			 * 肯定没人使用这些file_stat了，再遍历global->file_stat_free_list链表，取出这些file_stat,一个个释放掉。后续再遇到要释放的file_stat,都
+			 * 不能直接释放掉，而是先移动到global->file_stat_free_list链表，再异步内存回收线程最后，再释放这些file_stat.*/
+			//rcu_read_lock();
 			ret = 1;
 
 			/*该file_stat从老的global链表中剔除，下边call_rcu异步释放掉*/
@@ -7387,7 +7506,8 @@ static int  can_tiny_small_file_change_to_small_normal_file(struct hot_cold_file
 			/* 隐藏bug，如果这里释放掉file_stat，但是返回到get_file_area_from_file_stat_list()函数后，还要使用这个
 			 * file_stat，那就是非法内存访问了。于是把call_rcu异步释放file_stat的代码放到get_file_area_from_file_stat_list()
 			 * 函数最后，确保该file_stat不会再被使用时再call_rcu异步释放掉。算了，最后决定用提前rcu_read_lock防护就行了*/
-			call_rcu(&p_file_stat_base_tiny_small->i_rcu, i_file_stat_tiny_small_callback);
+			//call_rcu(&p_file_stat_base_tiny_small->i_rcu, i_file_stat_tiny_small_callback);
+			list_add(&p_file_stat_base_tiny_small->hot_cold_file_list,&p_hot_cold_file_global->tiny_small_file_stat_free_list_temp);
 		}
 		spin_unlock(p_global_lock);
 
@@ -7427,8 +7547,20 @@ static int  can_tiny_small_file_change_to_small_normal_file(struct hot_cold_file
 		/*可能此时该文件被iput delete了，要防护*/
 		if(!file_stat_in_delete_base(p_file_stat_base_tiny_small) /*&& !file_stat_in_delete_base(&p_file_stat_small->file_stat_base)*/){
 			/* 这里rcu_read_lock，然后下边call_rcu()就不会释放掉file_stat结构体了，等回到get_file_area_from_file_stat_list()函数，
-			 * 确保该file_stat不会再被使用时再rcu_read_unlock放开*/
-			rcu_read_lock();
+			 * 确保该file_stat不会再被使用时再rcu_read_unlock放开。但是新的问题来了，rcu_read_lock后，当前file_stat文件对应的inode
+			 * 执行iput->evict->ext4_evict_inode->do_get_write_access->__wait_on_bit而休眠。这就导致
+			 * "Voluntary context switch within RCU read-side critical section"报错。因为rcu_read_lock后不能休眠！怎么解决，这里
+			 * 不再call_rcu异步释放file_stat，但是此时file_stat被标记了in_replace。回到get_file_area_from_file_stat_list()函数，
+			 * 检测到file_stat有in_replace标记，等该file_stat确定不再使用再执行call_rcu释放file_stat。当然，就不再rcu_read_lock了.
+			 * 等等，这里还得ret=1返回，返回后把file_stat_has_free_flag置1。以file_stat_has_free_flag来决定释放掉file_stat标记，
+			 * 而不是file_stat有in_replacei标记，执行real_rcu_free_file_stat有说明*/
+			/* 新的问题又来了，这个新的方案依然有问题，get_file_area_from_file_stat_list和file_stat_has_zero_file_area_manage函数，遍历file_stat的
+			 * 循环结束后p_file_stat_base或p_file_stat_base_last这两file_stat都可能已经释放了，即便使用的最新的方案:file_stat_has_free_flag和
+			 * real_rcu_free_file_stat，也不能避免这个问题。最后我决定，在get_file_area_from_file_stat_list()和file_stat_has_zero_file_area_manage()
+			 * 函数不再释放file_stat了！！！而只是把要释放的file_stat从原链表移动到global->file_stat_free_list链表。然后异步内存回收线程最后，
+			 * 肯定没人使用这些file_stat了，再遍历global->file_stat_free_list链表，取出这些file_stat,一个个释放掉。后续再遇到要释放的file_stat,都
+			 * 不能直接释放掉，而是先移动到global->file_stat_free_list链表，再异步内存回收线程最后，再释放这些file_stat.*/
+			//rcu_read_lock();
 			ret = 1;
 
 			/*该file_stat从老的global链表中剔除，下边call_rcu异步释放掉*/
@@ -7436,7 +7568,8 @@ static int  can_tiny_small_file_change_to_small_normal_file(struct hot_cold_file
 			/* 隐藏bug，如果这里释放掉file_stat，但是返回到get_file_area_from_file_stat_list()函数后，还要使用这个
 			 * file_stat，那就是非法内存访问了。于是把call_rcu异步释放file_stat的代码放到get_file_area_from_file_stat_list()
 			 * 函数最后，确保该file_stat不会再被使用时再call_rcu异步释放掉。算了，最后决定用提前rcu_read_lock防护就行了*/
-			call_rcu(&p_file_stat_base_tiny_small->i_rcu, i_file_stat_tiny_small_callback);
+			//call_rcu(&p_file_stat_base_tiny_small->i_rcu, i_file_stat_tiny_small_callback);
+			list_add(&p_file_stat_base_tiny_small->hot_cold_file_list,&p_hot_cold_file_global->tiny_small_file_stat_free_list_temp);
 		}
 		spin_unlock(p_global_lock);
 	}
@@ -7502,8 +7635,20 @@ static int can_small_file_change_to_normal_file(struct hot_cold_file_global *p_h
 		/*可能此时该文件被iput delete了，要防护*/
 		if(!file_stat_in_delete_base(p_file_stat_base_small) /*&& !file_stat_in_delete(p_file_stat)*/){
 			/* 这里rcu_read_lock，然后下边call_rcu()就不会释放掉file_stat结构体了，等回到get_file_area_from_file_stat_list()函数，
-			 * 确保该file_stat不会再被使用时再rcu_read_unlock放开*/
-			rcu_read_lock();
+			 * 确保该file_stat不会再被使用时再rcu_read_unlock放开。但是新的问题来了，rcu_read_lock后，当前file_stat文件对应的inode
+			 * 执行iput->evict->ext4_evict_inode->do_get_write_access->__wait_on_bit而休眠。这就导致
+			 * "Voluntary context switch within RCU read-side critical section"报错。因为rcu_read_lock后不能休眠！怎么解决，这里
+			 * 不再call_rcu异步释放file_stat，但是此时file_stat被标记了in_replace。回到get_file_area_from_file_stat_list()函数，
+			 * 检测到file_stat有in_replace标记，等该file_stat确定不再使用再执行call_rcu释放file_stat。当然，就不再rcu_read_lock了
+			 * 等等，这里还得ret=1返回，返回后把file_stat_has_free_flag置1。以file_stat_has_free_flag来决定释放掉file_stat标记，
+			 * 而不是file_stat有in_replacei标记，执行real_rcu_free_file_stat有说明*/
+			/* 新的问题又来了，这个新的方案依然有问题，get_file_area_from_file_stat_list和file_stat_has_zero_file_area_manage函数，遍历file_stat的
+			 * 循环结束后p_file_stat_base或p_file_stat_base_last这两file_stat都可能已经释放了，即便使用的最新的方案:file_stat_has_free_flag和
+			 * real_rcu_free_file_stat，也不能避免这个问题。最后我决定，在get_file_area_from_file_stat_list()和file_stat_has_zero_file_area_manage()
+			 * 函数不再释放file_stat了！！！而只是把要释放的file_stat从原链表移动到global->file_stat_free_list链表。然后异步内存回收线程最后，
+			 * 肯定没人使用这些file_stat了，再遍历global->file_stat_free_list链表，取出这些file_stat,一个个释放掉。后续再遇到要释放的file_stat,都
+			 * 不能直接释放掉，而是先移动到global->file_stat_free_list链表，再异步内存回收线程最后，再释放这些file_stat.*/
+			//rcu_read_lock();
 			ret = 1;
 
 			/*该file_stat从老的global链表中剔除，下边call_rcu异步释放掉*/
@@ -7515,7 +7660,8 @@ static int can_small_file_change_to_normal_file(struct hot_cold_file_global *p_h
 			/* 隐藏bug，如果这里释放掉file_stat，但是返回到get_file_area_from_file_stat_list()函数后，还要使用这个
 			 * file_stat，那就是非法内存访问了。于是把call_rcu异步释放file_stat的代码放到get_file_area_from_file_stat_list()
 			 * 函数最后，确保该file_stat不会再被使用时再call_rcu异步释放掉。算了，最后决定用提前rcu_read_lock防护就行了*/
-			call_rcu(&p_file_stat_base_small->i_rcu, i_file_stat_small_callback);
+			//call_rcu(&p_file_stat_base_small->i_rcu, i_file_stat_small_callback);
+			list_add(&p_file_stat_base_small->hot_cold_file_list,&p_hot_cold_file_global->small_file_stat_free_list_temp);
 		}
 		spin_unlock(p_global_lock);
 
@@ -7750,14 +7896,27 @@ static unsigned int tiny_small_file_area_move_to_global_file_stat(struct hot_col
 	/*老的file_stat转成global_file_stat后，必须设置file_stat in_replaced，后续就不会再使用它了*/
 	set_file_stat_in_replaced_file_base(p_file_stat_base);
 	/* 这里rcu_read_lock，然后下边call_rcu()就不会释放掉file_stat结构体了，等回到get_file_area_from_file_stat_list()函数，
-	 * 确保该file_stat不会再被使用时再rcu_read_unlock放开*/
-	rcu_read_lock();
+	 * 确保该file_stat不会再被使用时再rcu_read_unlock放开。但是新的问题来了，rcu_read_lock后，当前file_stat文件对应的inode
+	 * 执行iput->evict->ext4_evict_inode->do_get_write_access->__wait_on_bit而休眠。这就导致
+	 * "Voluntary context switch within RCU read-side critical section"报错。因为rcu_read_lock后不能休眠！怎么解决，这里
+	 * 不再call_rcu异步释放file_stat，但是此时file_stat被标记了in_replace。回到get_file_area_from_file_stat_list()函数，
+	 * 检测到file_stat有in_replace标记，等该file_stat确定不再使用再执行call_rcu释放file_stat。当然，就不再rcu_read_lock了
+	 * 等等，这里还得ret=1返回，返回后把file_stat_has_free_flag置1。以file_stat_has_free_flag来决定释放掉file_stat标记，
+	 * 而不是file_stat有in_replacei标记，执行real_rcu_free_file_stat有说明*/
+	/* 新的问题又来了，这个新的方案依然有问题，get_file_area_from_file_stat_list和file_stat_has_zero_file_area_manage函数，遍历file_stat的
+	 * 循环结束后p_file_stat_base或p_file_stat_base_last这两file_stat都可能已经释放了，即便使用的最新的方案:file_stat_has_free_flag和
+	 * real_rcu_free_file_stat，也不能避免这个问题。最后我决定，在get_file_area_from_file_stat_list()和file_stat_has_zero_file_area_manage()
+	 * 函数不再释放file_stat了！！！而只是把要释放的file_stat从原链表移动到global->file_stat_free_list链表。然后异步内存回收线程最后，
+	 * 肯定没人使用这些file_stat了，再遍历global->file_stat_free_list链表，取出这些file_stat,一个个释放掉。后续再遇到要释放的file_stat,都
+	 * 不能直接释放掉，而是先移动到global->file_stat_free_list链表，再异步内存回收线程最后，再释放这些file_stat.*/
+	//rcu_read_lock();
 
 	/* 隐藏bug，如果这里释放掉file_stat，但是返回到get_file_area_from_file_stat_list()函数后，还要使用这个
 	 * file_stat，那就是非法内存访问了。于是把call_rcu异步释放file_stat的代码放到get_file_area_from_file_stat_list()
 	 * 函数最后，确保该file_stat不会再被使用时再call_rcu异步释放掉。算了，最后决定用提前rcu_read_lock防护就行了*/
 	/*释放掉file_stat_base*/
-	call_rcu(&p_file_stat_base->i_rcu, i_file_stat_tiny_small_callback);
+	//call_rcu(&p_file_stat_base->i_rcu, i_file_stat_tiny_small_callback);
+	list_add(&p_file_stat_base->hot_cold_file_list,&p_hot_cold_file_global->tiny_small_file_stat_free_list_temp);
 
 	p_hot_cold_file_global->file_stat_count --;
 
@@ -8346,7 +8505,8 @@ static unsigned int get_file_area_from_file_stat_list_common(struct hot_cold_fil
 			/*只是令p_traverse_file_stat指向NULL，下个周期就能遍历新的file_stat，不再更新num_warm_num*/
 			//p_current_scan_file_stat_info->p_traverse_file_stat = NULL;
 			//p_current_scan_file_stat_info->p_traverse_file_area_list_head = NULL;
-			update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info,p_file_stat);
+			//update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info,p_file_stat);
+			update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info);
 		}
 
 		/*内存紧急模式，write文件经过一次内存回收，连一半的文件页都没有回收掉，那就调小writeonly_file_age_dx，使回收write文件页的age冷却周期减小*/
@@ -8432,7 +8592,8 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 	struct file_stat_base *p_file_stat_base_last = container_of(file_stat_temp_head,struct file_stat_base,hot_cold_file_list);
 	char file_stat_traverse_warm_list_num = 0;
 	char file_stat_warm_or_writeonly_file_area_check_ok = 1;
-	char rcu_read_lock_flag = 0;
+	//char rcu_read_lock_flag = 0;
+	//char file_stat_has_free_flag = 0,last_file_stat_has_free_flag = 0;
 	/* normal file_stat如果没有正常遍历file_ara，比如cache文件转成mmap文件而不遍历，cache/mmap文件因nr_pages太少导致而不遍历，或者黑名单问题
 	 * 则置1。此时如果所属文件类型的current_scan_file_stat_info->p_traverse_file_stat 不是NULL则要清NULL。否则下个周期遍历新的file_stat时，
 	 * 发现current_scan_file_stat_info->p_traverse_file_stat 不是NULL，则判定上次遍历的file_stat的file_area有问题，而panic*/
@@ -8534,6 +8695,17 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 			if(file_stat_in_delete_base(p_file_stat_base))
 				move_file_stat_to_global_delete_list(p_hot_cold_file_global,p_file_stat_base,file_type,is_cache_file);
 
+			/* 又一个内核bug:当p_current_scan_file_stat_info->p_traverse_file_stat指向的file_stat,没有遍历完warm链表的file_area。于是
+			 * 该file_stat停留在global->temp、middle、large链表尾。下个周期开始，在当前函数依然从global->temp、middle、large链表尾
+			 * 找到该file_stat。但是这个文件被iput()了。于是上边file_inode_lock()加锁失败！goto next_file_stat分支后，从
+			 * global->temp、middle、large链表尾再找靠前的新file_stat，去回收新file_stat的file_area。这就出问题了！执行到
+			 * get_file_area_from_file_stat_list_common()->file_stat_multi_level_warm_or_writeonly_list_file_area_solve()函数，
+			 * 因为要内存回收的file_stat跟p_current_scan_file_stat_info->p_traverse_file_stat不一致，属于不同的文件而crash.
+			 * 于是把normal_file_stat_no_scan置1，下边执行update_file_stat_next_multi_level_warm_or_writeonly_list()清空
+			 * p_current_scan_file_stat_info->p_traverse_file_stat*/
+			if(FILE_STAT_NORMAL == file_type)
+				normal_file_stat_no_scan = 1;
+
 			goto next_file_stat;
 		}
 
@@ -8597,7 +8769,7 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 			//rcu_read_lock();
 			//rcu_read_lock_flag = 1;
 			if(tiny_small_file_area_move_to_global_file_stat(p_hot_cold_file_global,p_file_stat_base,is_cache_file)){
-				rcu_read_lock_flag = 1;
+				//file_stat_has_free_flag = 1;
 				goto next_file_stat_unlock;
 			}
 		}
@@ -8613,8 +8785,9 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 			//rcu_read_lock_flag = 1;
 
 			p_file_stat_tiny_small = container_of(p_file_stat_base,struct file_stat_tiny_small,file_stat_base);
-			if(can_tiny_small_file_change_to_small_normal_file(p_hot_cold_file_global,p_file_stat_tiny_small,is_cache_file))
-				rcu_read_lock_flag = 1;
+			if(can_tiny_small_file_change_to_small_normal_file(p_hot_cold_file_global,p_file_stat_tiny_small,is_cache_file)){
+				//file_stat_has_free_flag = 1;
+			}
 		}
 		/* small文件的file_area个数如果超过阀值则转换成normal文件等。这个操作必须放到get_file_area_from_file_stat_list_common()
 		 * 函数里遍历该file_stat的file_area前边，以保证该文件的in_refault、in_hot、in_free属性的file_area都集中在small->other链表尾的640
@@ -8626,14 +8799,19 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 			//rcu_read_lock_flag = 1;
 
 			p_file_stat_small = container_of(p_file_stat_base,struct file_stat_small,file_stat_base);
-			if(can_small_file_change_to_normal_file(p_hot_cold_file_global,p_file_stat_small,is_cache_file))
-				rcu_read_lock_flag = 1;
+			if(can_small_file_change_to_normal_file(p_hot_cold_file_global,p_file_stat_small,is_cache_file)){
+				//file_stat_has_free_flag = 1;
+			}
 		}
 		else{
 			if(FILE_STAT_NORMAL == file_type){
 				p_file_stat = container_of(p_file_stat_base, struct file_stat, file_stat_base);
 				file_stat_traverse_warm_list_num = p_file_stat->traverse_warm_list_num;
 			}
+                        //count writeonly file free pages
+			if(file_stat_in_writeonly_base(p_file_stat_base))
+				p_hot_cold_file_global->writeonly_file_all_free_pages += p_file_stat_base->mapping->nrpages;
+
 			/*否则，normal、small、tiny small这3大类文件，按照标准流程处理他们的各种file_area*/
 			scan_file_area_count += get_file_area_from_file_stat_list_common(p_hot_cold_file_global,p_file_stat_base,&scan_file_area_max,file_stat_list_type,file_type,is_cache_file);
 			/*如果遍历过的file_stat的warm链表上的file_area被遍历完成了，p_file_stat->traverse_warm_list_num就会更新，file_stat_warm_or_writeonly_file_area_check_ok是1，否则0*/
@@ -8658,8 +8836,9 @@ next_file_stat:
 			if(warm_list_printk)
 				printk("%s file_stat:0x%llx status 0x%x normal_file_stat_no_scan\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
 
-			/*p_current_scan_file_stat_info->p_traverse_file_stat设置为NULL，下次遍历file_stat直接从链表尾file_stat开始遍历*/
-			update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info,p_file_stat);
+			/*p_current_scan_file_stat_info->p_traverse_file_stat设置为NULL，下次直接从global->temp、middle、large链表尾file_stat开始遍历*/
+			//update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info,p_file_stat);
+			update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info);
 
 			normal_file_stat_no_scan = 0;
 		}
@@ -8701,18 +8880,46 @@ next_file_stat:
 		/* rcu_read_lock_flag是1，说明tiny_small可能转成normal file_stat而被rcu异步释放掉了。但是由于提前rcu_read_lock了，
 		 * 不用担心file_stat会被立即释放掉。于是这里才rcu_read_unlock，然后file_stat才会被真正释放掉。
 		 * 到这里100%确保file_stat不会再被使用，再放开rcu，然后file_stat才会被真正释放掉*/
-		if(rcu_read_lock_flag){
+		/*if(rcu_read_lock_flag){
 			rcu_read_lock_flag = 0;
 			rcu_read_unlock();
-		}
+		}*/
+		/* 上边判定该file_stat不再使用而需要释放了，标记了in_replace标记，这里等该file_stat不再被使用。if判定条件需要file_stat_has_free_flag标记，
+		 * 而不是file_stat_in_replaced_file_base标记。否则这里因为file_stat有in_replace标记，real_rcu_free_file_stat()释放一次file_stat。等执行到
+		 * 该函数最后，再因为file_stat有in_replace标记，再释放一次file_stat!!!!!!!*/
+		/*if(file_stat_has_free_flag/ *&& file_stat_in_replaced_file_base(p_file_stat_base)* /){
+			if(!file_stat_in_replaced_file_base(p_file_stat_base))
+				panic("%s:file_stat:0x%llx not in_replace status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+			//file_stat_has_free_flag = 0;
+			real_rcu_free_file_stat(p_file_stat_base,file_type);
+		}*/
 
 		/* 必须把赋值放到for循环最后，目的是：如果上边break跳出了for循环，p_file_stat_base_last此时才真的是上一次循环遍历到的file_stat。
 		 * 但是有个新的问题，如果file_stat被转成mmap file_stat了，file_stat在temp、middel、large之间发生变化移动到了新的链表，
 		 * 此时下边list_move_enhance()该p_file_stat_base_last就是无效的了，不会再把它之后的遍历的file_stat移动到链表头了*/
+		/*但是如果p_file_stat_base在上边已经被real_rcu_free_file_stat()释放了，下边p_file_stat_base_last = p_file_stat_base赋值，
+		 然后因为p_file_stat_base是链表头的第一个file_stat而结束便利，此时p_file_stat_base_last = p_file_stat_base都不能再使用，
+		 指向同一个file_stat,并且在上边已经被释放掉了。此时结束循环后，发现
+		 if(p_file_stat_base_last == p_file_stat_base && file_stat_in_replaced_file_base(p_file_stat_base))，直接goto out;不行，此时p_file_stat_base
+		 已经释放了，不能使用file_stat_in_replaced_file_base(p_file_stat_base)了*/		
+		/*还有一种情况，p_file_stat_base在上边执行real_rcu_free_file_stat释放了，然后p_file_stat_base_last = p_file_stat_base赋值。
+		 * 然后遍历到新的file_stat_base，因为scan_file_area超过max而break结束循环。此时p_file_stat_base有效，p_file_stat_base_last
+		 * 已经释放了，不能再用了。但是下边会执行p_file_stat_base = p_file_stat_base_last赋值，使用已经释放掉的p_file_stat_base_last！！！！！*/
+		/* 因此，循环结束后p_file_stat_base和p_file_stat_base_last这两file_stat都可能已经释放了，即便使用的最新的方案:file_stat_has_free_flag和
+		 * real_rcu_free_file_stat，也不能避免这个问题。最后我决定，在get_file_area_from_file_stat_list()和file_stat_has_zero_file_area_manage()
+		 * 函数不再释放file_stat了！！！而只是把要释放的file_stat从原链表移动到global->file_stat_free_list链表。然后异步内存回收线程最后，
+		 * 肯定没人使用这些file_stat了，再遍历global->file_stat_free_list链表，取出这些file_stat,一个个释放掉。后续再遇到要释放的file_stat,都
+		 * 不能直接释放掉，而是先移动到global->file_stat_free_list链表，再异步内存回收线程最后，再释放这些file_stat.*/
 		p_file_stat_base_last = p_file_stat_base;
 	}
 	if(file_stat_delete_lock)
 		file_stat_delete_protect_test_unlock(1);
+
+	/* 如果上边循环，遍历到链表头的p_file_stat_base，被转换成其他file_stat而被标记in_replace,然后执行real_rcu_free_file_stat()释放了。上边for循环最后，
+	 * p_file_stat_base_last = p_file_stat_base赋值，然后就结束循环。此时直接goto out，此时p_file_stat_base已经释放了，不能再用了*/
+	/*if(p_file_stat_base_last == p_file_stat_base && file_stat_in_replaced_file_base(p_file_stat_base))
+		goto out;*/
 
 	/*当前p_file_stat_base的warm链表上的file_area还没有遍历完，只是把它后边的遍历过的file_stat移动到链表头*/
 	if(FILE_STAT_NORMAL == file_type && !file_stat_warm_or_writeonly_file_area_check_ok){
@@ -8817,7 +9024,8 @@ next_file_stat:
 
 					printk("%s file_stat:0x%llx status 0x%x move to head fail\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
 					/*p_current_scan_file_stat_info->p_traverse_file_stat设置为NULL，下次遍历file_stat直接从链表尾file_stat开始遍历*/
-					update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info,p_file_stat);
+					//update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info,p_file_stat);
+					update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info);
 				}
 			}
 		}
@@ -8830,12 +9038,18 @@ next_file_stat:
 	
 	/* rcu_read_lock_flag是1，说明上边遍历的最后一个file_stat，可能由于tiny_small可能转成normal file_stat而被rcu异步释放掉了
 	 * 。但是由于提前rcu_read_lock了，不用担心file_stat会被立即释放掉。于是这里才rcu_read_unlock，然后file_stat才会被真正释放掉*/
-	if(rcu_read_lock_flag){
+	/*if(rcu_read_lock_flag){
 		rcu_read_lock_flag = 0;
 		rcu_read_unlock();
+	}*/
+	/*if(file_stat_has_free_flag/ *&& file_stat_in_replaced_file_base(p_file_stat_base)* /){
+		if(!file_stat_in_replaced_file_base(p_file_stat_base))
+			panic("%s:file_stat:0x%llx not in_replace status:0x%x\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+
+		file_stat_has_free_flag = 0;
+		real_rcu_free_file_stat(p_file_stat_base,file_type);
 	}
-
-
+out:*/
 	if(shrink_page_printk_open1)
 		printk("3:%s %s %d p_hot_cold_file_global:0x%llx scan_file_stat_count:%d scan_file_area_count:%d real_scan_file_stat_count:%d\n",__func__,current->comm,current->pid,(u64)p_hot_cold_file_global,scan_file_stat_count,scan_file_area_count,/*scan_cold_file_area_count,file_stat_count_in_cold_list*/real_scan_file_stat_count);
 
@@ -8847,6 +9061,35 @@ next_file_stat:
 	//p_hot_cold_file_global->hot_cold_file_shrink_counter.scan_delete_file_stat_count += scan_delete_file_stat_count;
 
 	return scan_file_area_count;
+}
+static void reduce_scan_file_area_max(struct memory_reclaim_param *p_memory_reclaim_param,char is_cache_file,char file_area_count_factor)
+{
+	if(0 == file_area_count_factor)
+		printk(KERN_EMERG"%s reclaim_too_small_pages_because_of_writeonly_file_dirty_pages reduce scan_file_area_max is_cache_file:%d!!!!!!!!!\n",__func__,is_cache_file);
+
+	if(is_cache_file){
+		p_memory_reclaim_param->scan_tiny_small_file_area_max  = (64 << file_area_count_factor);
+		p_memory_reclaim_param->scan_small_file_area_max  = (64 << file_area_count_factor);
+		p_memory_reclaim_param->scan_temp_file_area_max   = (64 << file_area_count_factor);
+		p_memory_reclaim_param->scan_middle_file_area_max = (96 << file_area_count_factor);
+		p_memory_reclaim_param->scan_large_file_area_max  = (96 << file_area_count_factor);
+		p_memory_reclaim_param->scan_writeonly_file_area_max  = (96 << file_area_count_factor);
+
+		p_memory_reclaim_param->scan_hot_file_area_max = 32;
+		p_memory_reclaim_param->scan_global_file_area_max_for_memory_reclaim = (64 << file_area_count_factor);
+		p_memory_reclaim_param->scan_global_file_stat_file_area_max = (64 << file_area_count_factor);
+	}else{
+		p_memory_reclaim_param->scan_tiny_small_file_area_max  = (64 << file_area_count_factor);
+		p_memory_reclaim_param->scan_small_file_area_max  = (64 << file_area_count_factor);
+		p_memory_reclaim_param->scan_temp_file_area_max   = (64 << file_area_count_factor);
+		p_memory_reclaim_param->scan_middle_file_area_max = (64 << file_area_count_factor);
+		p_memory_reclaim_param->scan_large_file_area_max  = (64 << file_area_count_factor);
+
+		p_memory_reclaim_param->scan_hot_file_area_max = 32;
+		p_memory_reclaim_param->mapcount_file_area_max = 32;
+		p_memory_reclaim_param->scan_global_file_area_max_for_memory_reclaim = (64 << file_area_count_factor);
+		p_memory_reclaim_param->scan_global_file_stat_file_area_max = (64 << file_area_count_factor);
+	}
 }
 static void memory_reclaim_param_solve(struct hot_cold_file_global *p_hot_cold_file_global,struct memory_reclaim_param *p_memory_reclaim_param,char is_cache_file)
 {
@@ -9107,10 +9350,32 @@ static noinline void walk_throuth_all_file_area(struct hot_cold_file_global *p_h
 	MULTI_LEVEL_FILE_AREA_PRINTK("global_age:%d reclaim_pages_target:%d alreay_reclaim_pages:%d memory_pressure_level:%d memory_still_memrgency_after_reclaim:%d scan_temp_file_stat_max:%d scan_temp_file_area_max:%d scan_middle_file_stat_max:%d scan_middle_file_area_max:%d scan_large_file_stat_max:%d scan_large_file_area_max:%d scan_hot_file_area_max:%d file_area_temp_to_cold_age_dx:%d file_area_hot_to_temp_age_dx:%d file_area_refault_to_temp_age_dx:%d mapcount_file_area_max:%d scan_large_file_area_max:%d scan_large_file_stat_max:%d\n",p_hot_cold_file_global->global_age,p_hot_cold_file_global->reclaim_pages_target,p_hot_cold_file_global->alreay_reclaim_pages,p_hot_cold_file_global->memory_pressure_level,p_hot_cold_file_global->memory_still_memrgency_after_reclaim,param->scan_temp_file_stat_max,param->scan_temp_file_area_max,param->scan_middle_file_stat_max,param->scan_middle_file_area_max,param->scan_large_file_stat_max,param->scan_large_file_area_max,param->scan_hot_file_area_max,p_hot_cold_file_global->file_area_temp_to_cold_age_dx,p_hot_cold_file_global->file_area_hot_to_temp_age_dx,p_hot_cold_file_global->file_area_refault_to_temp_age_dx,param->mapcount_file_area_max,param->scan_large_file_area_max,param->scan_large_file_stat_max);
 
 	if(is_cache_file){
-
+		unsigned int reclaim_pages_from_writeonly_file;
+		p_hot_cold_file_global->writeonly_file_all_free_pages = 0;
+		p_hot_cold_file_global->reclaim_too_small_pages_because_of_writeonly_file_dirty_pages = 0;
 		/*优先回收writeonly文件页*/
 		scan_cold_file_area_count += get_file_area_from_file_stat_list(p_hot_cold_file_global,param->scan_writeonly_file_area_max,param->scan_writeonly_file_stat_max, 
 				&p_hot_cold_file_global->file_stat_writeonly_file_head,F_file_stat_in_file_stat_writeonly_file_head_list,FILE_STAT_NORMAL,is_cache_file);
+		/* if wrteonly file pages too much,but recliam pages too small.indicate  the writeonly file has just been writen and dirty pages have not been flushed to disk yet.
+		 * so when scanning other files below,the number of scans was significantly reduced ,end scan quickly.to achieve the goal: scan writeonly file again quickly,
+		 * reclaim much page from writeonly file*/
+		reclaim_pages_from_writeonly_file = p_hot_cold_file_global->all_reclaim_pages_one_period;
+		/* 内存紧张并且有很多writeonly文件的脏页*/
+		if(!IS_MEMORY_ENOUGH(p_hot_cold_file_global) && p_hot_cold_file_global->writeonly_file_all_free_pages > 2560){
+			/*有很多脏页但是上边从writeonly文件回收的page很少*/
+			if(reclaim_pages_from_writeonly_file < (p_hot_cold_file_global->writeonly_file_all_free_pages >> 1)){
+				/*首先唤醒脏页回写进程刷脏页刷脏页，其实更好的办法是检测到有很多writeonly文件脏页时，再wakeup_flusher_threads唤醒*/
+				wakeup_flusher_threads(WB_REASON_VMSCAN);
+				p_hot_cold_file_global->reclaim_too_small_pages_because_of_writeonly_file_dirty_pages = 1;
+			}
+		}
+
+		/*writeonly文件有大量pagecache但是脏页太多导致没有回收掉，减少其他文件file_area的scan个数。尽快结束本轮扫描，快速开始下一轮扫描，重新回收writeonly文件的pagecache*/
+		if(p_hot_cold_file_global->reclaim_too_small_pages_because_of_writeonly_file_dirty_pages)
+			reduce_scan_file_area_max(&memory_reclaim_param,is_cache_file,0);
+		else if(enable_low_cpu_consumption)/*针对安卓系统，正常情况也减少scan的file_area个数，减少cpu损耗。先这么测试看看效果*/
+			reduce_scan_file_area_max(&memory_reclaim_param,is_cache_file,1);
+
 
 		/*针对writeonly文件内存回收，内存已经充足，不再继续内存回收。以为只要内存回收就加大内存回收的概率。但现在引入多层warm机制了，可以放开回收了*/
 /*#if 0
@@ -9206,6 +9471,12 @@ tiny_small_file_change_solve:
 		/*在change_global_age_dx()基础上，针对mmap文件增大age_dx，以使mmap的文件页page更不容易回收*/
 		change_global_age_dx_for_mmap_file(p_hot_cold_file_global);
 
+		/*writeonly文件有大量pagecache但是脏页太多导致没有回收掉，减少其他文件file_area的scan个数。尽快结束本轮扫描，快速开始下一轮扫描，重新回收writeonly文件的pagecache*/
+		if(p_hot_cold_file_global->reclaim_too_small_pages_because_of_writeonly_file_dirty_pages)
+			reduce_scan_file_area_max(&memory_reclaim_param,is_cache_file,0);
+		else if(enable_low_cpu_consumption)/*针对安卓系统，正常情况也减少scan的file_area个数，减少cpu损耗。先这么测试看看效果*/
+			reduce_scan_file_area_max(&memory_reclaim_param,is_cache_file,1);
+
 		scan_cold_file_area_count += file_stat_multi_level_warm_or_writeonly_list_file_area_solve(p_hot_cold_file_global,&p_hot_cold_file_global->global_mmap_file_stat.current_scan_file_stat_info,&p_hot_cold_file_global->global_mmap_file_stat.file_stat.file_stat_base,&param->scan_global_file_stat_file_area_max,is_cache_file,param->scan_global_file_area_max_for_memory_reclaim);
 
 		/*往往在回收过cache文件后，内存压力就不大了，暂时决定mmap文件不再goto mmap_tiny_small_file_change_solve，但是
@@ -9266,7 +9537,7 @@ tiny_small_file_change_solve:
 
 	/*global mapcount链表上的files_stat的处理*/
 	if(0 == is_cache_file){     
-        scan_mmap_mapcount_file_stat(p_hot_cold_file_global,param->mapcount_file_area_max);
+		scan_mmap_mapcount_file_stat(p_hot_cold_file_global,param->mapcount_file_area_max);
 	}
 
 	if(0 == test_bit(ASYNC_MEMORY_RECLAIM_ENABLE, &async_memory_reclaim_status))
@@ -9352,7 +9623,9 @@ tiny_small_file_change_solve:
 	//打印内存回收时统计的各个参数
 	if(shrink_page_printk_open1)
 		printk_shrink_param(p_hot_cold_file_global,NULL,0);
-
+         
+	/*在异步内存回收线程最后，再释放掉get_file_area_from_file_stat_list()和file_stat_has_zero_file_area_manage()原本要释放掉的无效file_stat，此时肯定没人用它们了*/
+	real_rcu_free_file_stat(p_hot_cold_file_global);
 	//return 0;
 }
 /*6.12内核sysctl_extfrag_threshold不再是全局变量，这里单独定义*/
@@ -9599,7 +9872,20 @@ out:
 
 	return memory_pressure_level;
 }
-
+void static set_task_high_prio_and_timer_slack_zero(void)
+{
+	struct sched_param param = { .sched_priority = 1 };
+	sched_setscheduler(current, SCHED_FIFO, &param);  // 轻量实时优先级
+							  
+	current->timer_slack_ns = 0;//禁止msleep、schedule_timeout等函数调用被推迟唤醒
+}
+void static my_sleep_ms(unsigned int ms)
+{
+	//ktime_t timeout = ktime_set(0, ms * 1000000);
+	ktime_t timeout = ktime_set(0, 10000000);
+	set_current_state(TASK_INTERRUPTIBLE);
+	schedule_hrtimeout(&timeout, HRTIMER_MODE_REL);
+}
 #define IDLE_MAX 3
 int hot_cold_file_thread(void *p){
 	struct hot_cold_file_global *p_hot_cold_file_global = (struct hot_cold_file_global *)p;
@@ -9608,8 +9894,9 @@ int hot_cold_file_thread(void *p){
 	unsigned long timeout;
 	int memory_pressure_level = 0;
 	/*设置为IDLE_MAX是为了第一次就能扫描文件file_stat，主要是为了扫描so、可执行文件 这种现在是mmap文件但最初被判定为cache文件*/
-	int idle_age_count = IDLE_MAX;
+	//int idle_age_count = IDLE_MAX;
 
+	set_task_high_prio_and_timer_slack_zero();
 	while(!kthread_should_stop()){
 		/*sleep_count = 0;
 		while(++sleep_count < p_hot_cold_file_global->global_age_period){
@@ -9623,10 +9910,13 @@ int hot_cold_file_thread(void *p){
 				memory_pressure_level = check_memory_reclaim_necessary(p_hot_cold_file_global,0);
 				if(memory_pressure_level >= MEMORY_PRESSURE_RECLAIM){
 					p_hot_cold_file_global->memory_pressure_level = memory_pressure_level;
+					/*首先唤醒脏页回写进程刷脏页刷脏页，其实更好的办法是检测到有很多writeonly文件脏页时，再wakeup_flusher_threads唤醒*/
+					//wakeup_flusher_threads(WB_REASON_VMSCAN);
 					wake_up_process(p_hot_cold_file_global->async_memory_reclaim);
 				}
 			}
-			msleep(10);
+			//msleep(10);msleep 休眠精度有问题，竟然遇到一次msleep休眠1.6s的情况
+			my_sleep_ms(10);
 		}while(time_before(jiffies,timeout));
 
 		//每个周期global_age加1
@@ -9638,12 +9928,13 @@ int hot_cold_file_thread(void *p){
 
 		/*检测内存紧张状态，并在内存紧张时计算要回收的page数到reclaim_pages_target*/
 		memory_pressure_level = check_memory_reclaim_necessary(p_hot_cold_file_global,1);
-		/*不用内存回收*/
-		if(MEMORY_IDLE_SCAN == memory_pressure_level){
+		/* 不用内存回收.no use.when memory  enough,MEMORY_IDLE_SCAN.this if prevent move writeonly file from global->tiny_small_file_stat list to global->writeonly list.
+		 * result can not recliam mcuh memroy from global->writeonly list */
+		/*if(MEMORY_IDLE_SCAN == memory_pressure_level){
 			if(++idle_age_count < IDLE_MAX)
 				continue;
 		}
-		idle_age_count = 0;
+		idle_age_count = 0;*/
 
 		if(test_bit(ASYNC_MEMORY_RECLAIM_ENABLE, &async_memory_reclaim_status)){
 			/*内存回收前记录memory_pressure_level*/	
@@ -9662,6 +9953,7 @@ int async_memory_reclaim_main_thread(void *p){
 	//int check_memory_enough_count = 0;
 	char not_reclaim_target_pages;
 
+	set_task_high_prio_and_timer_slack_zero();
 	while(!kthread_should_stop()){
 		/*清空上一轮内存回收统计参数*/
 		//memset(&p_hot_cold_file_global->hot_cold_file_shrink_counter,0,sizeof(struct hot_cold_file_shrink_counter));
@@ -9675,6 +9967,7 @@ int async_memory_reclaim_main_thread(void *p){
 		repeat_reclaim = 0;
 		repeat_reclaim_all = 0;
 		p_hot_cold_file_global->memory_still_memrgency_after_reclaim = 0;
+		p_hot_cold_file_global->reclaim_too_small_pages_because_of_writeonly_file_dirty_pages = 0;
 
 direct_reclaim:
 		//memory_pressure_emergecy = IS_IN_MEMORY_EMERGENCY_RECLAIM(p_hot_cold_file_global); 

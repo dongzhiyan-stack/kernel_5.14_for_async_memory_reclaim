@@ -56,6 +56,37 @@
 #include "async_memory_reclaim_for_cold_file_area.h"
 
 /*****proc文件系统**********************************************************************************************************************/
+// enable_low_cpu_consumption
+static int  enable_low_cpu_consumption_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "%d\n", enable_low_cpu_consumption);
+	return 0;
+}
+static int  enable_low_cpu_consumption_open(struct inode *inode, struct file *file)
+{
+	return single_open(file,  enable_low_cpu_consumption_show, NULL);
+}
+static ssize_t  enable_low_cpu_consumption_write(struct file *file,
+				const char __user *buffer, size_t count, loff_t *ppos)
+{
+	int rc;
+	unsigned int val;
+	rc = kstrtouint_from_user(buffer, count, 10,&val);
+	if (rc)
+		return rc;
+
+	enable_low_cpu_consumption = val;
+
+	return count;
+}
+static const struct proc_ops  enable_low_cpu_consumption_fops = {
+	.proc_open		=  enable_low_cpu_consumption_open,
+	.proc_read		= seq_read,
+	.proc_lseek     = seq_lseek,
+	.proc_release	= single_release,
+	.proc_write		=  enable_low_cpu_consumption_write,
+};
+
 // multi_level_file_area_printk
 static int  multi_level_file_area_printk_show(struct seq_file *m, void *v)
 {
@@ -1909,6 +1940,12 @@ static int hot_cold_file_proc_init(struct hot_cold_file_global *p_hot_cold_file_
 		return -1;
 	}
 
+	p = proc_create("enable_low_cpu_consumption", S_IRUGO | S_IWUSR, hot_cold_file_proc_root,&enable_low_cpu_consumption_fops);
+	if (!p){
+		printk("enable_low_cpu_consumption fail\n");
+		return -1;
+	}
+
 	return 0;
 }
 /*static int hot_cold_file_proc_exit(struct hot_cold_file_global *p_hot_cold_file_global)
@@ -2170,6 +2207,10 @@ static int __init hot_cold_file_init(void)
 	hot_cold_file_global_info.to_writeonly_cold_list_age_dx = 180;
 	
 	hot_cold_file_global_info.memory_zone_solve_age_order = 1;
+
+	INIT_LIST_HEAD(&hot_cold_file_global_info.tiny_small_file_stat_free_list_temp);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.small_file_stat_free_list_temp);
+	INIT_LIST_HEAD(&hot_cold_file_global_info.file_stat_free_list_temp);
 
 	hot_cold_file_global_info.async_memory_reclaim = kthread_run(async_memory_reclaim_main_thread,&hot_cold_file_global_info, "async_memory_reclaim");
 	if (IS_ERR(hot_cold_file_global_info.async_memory_reclaim)) {
