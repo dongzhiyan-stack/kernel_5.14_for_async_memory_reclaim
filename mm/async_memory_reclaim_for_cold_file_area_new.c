@@ -103,7 +103,7 @@
 /*文件file_stat长时间没有被访问，则对file_stat->refault_page_count清0*/
 #define FILE_STAT_REFAULT_PAGE_COUNT_CLEAR_AGE_DX 300
 struct hot_cold_file_global hot_cold_file_global_info = {
-	.support_fs_type = -1,
+	.support_fs_type = SUPPORT_FS_ALL,
 };
 /*默认不使能异步内存回收，命令行惨数探测到支持的文件系统后再置1*/
 unsigned long async_memory_reclaim_status = 0;
@@ -828,7 +828,8 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 		 * 函数有详细介绍。!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 		 **/
 		//p_file_stat_base_del->mapping->rh_reserved1 = 0;
-		p_file_stat_base_del->mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;/*原来赋值0，现在赋值1，原理一样*/
+		//p_file_stat_base_del->mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;/*原来赋值0，现在赋值1，原理一样*/
+		set_mapping_reserved_for_file_stat(p_file_stat_base_del->mapping,SUPPORT_FILE_AREA_INIT_OR_DELETE);
 		smp_wmb();
 		p_file_stat_base_del->mapping = NULL;
 	}
@@ -874,7 +875,8 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 			hot_cold_file_global_info.file_stat_count --;
 		}
 		else{
-			mapping->rh_reserved1 = 0;
+			//mapping->rh_reserved1 = 0;
+			set_mapping_reserved_for_file_stat(mapping,0);
 			p_file_stat_base_del->mapping = NULL;
 			/*避免spin lock时有printk打印*/
 			spin_unlock_irq(&hot_cold_file_global_info.global_lock);
@@ -896,7 +898,8 @@ int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,st
 			hot_cold_file_global_info.mmap_file_stat_count --;
 		}
 		else{
-			mapping->rh_reserved1 = 0;
+			//mapping->rh_reserved1 = 0;
+			set_mapping_reserved_for_file_stat(mapping,0);
 			p_file_stat_base_del->mapping = NULL;
 			/*避免spin lock时有printk打印*/
 			spin_unlock_irq(&hot_cold_file_global_info.mmap_file_global_lock);
@@ -921,7 +924,8 @@ err:
 
 	/* rcu延迟释放file_stat结构。call_rcu()里有smp_mb()内存屏障。但如果mapping->rh_reserved1是0了，说明上边
 	 * 没有执行list_del_rcu(&p_file_stat_del->hot_cold_file_list)，那这里不能执行call_rcu()*/
-	if(mapping->rh_reserved1){
+	//if(mapping->rh_reserved1){
+	if(get_mapping_reserved_for_file_stat(mapping)){
 			
 		/*file_stat被rcu异步释放了，但是提前rcu_read_lock了，这里置1，等到确定file_stat不会被释放再rcu_read_unlock放开。
 		 *注意，这个rcu_read_lock()很重要。因为调用cold_file_stat_delete()的地方，还会使用该file_stat。因此这里这里
@@ -1108,7 +1112,8 @@ static noinline void __destroy_inode_handler_post(struct inode *inode)
 		//struct file_stat *p_file_stat = NULL;
 		//struct file_stat_small *p_file_stat_small = NULL;
 		//struct file_stat_tiny_small *p_file_stat_tiny_small = NULL;
-		struct file_stat_base *p_file_stat_base = (struct file_stat_base *)inode->i_mapping->rh_reserved1;
+		//struct file_stat_base *p_file_stat_base = (struct file_stat_base *)inode->i_mapping->rh_reserved1;
+		struct file_stat_base *p_file_stat_base = (struct file_stat_base *)get_mapping_reserved_for_file_stat(inode->i_mapping);
 
 		unsigned int file_stat_type = get_file_stat_type_file_iput(p_file_stat_base);
 
@@ -1144,7 +1149,8 @@ static noinline void __destroy_inode_handler_post(struct inode *inode)
 		if(file_stat_in_cache_file_base(p_file_stat_base)){
 
 			/*该文件的file_area都移动到了global_file_stat的链表了，直接goto err，把mapping->rh_reserved1清0。*/
-			if(inode->i_mapping->rh_reserved1 == (u64)(&hot_cold_file_global_info.global_file_stat.file_stat.file_stat_base)){
+			//if(inode->i_mapping->rh_reserved1 == (u64)(&hot_cold_file_global_info.global_file_stat.file_stat.file_stat_base)){
+			if(get_mapping_reserved_for_file_stat(inode->i_mapping) == (u64)(&hot_cold_file_global_info.global_file_stat.file_stat.file_stat_base)){
                 goto err;
 			}
 			/* 又遇到一个重大的隐藏bug。如果当前文件文件页page全释放后还是长时间没访问，此时异步内存回收线程正好执行
@@ -1198,7 +1204,8 @@ static noinline void __destroy_inode_handler_post(struct inode *inode)
 				/*如果到这份分支，说明file_stat先被异步内存回收线程执行cold_file_stat_delete()标记delete了，
 				 *为了安全要再对inode->i_mapping->rh_reserved1清0一次，详情cold_file_stat_delete()也有解释。
 				 现在用了file_inode_lock后，这种情况已经不可能了，但代码还是保留一下吧*/
-				inode->i_mapping->rh_reserved1 = 0;
+				//inode->i_mapping->rh_reserved1 = 0;
+				set_mapping_reserved_for_file_stat(inode->i_mapping,0);
 				/*避免spin lock时有printk打印*/
 				spin_unlock_irq(&hot_cold_file_global_info.global_lock);
 				printk("%s p_file_stat:0x%llx status:0x%x already delete\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
@@ -1212,7 +1219,8 @@ static noinline void __destroy_inode_handler_post(struct inode *inode)
 mmap_file_solve:
 
 			/*该文件的file_area都移动到了global_file_stat的链表了，直接goto err，把mapping->rh_reserved1清0。*/
-			if(inode->i_mapping->rh_reserved1 == (u64)(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base)){
+			//if(inode->i_mapping->rh_reserved1 == (u64)(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base)){
+			if(get_mapping_reserved_for_file_stat(inode->i_mapping) == (u64)(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base)){
                 goto err;
 			}
 
@@ -1247,7 +1255,8 @@ mmap_file_solve:
 				}
 			}
 			else{
-				inode->i_mapping->rh_reserved1 = 0;
+				//inode->i_mapping->rh_reserved1 = 0;
+				set_mapping_reserved_for_file_stat(inode->i_mapping,0);
 				spin_unlock_irq(&hot_cold_file_global_info.mmap_file_global_lock);
 				printk("%s p_file_stat:0x%llx status:0x%x already delete\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
 				goto err;
@@ -1262,7 +1271,8 @@ err:
 		 *file_stat有in_delete标记*/
 		smp_wmb();
 		/*必须保证即便该函数走了error分支，也要执行该赋值*/
-		inode->i_mapping->rh_reserved1 = 0;
+		//inode->i_mapping->rh_reserved1 = 0;
+		set_mapping_reserved_for_file_stat(inode->i_mapping,0);
 
 		if(shrink_page_printk_open1)
 			FILE_AREA_PRINT("%s file_stat:0x%llx iput delete !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_stat_base);
@@ -1278,10 +1288,12 @@ void disable_mapping_file_area(struct inode *inode)
 	if(IS_SUPPORT_FILE_AREA_READ_WRITE(inode->i_mapping))
 		__destroy_inode_handler_post(inode);
 	else
-		inode->i_mapping->rh_reserved1 = 0;
+		set_mapping_reserved_for_file_stat(inode->i_mapping,0);
+		//inode->i_mapping->rh_reserved1 = 0;
 
 	/*mapping->rh_reserved1不为NULL就crash，正常情况不可能，但是尤其是引入global_file_stat后，为了安全还是加入这个NULL判断*/
-	if(inode->i_mapping->rh_reserved1)
+	//if(inode->i_mapping->rh_reserved1)
+	if(get_mapping_reserved_for_file_stat(inode->i_mapping))
 		panic("0x%llx",(u64)inode);
 }
 EXPORT_SYMBOL(disable_mapping_file_area);
@@ -7268,7 +7280,8 @@ inline static void old_file_stat_wait_print_file_stat(struct file_stat_base *p_f
 }
 inline static void old_file_stat_change_to_new(struct file_stat_base *p_file_stat_base_old,struct file_stat_base *p_file_stat_base_new)
 {
-	WRITE_ONCE(p_file_stat_base_old->mapping->rh_reserved1,  (unsigned long)p_file_stat_base_new);
+	//WRITE_ONCE(p_file_stat_base_old->mapping->rh_reserved1,  (unsigned long)p_file_stat_base_new);
+	set_mapping_reserved_for_file_stat(p_file_stat_base_old->mapping,(unsigned long)p_file_stat_base_new);
 	smp_wmb();
 	/* 加这个synchronize_rcu()是为了保证此时正读写文件，执行__filemap_add_folio->file_area_alloc_and_init()的进程
 	 * 退出rcu宽限期，等新的进程再来，看到的该文件的mapping->rh_reserved1一定是新的file_area，老的file_stat就不会
@@ -7807,7 +7820,8 @@ static unsigned int tiny_small_file_area_move_to_global_file_stat(struct hot_col
 		  list_splice_init(&p_file_stat_base->file_area_temp,&p_hot_cold_file_global->global_file_stat.file_area_warm);
 		  spin_unlock(&p_file_stat_base->file_stat_lock);*/
 
-		WRITE_ONCE(p_file_stat_base->mapping->rh_reserved1, (u64)(&p_hot_cold_file_global->global_file_stat.file_stat.file_stat_base));
+		//WRITE_ONCE(p_file_stat_base->mapping->rh_reserved1, (u64)(&p_hot_cold_file_global->global_file_stat.file_stat.file_stat_base));
+		set_mapping_reserved_for_file_stat(p_file_stat_base->mapping,(u64)(&p_hot_cold_file_global->global_file_stat.file_stat.file_stat_base));
 		p_global_lock = &p_hot_cold_file_global->global_lock;
 		p_global_file_stat = &p_hot_cold_file_global->global_file_stat;
 	}else{
@@ -7815,7 +7829,8 @@ static unsigned int tiny_small_file_area_move_to_global_file_stat(struct hot_col
 		  list_splice_init(&p_file_stat_base->file_area_temp,&p_hot_cold_file_global->global_mmap_file_stat.file_area_warm);
 		  spin_unlock(&p_file_stat_base->file_stat_lock);*/
 
-		WRITE_ONCE(p_file_stat_base->mapping->rh_reserved1, (u64)(&p_hot_cold_file_global->global_mmap_file_stat.file_stat.file_stat_base));
+		//WRITE_ONCE(p_file_stat_base->mapping->rh_reserved1, (u64)(&p_hot_cold_file_global->global_mmap_file_stat.file_stat.file_stat_base));
+		set_mapping_reserved_for_file_stat(p_file_stat_base->mapping,(u64)(&p_hot_cold_file_global->global_mmap_file_stat.file_stat.file_stat_base));
 		p_global_lock = &p_hot_cold_file_global->mmap_file_global_lock;
 		p_global_file_stat = &p_hot_cold_file_global->global_mmap_file_stat;
 	}

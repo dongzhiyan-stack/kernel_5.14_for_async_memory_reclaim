@@ -482,8 +482,8 @@ struct address_space {
 	struct list_head	i_private_list;
 	struct rw_semaphore	i_mmap_rwsem;
 	void *			i_private_data;
-	unsigned long rh_reserved1;
-	unsigned long rh_reserved2;
+	unsigned long rh_reserved3;
+	unsigned long rh_reserved4;
 } __attribute__((aligned(sizeof(long)))) __randomize_layout;
 	/*
 	 * On most architectures that alignment is already the case; but

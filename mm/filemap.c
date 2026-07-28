@@ -521,8 +521,9 @@ find_file_area:
 		page = xas_find(&xas, max);
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(page)){
-		    if(0 == mapping->rh_reserved1)
-			panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
+		    //if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
+				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 		    printk("%s find folio:0x%llx\n",__func__,(u64)page);
 		    //goto 前rcu必须解锁
@@ -699,7 +700,8 @@ find_file_area:
 	xas_for_each(&xas, page, max) {
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(page)){
-			if(0 == mapping->rh_reserved1)
+			//if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
 				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 			printk("%s find page:0x%llx\n",__func__,(u64)page);
@@ -1893,7 +1895,8 @@ find_file_area:
 		void *entry = xas_next(&xas);
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(entry)){
-			if(0 == mapping->rh_reserved1)
+			//if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
 				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 			printk("%s find folio:0x%llx\n",__func__,(u64)entry);
@@ -1948,7 +1951,8 @@ find_file_area:
 		void *entry = xas_prev(&xas);
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(entry)){
-			if(0 == mapping->rh_reserved1)
+			//if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
 				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 			printk("%s find folio:0x%llx\n",__func__,(u64)entry);
@@ -2044,7 +2048,8 @@ repeat:
 	folio = xas_load(&xas);
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 	if(is_file_area_entry(folio)){
-		if(0 == mapping->rh_reserved1)
+		//if(0 == mapping->rh_reserved1)
+		if(0 == get_mapping_reserved_for_file_stat(mapping))
 			panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 		printk("%s find folio:0x%llx\n",__func__,(u64)folio);
@@ -2272,7 +2277,8 @@ find_file_area:
 	while ((folio = find_get_entry(&xas, end, XA_PRESENT)) != NULL) {
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(folio)){
-			if(0 == mapping->rh_reserved1)
+			//if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
 				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 			printk("%s find folio:0x%llx\n",__func__,(u64)folio);
@@ -2335,7 +2341,8 @@ find_file_area:
 	while ((folio = find_get_entry(&xas, end, XA_PRESENT))) {
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(folio)){
-			if(0 == mapping->rh_reserved1)
+			//if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
 				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 			printk("%s find folio:0x%llx\n",__func__,(u64)folio);
@@ -2426,7 +2433,8 @@ find_file_area:
 	while ((folio = find_get_entry(&xas, end, XA_PRESENT))) {
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(folio)){
-			if(0 == mapping->rh_reserved1)
+			//if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
 				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 			printk("%s find folio:0x%llx\n",__func__,(u64)folio);
@@ -2503,7 +2511,8 @@ find_file_area:
 	for (folio = xas_load(&xas); folio; folio = xas_next(&xas)) {
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(folio)){
-			if(0 == mapping->rh_reserved1)
+			//if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
 				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 			printk("%s find folio:0x%llx\n",__func__,(u64)folio);
@@ -2586,7 +2595,8 @@ find_file_area:
 	while ((folio = find_get_entry(&xas, end, tag))) {
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(folio)){
-			if(0 == mapping->rh_reserved1)
+			//if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
 				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 			printk("%s find folio:0x%llx\n",__func__,(u64)folio);
@@ -2690,7 +2700,8 @@ find_file_area:
 		
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(folio)){
-			if(0 == mapping->rh_reserved1)
+			//if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
 				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 			printk("%s find folio:0x%llx\n",__func__,(u64)folio);
@@ -3974,7 +3985,7 @@ vm_fault_t filemap_map_pages_for_file_area(struct vm_fault *vmf,
 
 	rcu_read_lock();
 	//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
-	p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+	p_file_stat_base = (struct file_stat_base *)get_mapping_reserved_for_file_stat(mapping);
 	/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
 	 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
 	 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
@@ -3987,7 +3998,7 @@ vm_fault_t filemap_map_pages_for_file_area(struct vm_fault *vmf,
 	 * */
 	smp_rmb();
 	if(unlikely(!IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)))
-        printk("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,mapping->rh_reserved1);
+        printk("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,get_mapping_reserved_for_file_stat(mapping));
 
 	//folio = first_map_page(mapping, &xas, end_pgoff);
 	folio = first_map_page_for_file_area(mapping, &xas, end_pgoff,&page_offset_in_file_area,&p_file_area);

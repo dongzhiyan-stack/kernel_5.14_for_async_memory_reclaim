@@ -19,13 +19,31 @@
 //#include "../../mm/async_memory_reclaim_for_cold_file_area.h"
 #define ASYNC_MEMORY_RECLAIM_IN_KERNEL
 
+#ifndef CONFIG_ARM64
+#define get_mapping_reserved_for_file_stat(mapping) READ_ONCE((mapping)->rh_reserved3)
+#define set_mapping_reserved_for_file_stat(mapping,val)  WRITE_ONCE((mapping)->rh_reserved3,val)
+
+#define get_mapping_reserved_for_file_debug(mapping) READ_ONCE((mapping)->rh_reserved4)
+#define set_mapping_reserved_for_file_debug(mapping,val) WRITE_ONCE((mapping)->rh_reserved4,val)
+
+#else
+
+#define get_mapping_reserved_for_file_stat(mapping) READ_ONCE((mapping)->invalidate_lock.android_oem_data1[0])
+#define set_mapping_reserved_for_file_stat(mapping,val)  WRITE_ONCE((mapping)->invalidate_lock.android_oem_data1[0],val)
+
+#define get_mapping_reserved_for_file_debug(mapping) READ_ONCE((mapping)->invalidate_lock.android_oem_data1[1])
+#define set_mapping_reserved_for_file_debug(mapping,val) WRITE_ONCE((mapping)->invalidate_lock.android_oem_data1[1],val)
+#endif
+
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL 
 #define SUPPORT_FILE_AREA_INIT_OR_DELETE 1
 #define IS_SUPPORT_FILE_AREA_READ_WRITE(mapping) \
-    (READ_ONCE(mapping->rh_reserved1) > SUPPORT_FILE_AREA_INIT_OR_DELETE)
+    (get_mapping_reserved_for_file_stat(mapping) > SUPPORT_FILE_AREA_INIT_OR_DELETE)
+    //(READ_ONCE(mapping->rh_reserved1) > SUPPORT_FILE_AREA_INIT_OR_DELETE)
 /*测试文件支持file_area形式读写文件和内存回收，此时情况2(mapping->rh_reserved1是1)和情况3(mapping->rh_reserved1>1)都要返回true*/
 #define IS_SUPPORT_FILE_AREA(mapping) \
-	(READ_ONCE(mapping->rh_reserved1) >=  SUPPORT_FILE_AREA_INIT_OR_DELETE)
+	(get_mapping_reserved_for_file_stat(mapping) >=  SUPPORT_FILE_AREA_INIT_OR_DELETE)
+	//(READ_ONCE(mapping->rh_reserved1) >=  SUPPORT_FILE_AREA_INIT_OR_DELETE)
 
 extern void *get_folio_from_file_area_for_file_area(struct address_space *mapping,pgoff_t index);
 extern void disable_mapping_file_area(struct inode *inode);

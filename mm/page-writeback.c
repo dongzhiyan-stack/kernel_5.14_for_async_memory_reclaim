@@ -2129,7 +2129,8 @@ void tag_pages_for_writeback_for_file_area(struct address_space *mapping,
 	xas_lock_irq(&xas);
 
 	//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
-	p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+	//p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+	p_file_stat_base = (struct file_stat_base *)get_mapping_reserved_for_file_stat(mapping);
 	/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
 	 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
 	 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
@@ -2142,7 +2143,7 @@ void tag_pages_for_writeback_for_file_area(struct address_space *mapping,
 	 * */
 	smp_rmb();
 	if(unlikely(!IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)))
-		printk("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,mapping->rh_reserved1);
+		printk("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,get_mapping_reserved_for_file_stat(mapping));
 
 	//xas_for_each_marked(&xas, page, end, PAGECACHE_TAG_DIRTY) {
 	xas_for_each_marked(&xas, p_file_area, file_area_end_index, PAGECACHE_TAG_DIRTY) {
@@ -2599,7 +2600,8 @@ void __folio_mark_dirty_for_file_area(struct folio *folio, struct address_space 
 	/*该函数没有rcu_read_lock，但是有xa_lock_irqsave加锁，也能防止file_stat被方法delete*/
 	xa_lock_irqsave(&mapping->i_pages, flags);
 	//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
-	p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+	//p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+	p_file_stat_base = (struct file_stat_base *)get_mapping_reserved_for_file_stat(mapping);
 	/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
 	 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
 	 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
@@ -2612,7 +2614,7 @@ void __folio_mark_dirty_for_file_area(struct folio *folio, struct address_space 
 	 * */
 	smp_rmb();
 	if(unlikely(!IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)))
-        printk("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,mapping->rh_reserved1);
+        printk("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,get_mapping_reserved_for_file_stat(mapping));
 
 	if (folio->mapping) {	/* Race with truncate? */
 		XA_STATE(xas, &mapping->i_pages, folio_index(folio) >> PAGE_COUNT_IN_AREA_SHIFT);
@@ -2973,7 +2975,8 @@ bool __folio_end_writeback_for_file_area(struct folio *folio)
 		xa_lock_irqsave(&mapping->i_pages, flags);
 		
 		//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
-		p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+		//p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+		p_file_stat_base = (struct file_stat_base *)get_mapping_reserved_for_file_stat(mapping);
 		/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
 		 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
 		 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
@@ -2986,7 +2989,7 @@ bool __folio_end_writeback_for_file_area(struct folio *folio)
 		 * */
 		smp_rmb();
 		if(unlikely(!IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)))
-			printk("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,mapping->rh_reserved1);
+			printk("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,get_mapping_reserved_for_file_stat(mapping));
 
 		ret = folio_test_clear_writeback(folio);
 		if (ret) {
@@ -3129,7 +3132,8 @@ bool __folio_start_writeback_for_file_area(struct folio *folio, bool keep_write)
 		xas_lock_irqsave(&xas, flags);
 
 		//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
-		p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+		//p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+		p_file_stat_base = (struct file_stat_base *)get_mapping_reserved_for_file_stat(mapping);
 		/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
 		 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
 		 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
@@ -3142,7 +3146,7 @@ bool __folio_start_writeback_for_file_area(struct folio *folio, bool keep_write)
 		 * */
 		smp_rmb();
 		if(unlikely(!IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)))
-			printk("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,mapping->rh_reserved1);
+			printk("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,get_mapping_reserved_for_file_stat(mapping));
 
 		//xas_load(&xas);
 		p_file_area = xas_load(&xas);

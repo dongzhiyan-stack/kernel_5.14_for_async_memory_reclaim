@@ -16,21 +16,28 @@
 #include <linux/hardirq.h> /* for in_interrupt() */
 #include <linux/hugetlb_inline.h>
 
-//#include "../../mm/async_memory_reclaim_for_cold_file_area.h"
 #define ASYNC_MEMORY_RECLAIM_IN_KERNEL
-
-#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL 
+#ifndef CONFIG_ARM64
+#define get_mapping_reserved_for_file_stat(mapping) READ_ONCE((mapping)->rh_reserved3)
+#define set_mapping_reserved_for_file_stat(mapping,val)  WRITE_ONCE((mapping)->rh_reserved3,val)
+#define get_mapping_reserved_for_file_debug(mapping) READ_ONCE((mapping)->rh_reserved4)
+#define set_mapping_reserved_for_file_debug(mapping,val) WRITE_ONCE((mapping)->rh_reserved4,val)
+#else
+#define get_mapping_reserved_for_file_stat(mapping) READ_ONCE((mapping)->invalidate_lock.android_oem_data1[0])
+#define set_mapping_reserved_for_file_stat(mapping,val)  WRITE_ONCE((mapping)->invalidate_lock.android_oem_data1[0],val)
+#define get_mapping_reserved_for_file_debug(mapping) READ_ONCE((mapping)->invalidate_lock.android_oem_data1[1])
+#define set_mapping_reserved_for_file_debug(mapping,val) WRITE_ONCE((mapping)->invalidate_lock.android_oem_data1[1],val)
+#endif
+#ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 #define SUPPORT_FILE_AREA_INIT_OR_DELETE 1
+/*æµ‹è¯•æ–‡ä»¶æ”¯æŒfile_areaå½¢å¼è¯»å†™æ–‡ä»¶å’Œå†…å­˜å›žæ”¶ï¼Œæ­¤æ—¶æƒ…å†µ2(mapping->rh_reserved1æ˜¯1)å’Œæƒ…å†µ3(mapping->rh_reserved1>1)éƒ½è¦è¿”å›žtrue*/
 #define IS_SUPPORT_FILE_AREA_READ_WRITE(mapping) \
-    (READ_ONCE(mapping->rh_reserved1) > SUPPORT_FILE_AREA_INIT_OR_DELETE)
-/*²âÊÔÎÄ¼þÖ§³Öfile_areaÐÎÊ½¶ÁÐ´ÎÄ¼þºÍÄÚ´æ»ØÊÕ£¬´ËÊ±Çé¿ö2(mapping->rh_reserved1ÊÇ1)ºÍÇé¿ö3(mapping->rh_reserved1>1)¶¼Òª·µ»Øtrue*/
+    (get_mapping_reserved_for_file_stat(mapping) > SUPPORT_FILE_AREA_INIT_OR_DELETE)
 #define IS_SUPPORT_FILE_AREA(mapping) \
-	(READ_ONCE(mapping->rh_reserved1) >=  SUPPORT_FILE_AREA_INIT_OR_DELETE)
-
+	(get_mapping_reserved_for_file_stat(mapping) >=  SUPPORT_FILE_AREA_INIT_OR_DELETE)
 extern void *get_folio_from_file_area_for_file_area(struct address_space *mapping,pgoff_t index);
 extern void disable_mapping_file_area(struct inode *inode);
 #endif
-
 struct folio_batch;
 
 unsigned long invalidate_mapping_pages(struct address_space *mapping,
@@ -1385,6 +1392,7 @@ static inline struct folio *__readahead_folio(struct readahead_control *ractl)
 		ractl->_batch_count = 0;
 		return NULL;
 	}
+
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 	if(IS_SUPPORT_FILE_AREA_READ_WRITE(ractl->mapping))
 		folio = get_folio_from_file_area_for_file_area(ractl->mapping,ractl->_index);
@@ -1392,7 +1400,7 @@ static inline struct folio *__readahead_folio(struct readahead_control *ractl)
 		folio = xa_load(&ractl->mapping->i_pages, ractl->_index);
 #else
 	folio = xa_load(&ractl->mapping->i_pages, ractl->_index);
-#endif
+#endif	
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 	ractl->_batch_count = folio_nr_pages(folio);
 

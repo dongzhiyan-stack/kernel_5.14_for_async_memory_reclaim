@@ -908,11 +908,14 @@ static int file_stat_debug_or_make_backlist(struct seq_file *m,char is_proc_prin
 	}
 
 	/*global_file_stat->mapping非法*/
-	if(!file_stat_in_global && (u64)p_file_stat_base != p_file_stat_base->mapping->rh_reserved1){
+	//if(!file_stat_in_global && (u64)p_file_stat_base != p_file_stat_base->mapping->rh_reserved1){
+	if(!file_stat_in_global && (u64)p_file_stat_base != get_mapping_reserved_for_file_stat(p_file_stat_base->mapping)){
 		if(is_proc_print)
-			seq_printf(m, "invalid file_stat:0x%llx 0x%lx\n",(u64)p_file_stat_base,p_file_stat_base->mapping->rh_reserved1);
+			seq_printf(m, "invalid file_stat:0x%llx 0x%llx\n",(u64)p_file_stat_base,(u64)get_mapping_reserved_for_file_stat(p_file_stat_base->mapping));
+			//seq_printf(m, "invalid file_stat:0x%llx 0x%lx\n",(u64)p_file_stat_base,p_file_stat_base->mapping->rh_reserved1);
 		else
-			printk("invalid file_stat:0x%llx 0x%lx\n",(u64)p_file_stat_base,p_file_stat_base->mapping->rh_reserved1);
+			printk("invalid file_stat:0x%llx 0x%llx\n",(u64)p_file_stat_base,(u64)get_mapping_reserved_for_file_stat(p_file_stat_base->mapping));
+			//printk("invalid file_stat:0x%llx 0x%lx\n",(u64)p_file_stat_base,p_file_stat_base->mapping->rh_reserved1);
 
 		ret = EINVAL;
 		goto err;
@@ -1089,7 +1092,8 @@ static ssize_t file_stat_debug_or_make_backlist_write(struct file *file,
 	/*如果该文件file_stat被异步内存回收线程并发cold_file_stat_delete()释放了，则smp_rmb()查看p_file_stat_base此时就是SUPPORT_FILE_AREA_INIT_OR_DELETE，下边的if不成立*/
 	smp_rmb();
 	inode = file_inode(file_temp);
-	p_file_stat_base = (struct file_stat_base *)(inode->i_mapping->rh_reserved1);//这个要放到内存屏障后
+	//p_file_stat_base = (struct file_stat_base *)(inode->i_mapping->rh_reserved1);//这个要放到内存屏障后
+	p_file_stat_base = (struct file_stat_base *)(get_mapping_reserved_for_file_stat(inode->i_mapping));//这个要放到内存屏障后
 
 direct_global_file_stat:
 
@@ -1288,7 +1292,8 @@ direct_global_file_stat:
 					 if(file_stat_in_global_base(p_file_stat_base)){
 						 /*如果inode是NULL，说明本次仅仅是echo -n debug set global cache设置调试global_file_stat，不是调试global_file_stat的file_area的文件*/
 						 if(inode)
-						     WRITE_ONCE(inode->i_mapping->rh_reserved2, 1);
+						     set_mapping_reserved_for_file_debug(inode->i_mapping, 1);
+						     //WRITE_ONCE(inode->i_mapping->rh_reserved2, 1);
 
 						 printk("%s file_stat:0x%llx in_global set_in_debug\n",p,(u64)p_file_stat_base);
 					 }
@@ -1301,7 +1306,8 @@ direct_global_file_stat:
 				 else{
 					 if(file_stat_in_global_base(p_file_stat_base)){
 						 if(inode)
-						     inode->i_mapping->rh_reserved2 = 0;
+						     set_mapping_reserved_for_file_debug(inode->i_mapping,0);
+						     //inode->i_mapping->rh_reserved2 = 0;
 
 						 printk("%s file_stat:0x%llx in_global clear_in_debug\n",p,(u64)p_file_stat_base);
 					 }else{
@@ -2042,6 +2048,7 @@ static void global_file_stat_init(void)
 	INIT_LIST_HEAD(&hot_cold_file_global_info.global_mmap_file_stat.zero_page_file_area_list);
 	spin_lock_init(&hot_cold_file_global_info.global_mmap_file_stat.file_area_delete_lock);
 }
+#ifndef CONFIG_ARM64
 #define PROTECT_SIZE 100
 #define KPROBE_BUF_SIZE 2097152
 char kprobe_buf[KPROBE_BUF_SIZE + PROTECT_SIZE];
@@ -2082,6 +2089,7 @@ static struct kprobe kp_wakeup_kswapd = {
 	.symbol_name    = "wakeup_kswapd",
 	.post_handler   = wakeup_kswapd_handler_post,
 };
+#endif
 static int __init hot_cold_file_init(void)
 {
 	int i;
@@ -2222,13 +2230,13 @@ static int __init hot_cold_file_init(void)
 		printk("Failed to start  hot_cold_file_thead\n");
 		return -1;
 	}
-
+#ifndef CONFIG_ARM64
 	i = register_kprobe(&kp_wakeup_kswapd);
 	if (i < 0) {
 		pr_err("kp_wakeup_kswapd register_kprobe failed, returned %d\n",i);
 		return -1;
 	}
-
+#endif
 	return hot_cold_file_proc_init(&hot_cold_file_global_info);
 }
 subsys_initcall(hot_cold_file_init);

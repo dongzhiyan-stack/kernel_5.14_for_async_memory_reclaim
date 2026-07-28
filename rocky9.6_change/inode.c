@@ -235,7 +235,7 @@ int inode_init_always(struct super_block *sb, struct inode *inode)
 	this_cpu_inc(nr_inodes);
 
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
-	/*²»ÄÜÔÚÕâÀï·ÖÅäfile_stat£¬ÒòÎªÎÄ¼þÏµÍ³ÓÐÒ»Ð©ÎÄ¼þinode¸úÔªÊý¾ÝÓÐ¹Ø£¬²»»áÓÐpagecache¶ÁÐ´*/
+	/*ä¸èƒ½åœ¨è¿™é‡Œåˆ†é…file_statï¼Œå› ä¸ºæ–‡ä»¶ç³»ç»Ÿæœ‰ä¸€äº›æ–‡ä»¶inodeè·Ÿå…ƒæ•°æ®æœ‰å…³ï¼Œä¸ä¼šæœ‰pagecacheè¯»å†™*/
 	is_cold_file_area_reclaim_support_fs(mapping,sb);
 #endif
 	return 0;
@@ -314,12 +314,12 @@ static void destroy_inode(struct inode *inode)
 
 	BUG_ON(!list_empty(&inode->i_lru));
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL	
-	/* ÖØ´óbug£¬ÕâÀï´íÎóµÄÒªÇóinode->i_mapping->rh_reservh_1´óÓÚ1²ÅÅÐ¶¨¸ÃinodeÊÇfile_area inode£¬È»ºó²Å»á¶Ôinode->i_mapping->rh_reservh_1
-	 * Çå0¡£µ«ÊÇÓÐÁ½¸öÌØÊâÇé¿ö 1:Ä¿Â¼µÄinode£¬Ã»ÓÐÎÄ¼þÒ³page£¬²»»á·ÖÅäfile_stat£¬inode->i_mapping->rh_reservh_1Ê¼ÖÕÊÇ1¡£2:ÎÄ¼þinode·ÖÅä
-	 * inodeºó£¬µ«Ã»ÓÐ¶ÁÐ´·ÖÅäÎÄ¼þÒ³£¬¾Í±»iput()ÊÍ·ÅÁË£¬µ½ÕâÀïÊ±inode->i_mapping->rh_reservh_1Ê¼ÖÕÊÇ1¡£´ËÊ±Ò²±ØÐë×÷Îªfile_area inode
-	 * ´¦Àí£¬¶Ôinode->i_mapping->rh_reservh_1Çå0¡£·ñÔò£¬ÓÐÐ©ÎÄ¼þÏµÍ³·ÖÅäµ½¸Ãinodeºó£¬²»»á¶ÔinodeÈ«Çå0£¬Ôòinode->i_mapping->rh_reservh_1
-	 * ±£³ÖÔ­ÓÐµÄ1¡£Èç¹ûÕâ¸öÎÄ¼þÏµÍ³²»Ö§³Öfile_area inode£¬Ôò·ÖÅäinodeºó»á±»ÎóÅÐÎªfile_area inode¡£±£´æÔÚxarray treeµÄfile_areaÖ¸ÕëµÄ
-	 * bit63Çå0£¬µÈ´Óxarray tree»ñÈ¡¸Ãfile_areaÖ¸Õëºó£¬»á×÷ÎªÖ¸Õë¶øÊ¹ÓÃ£¬Òòbit63ÊÇ0¶ø·Ç·¨ÄÚ´æ·ÃÎÊ¶øcrash
+	/* é‡å¤§bugï¼Œè¿™é‡Œé”™è¯¯çš„è¦æ±‚inode->i_mapping->rh_reservh_1å¤§äºŽ1æ‰åˆ¤å®šè¯¥inodeæ˜¯file_area inodeï¼Œç„¶åŽæ‰ä¼šå¯¹inode->i_mapping->rh_reservh_1
+	 * æ¸…0ã€‚ä½†æ˜¯æœ‰ä¸¤ä¸ªç‰¹æ®Šæƒ…å†µ 1:ç›®å½•çš„inodeï¼Œæ²¡æœ‰æ–‡ä»¶é¡µpageï¼Œä¸ä¼šåˆ†é…file_statï¼Œinode->i_mapping->rh_reservh_1å§‹ç»ˆæ˜¯1ã€‚2:æ–‡ä»¶inodeåˆ†é…
+	 * inodeåŽï¼Œä½†æ²¡æœ‰è¯»å†™åˆ†é…æ–‡ä»¶é¡µï¼Œå°±è¢«iput()é‡Šæ”¾äº†ï¼Œåˆ°è¿™é‡Œæ—¶inode->i_mapping->rh_reservh_1å§‹ç»ˆæ˜¯1ã€‚æ­¤æ—¶ä¹Ÿå¿…é¡»ä½œä¸ºfile_area inode
+	 * å¤„ç†ï¼Œå¯¹inode->i_mapping->rh_reservh_1æ¸…0ã€‚å¦åˆ™ï¼Œæœ‰äº›æ–‡ä»¶ç³»ç»Ÿåˆ†é…åˆ°è¯¥inodeåŽï¼Œä¸ä¼šå¯¹inodeå…¨æ¸…0ï¼Œåˆ™inode->i_mapping->rh_reservh_1
+	 * ä¿æŒåŽŸæœ‰çš„1ã€‚å¦‚æžœè¿™ä¸ªæ–‡ä»¶ç³»ç»Ÿä¸æ”¯æŒfile_area inodeï¼Œåˆ™åˆ†é…inodeåŽä¼šè¢«è¯¯åˆ¤ä¸ºfile_area inodeã€‚ä¿å­˜åœ¨xarray treeçš„file_areaæŒ‡é’ˆçš„
+	 * bit63æ¸…0ï¼Œç­‰ä»Žxarray treeèŽ·å–è¯¥file_areaæŒ‡é’ˆåŽï¼Œä¼šä½œä¸ºæŒ‡é’ˆè€Œä½¿ç”¨ï¼Œå› bit63æ˜¯0è€Œéžæ³•å†…å­˜è®¿é—®è€Œcrash
 	 * */
 	//if(inode->i_mapping && IS_SUPPORT_FILE_AREA_READ_WRITE(inode->i_mapping)){
 	if(inode->i_mapping && IS_SUPPORT_FILE_AREA(inode->i_mapping)){

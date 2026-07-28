@@ -269,7 +269,6 @@ void __filemap_remove_folio(struct folio *folio, void *shadow)
 	filemap_unaccount_folio(mapping, folio);
 	page_cache_delete(mapping, folio, shadow);
 }
-EXPORT_SYMBOL(__filemap_remove_folio);
 
 void filemap_free_folio(struct address_space *mapping, struct folio *folio)
 {
@@ -547,7 +546,7 @@ find_file_area:
 		folio = xas_find(&xas, max);
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(folio)){
-		    if(0 == mapping->rh_reserved1)
+		    if(0 == get_mapping_reserved_for_file_stat(mapping))
 			panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 		    printk("%s find folio:0x%llx\n",__func__,(u64)folio);
@@ -723,7 +722,7 @@ find_file_area:
 	xas_for_each(&xas, folio, max) {
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(folio)){
-			if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
 				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 			printk("%s find page:0x%llx\n",__func__,(u64)folio);
@@ -1097,7 +1096,6 @@ int filemap_add_folio(struct address_space *mapping, struct folio *folio,
 				return ret;
 			}
 		}
-		trace_android_vh_filemap_adjust_folio_flags(mapping, folio, index);
 		folio_add_lru(folio);
 	}
 	return ret;
@@ -1914,7 +1912,7 @@ find_file_area:
 		void *entry = xas_next(&xas);
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(entry)){
-			if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
 				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 			printk("%s find folio:0x%llx\n",__func__,(u64)entry);
@@ -1968,7 +1966,7 @@ find_file_area:
 		void *entry = xas_prev(&xas);
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(entry)){
-			if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
 				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 			printk("%s find folio:0x%llx\n",__func__,(u64)entry);
@@ -2064,7 +2062,7 @@ repeat:
 	
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 	if(is_file_area_entry(folio)){
-		if(0 == mapping->rh_reserved1)
+		if(0 == get_mapping_reserved_for_file_stat(mapping))
 			panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 		printk("%s find folio:0x%llx\n",__func__,(u64)folio);
@@ -2224,7 +2222,6 @@ no_page:
 
 	if (!folio)
 		return ERR_PTR(-ENOENT);
-	trace_android_vh_filemap_get_folio_end(mapping, folio);
 	return folio;
 }
 EXPORT_SYMBOL(__filemap_get_folio);
@@ -2308,7 +2305,7 @@ find_file_area:
 	while ((folio = find_get_entry(&xas, end, XA_PRESENT)) != NULL) {
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(folio)){
-			if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
 				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 			printk("%s find folio:0x%llx\n",__func__,(u64)folio);
@@ -2380,7 +2377,7 @@ find_file_area:
 	while ((folio = find_get_entry(&xas, end, XA_PRESENT))) {
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(folio)){
-			if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
 				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 			printk("%s find folio:0x%llx\n",__func__,(u64)folio);
@@ -2465,7 +2462,7 @@ find_file_area:
 	while ((folio = find_get_entry(&xas, end, XA_PRESENT)) != NULL) {
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(folio)){
-			if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
 				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 			printk("%s find folio:0x%llx\n",__func__,(u64)folio);
@@ -2539,7 +2536,7 @@ find_file_area:
 			folio = xas_next(&xas)) {
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(folio)){
-			if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
 				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 			printk("%s find folio:0x%llx\n",__func__,(u64)folio);
@@ -2571,7 +2568,6 @@ find_file_area:
 			*start = folio->index + nr;
 			goto out;
 		}
-		xas_advance(&xas, folio_next_index(folio) - 1);
 		continue;
 put_folio:
 		folio_put(folio);
@@ -2627,7 +2623,7 @@ find_file_area:
 	while ((folio = find_get_entry(&xas, end, tag)) != NULL) {
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(folio)){
-			if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
 				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 			printk("%s find folio:0x%llx\n",__func__,(u64)folio);
@@ -2731,7 +2727,7 @@ find_file_area:
 	for (folio = xas_load(&xas); folio; folio = xas_next(&xas)) {
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
 		if(is_file_area_entry(folio)){
-			if(0 == mapping->rh_reserved1)
+			if(0 == get_mapping_reserved_for_file_stat(mapping))
 				panic("%s mapping:0x%llx NULL\n",__func__,(u64)mapping);
 
 			printk("%s find folio:0x%llx\n",__func__,(u64)folio);
@@ -3128,8 +3124,6 @@ ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *iter,
 				break;
 			}
 		}
-		trace_android_vh_filemap_read_end(inode, fbatch.folios,
-				folio_batch_count(&fbatch));
 put_folios:
 		for (i = 0; i < folio_batch_count(&fbatch); i++)
 			folio_put(fbatch.folios[i]);
@@ -3642,11 +3636,6 @@ static struct file *do_sync_mmap_readahead(struct vm_fault *vmf)
 	struct file *fpin = NULL;
 	unsigned long vm_flags = vmf->vma->vm_flags;
 	unsigned int mmap_miss;
-	bool skip = false;
-
-	trace_android_vh_do_sync_mmap_readahead(vmf, &skip);
-	if (skip)
-		return fpin;
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	/* Use the readahead code, even if readahead is disabled */
@@ -3827,8 +3816,6 @@ retry_find:
 		}
 	}
 
-	trace_android_vh_filemap_fault_pre_folio_locked(folio);
-
 	if (!lock_folio_maybe_drop_mmap(vmf, folio, &fpin))
 		goto out_retry;
 
@@ -3859,8 +3846,6 @@ retry_find:
 		goto page_not_uptodate;
 	}
 
-	trace_android_vh_filemap_fault_post_folio_locked(inode, folio, index);
-
 	/*
 	 * We've made it this far and we had to drop our mmap_lock, now is the
 	 * time to return to the upper layer and have it re-find the vma and
@@ -3885,7 +3870,6 @@ retry_find:
 	}
 
 	vmf->page = folio_file_page(folio, index);
-	trace_android_vh_filemap_fault_folio_locked(inode, folio, index);
 	return ret | VM_FAULT_LOCKED;
 
 page_not_uptodate:
@@ -4076,7 +4060,6 @@ static vm_fault_t filemap_map_order0_folio(struct vm_fault *vmf,
 
 	set_pte_range(vmf, folio, page, 1, addr);
 	folio_ref_inc(folio);
-	trace_android_vh_map_order0_folio(vmf->vma->vm_file, vmf->pgoff, folio, ret);
 
 	return ret;
 }
@@ -4287,7 +4270,8 @@ static vm_fault_t filemap_map_pages_for_file_area(struct vm_fault *vmf,
 	rcu_read_lock();
 	
 	//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
-	p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+	//p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+	p_file_stat_base = (struct file_stat_base *)get_mapping_reserved_for_file_stat(mapping);
 	/* 必须要在rcu_read_lock()后，再执行smp_rmb()，再判断mapping->rh_reserved1指向的file_stat是否有效。
 	 * 因为这个文件file_stat可能长时间没访问，此时cold_file_stat_delete()正并发释放mapping->rh_reserved1
 	 * 指向的这个file_stat结构，并且赋值mapping->rh_reserved1=1。rcu_read_lock()保证file_stat不会立即被释放。 
@@ -4300,7 +4284,7 @@ static vm_fault_t filemap_map_pages_for_file_area(struct vm_fault *vmf,
 	 * */
 	smp_rmb();
 	if(unlikely(!IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)))
-        printk("%s %s %d mapping:0x%llx file_stat:0x%lx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,mapping->rh_reserved1);
+        printk("%s %s %d mapping:0x%llx file_stat:0x%llx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,get_mapping_reserved_for_file_stat(mapping));
 	
 	folio = next_map_page_for_file_area(mapping, &xas, end_pgoff,&page_offset_in_file_area,&p_file_area);
 	if (!folio)
@@ -4365,7 +4349,7 @@ static vm_fault_t filemap_map_pages_for_file_area(struct vm_fault *vmf,
 					nr_pages, &mmap_miss);
 
 		folio_unlock(folio);
-		trace_android_vh_filemap_folio_mapped(folio);
+		//trace_android_vh_filemap_folio_mapped(folio);
 		folio_put(folio);
 	} while ((folio = next_map_page_for_file_area(mapping,&xas,end_pgoff,&page_offset_in_file_area,&p_file_area)) != NULL);
 
@@ -4464,7 +4448,6 @@ vm_fault_t filemap_map_pages(struct vm_fault *vmf,
 					nr_pages, &mmap_miss);
 
 		folio_unlock(folio);
-		trace_android_vh_filemap_folio_mapped(folio);
 		folio_put(folio);
 	} while ((folio = next_uptodate_folio(&xas, mapping, end_pgoff)) != NULL);
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
@@ -4533,7 +4516,7 @@ int generic_file_mmap(struct file *file, struct vm_area_struct *vma)
  */
 int generic_file_readonly_mmap(struct file *file, struct vm_area_struct *vma)
 {
-	if (vma_is_shared_maywrite(vma))
+	if ((vma->vm_flags & VM_SHARED) && (vma->vm_flags & VM_MAYWRITE))
 		return -EINVAL;
 	return generic_file_mmap(file, vma);
 }

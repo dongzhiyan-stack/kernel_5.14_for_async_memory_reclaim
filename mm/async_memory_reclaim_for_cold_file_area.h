@@ -1395,7 +1395,9 @@ extern int warm_list_printk;
 extern int multi_level_file_area_printk;
 extern int enable_low_cpu_consumption;
 
-#define is_global_file_stat_file_in_debug(mapping) (1 == mapping->rh_reserved2)
+
+//#define is_global_file_stat_file_in_debug(mapping) (1 == mapping->rh_reserved2)
+#define is_global_file_stat_file_in_debug(mapping) (1 == get_mapping_reserved_for_file_debug(mapping))
 #define list_num_get(p_file_area)  (p_file_area->warm_list_num_and_access_freq.val_bits.warm_list_num)
 #define file_area_access_freq(p_file_area)  (p_file_area->warm_list_num_and_access_freq.val_bits.access_freq)
 
@@ -1766,7 +1768,8 @@ inline static void is_cold_file_area_reclaim_support_fs(struct address_space *ma
 	if(SUPPORT_FS_ALL == hot_cold_file_global_info.support_fs_type){
 		if(sb->s_type){
 			if(0 == strcmp(sb->s_type->name,"ext4") || 0 == strcmp(sb->s_type->name,"xfs") || 0 == strcmp(sb->s_type->name,"f2fs"))
-				mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;
+				set_mapping_reserved_for_file_stat(mapping,SUPPORT_FILE_AREA_INIT_OR_DELETE);
+			//mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;
 		}
 	}
 	else if(SUPPORT_FS_SINGLE == hot_cold_file_global_info.support_fs_type){
@@ -1774,7 +1777,8 @@ inline static void is_cold_file_area_reclaim_support_fs(struct address_space *ma
 			int i;
 			for(i = 0;i < SUPPORT_FS_COUNT;i ++){
 				if(0 == strcmp(sb->s_type->name,hot_cold_file_global_info.support_fs_name[i])){
-					mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;
+					set_mapping_reserved_for_file_stat(mapping,SUPPORT_FILE_AREA_INIT_OR_DELETE);
+					//mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;
 					break;
 				}
 			}
@@ -1783,7 +1787,8 @@ inline static void is_cold_file_area_reclaim_support_fs(struct address_space *ma
 	else if(SUPPORT_FS_UUID == hot_cold_file_global_info.support_fs_type){
 		if(0 == memcmp(sb->s_uuid.b , hot_cold_file_global_info.support_fs_uuid[0], SUPPORT_FS_UUID_LEN) || 0 == memcmp(sb->s_uuid.b , hot_cold_file_global_info.support_fs_uuid[1], SUPPORT_FS_UUID_LEN)){
 			if(memcmp(sb->s_uuid.b , hot_cold_file_global_info.support_fs_against_uuid, SUPPORT_FS_UUID_LEN))
-			    mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;
+				set_mapping_reserved_for_file_stat(mapping,SUPPORT_FILE_AREA_INIT_OR_DELETE);
+			//mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;
 		}	
 	}
 }
@@ -2143,10 +2148,12 @@ inline static unsigned int get_file_stat_type_file_iput(struct file_stat_base *p
  * 标记。这就重复造车了。于是决定把 is_file_stat_mapping_error()移动到file_inode_lock()里"rcu_read_lock，再smp_rmb()，再立即判断file_stat有in_delete"
  * 后边。is_file_stat_mapping_error()源码还维持原版
  * */
+/*if((unsigned long)p_file_stat_base != READ_ONCE((p_file_stat_base)->mapping->rh_reserved1)){  \*/
+/*panic("%s file_stat:0x%llx match mapping:0x%llx 0x%llx error\n",__func__,(u64)p_file_stat_base,(u64)((p_file_stat_base)->mapping),(u64)((p_file_stat_base)->mapping->rh_reserved1)); \*/
 #define is_file_stat_mapping_error(p_file_stat_base) \
 do{ \
 	rcu_read_lock();\
-	if((unsigned long)p_file_stat_base != READ_ONCE((p_file_stat_base)->mapping->rh_reserved1)){  \
+	if((unsigned long)p_file_stat_base != get_mapping_reserved_for_file_stat((p_file_stat_base)->mapping)){  \
 		smp_rmb();\
 		if(file_stat_in_delete_base(p_file_stat_base)){\
 			rcu_read_unlock(); \
@@ -2154,7 +2161,7 @@ do{ \
 			break;\
 		} \
 		else \
-		panic("%s file_stat:0x%llx match mapping:0x%llx 0x%llx error\n",__func__,(u64)p_file_stat_base,(u64)((p_file_stat_base)->mapping),(u64)((p_file_stat_base)->mapping->rh_reserved1)); \
+		panic("%s file_stat:0x%llx match mapping:0x%llx 0x%llx error\n",__func__,(u64)p_file_stat_base,(u64)((p_file_stat_base)->mapping),(u64)(get_mapping_reserved_for_file_stat((p_file_stat_base)->mapping))); \
 	}\
 	rcu_read_unlock();\
 }while(0);
@@ -2453,7 +2460,8 @@ inline static void file_stat_base_struct_init(struct file_stat_base *p_file_stat
 }
 inline static void file_stat_base_init(struct address_space *mapping,struct file_stat_base *p_file_stat_base,char is_cache_file)
 {
-	mapping->rh_reserved1 = (unsigned long)(p_file_stat_base);
+	//mapping->rh_reserved1 = (unsigned long)(p_file_stat_base);
+	set_mapping_reserved_for_file_stat(mapping,(unsigned long)(p_file_stat_base));
 	p_file_stat_base->mapping = mapping;
 
 	file_stat_base_struct_init(p_file_stat_base,is_cache_file);
@@ -2499,9 +2507,10 @@ inline static struct file_stat_base *file_stat_alloc_and_init_tiny_small(struct 
 		spin_unlock(p_global_lock);
 
 		kmem_cache_free(hot_cold_file_global_info.file_stat_tiny_small_cachep,p_file_stat_tiny_small);
-		p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+		//p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+		p_file_stat_base = (struct file_stat_base *)get_mapping_reserved_for_file_stat(mapping);
 
-		printk("%s file_stat:0x%llx already alloc\n",__func__,(u64)mapping->rh_reserved1);
+		printk("%s file_stat:0x%llx already alloc\n",__func__,(u64)get_mapping_reserved_for_file_stat(mapping));
 		goto out;
 	}
 	p_file_stat_base = &p_file_stat_tiny_small->file_stat_base;
@@ -2654,9 +2663,10 @@ inline static struct file_stat_base *file_stat_alloc_and_init_other(struct addre
 			spin_unlock(p_global_lock);
 			
 			kmem_cache_free(hot_cold_file_global_info.file_stat_small_cachep,p_file_stat_small);
-			p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+			//p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+			p_file_stat_base = (struct file_stat_base *)get_mapping_reserved_for_file_stat(mapping);
 
-			printk("%s file_stat:0x%llx already alloc\n",__func__,(u64)mapping->rh_reserved1);
+			printk("%s file_stat:0x%llx already alloc\n",__func__,(u64)get_mapping_reserved_for_file_stat(mapping));
 			goto out;  
 		}
 
@@ -2705,9 +2715,10 @@ inline static struct file_stat_base *file_stat_alloc_and_init_other(struct addre
 			spin_unlock(p_global_lock);
 
 			kmem_cache_free(hot_cold_file_global_info.file_stat_cachep,p_file_stat);
-			p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+			//p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
+			p_file_stat_base = (struct file_stat_base *)get_mapping_reserved_for_file_stat(mapping);
 
-			printk("%s file_stat:0x%llx already alloc\n",__func__,(u64)mapping->rh_reserved1);
+			printk("%s file_stat:0x%llx already alloc\n",__func__,(u64)get_mapping_reserved_for_file_stat(mapping));
 			goto out;  
 		}
 
@@ -2793,7 +2804,8 @@ inline static struct file_area *file_area_alloc_and_init(unsigned int area_index
 	if(mapping_mapped(mapping) && file_stat_in_global_base(p_file_stat_base)){
 		if(p_file_stat_base != &hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base){
 			printk("mapping:0x%llx file_stat_base:0x%llx change to global_mmap_file_stat\n",(u64)mapping,(u64)p_file_stat_base);
-			mapping->rh_reserved1 = (u64)(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base);
+			//mapping->rh_reserved1 = (u64)(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base);
+			set_mapping_reserved_for_file_stat(mapping,(u64)(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base));
 		}
 	}
 
@@ -3529,6 +3541,7 @@ static inline unsigned int move_small_file_area_to_normal_file(struct hot_cold_f
 	return scan_file_area_count;
 }
 #endif*/
+
 
 #if LINUX_VERSION_CODE > KERNEL_VERSION(6,1,0) || defined(CONFIG_ASYNC_MEMORY_RECLAIM_FEATURE)
 #define folio_try_get_rcu folio_try_get
