@@ -827,7 +827,7 @@ inline void move_writeonly_file_area_to_free_list_tail(struct file_stat_base *p_
 	 把file_area移动到file_stat->free链表尾，异步内存回收线程在cold_file_isolate_lru_pages_and_shrink()函数回收该file_area的page。没错，
 	 凡是异步内存回收线程有遍历这些有in_free标记的地方，都有F_file_stat_in_move_free_list_file_area加锁防护。*/
     //if(file_stat_in_writeonly_base(p_file_stat_base) && 不能用file_stat_in_writeonly_base，会被第3个进程读写文件时并发清理掉
-    if(file_stat_in_file_stat_writeonly_file_head_list_base(p_file_stat_base) &&
+    if(file_stat_in_file_stat_writeonly_file_head_list_base(p_file_stat_base) && file_stat_in_writeonly_base(p_file_stat_base) &&
 			0 == test_and_set_bit(F_file_stat_in_move_free_list_file_area,(void *)(&p_file_stat_base->file_stat_status))){
 
 	    struct file_stat *p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
@@ -1127,7 +1127,7 @@ find_page_from_file_area:
 		 * page在file_area->file_area_statue的对应的bit位一定是1，不是0*/
 		smp_rmb();
 		/*检测查找到的page是否正确，不是则crash*/
-		CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,mapping,p_file_area->pages[page_offset_in_file_area],p_file_area,page_offset_in_file_area,folio_index_from_xa_index);
+		CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,mapping,folio,p_file_area,page_offset_in_file_area,folio_index_from_xa_index);
 
 		page_offset_in_file_area ++;
 
@@ -1216,7 +1216,7 @@ find_page_from_file_area:
 		 * page在file_area->file_area_statue的对应的bit位一定是1，不是0*/
 		smp_rmb();
 		/*检测查找到的page是否正确，不是则crash*/
-		CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,mapping,p_file_area->pages[page_offset_in_file_area],p_file_area,page_offset_in_file_area,folio_index_from_xa_index);
+		CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,mapping,folio,p_file_area,page_offset_in_file_area,folio_index_from_xa_index);
 
 		/*如果page_offset_in_file_area是0,则说明file_area的page都被遍历过了，那就到for循环开头xas_prev(&xas)去查找上一个file_area。
 		 *否则，只是令page_offset_in_file_area减1，goto find_page_from_file_area去查找file_area里的上一个page*/

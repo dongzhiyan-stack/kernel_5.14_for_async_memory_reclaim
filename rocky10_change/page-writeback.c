@@ -3270,6 +3270,10 @@ static bool __folio_end_writeback_for_file_area(struct folio *folio)
 		}
 		p_file_area = entry_to_file_area(p_file_area);
 		/*检测查找到的page是否正确，不是则crash*/
+
+		/* 有一个关键点是比较原始folio跟p_file_area->pages[page_offset_in_file_area]得到的folio是否一致。正常情况肯定没事，但是
+		 * 完全有可能这个folio此时被kswapd并发内存回收了，导致此时从p_file_area->pages[page_offset_in_file_area]得到的folio指针
+		 * 是非法的，就会panic！没事，凡是调用CHECK_FOLIO_FROM_FILE_AREA_VALID_MARK都有xa_lock_irqsave加锁，不用担心会被并发释放掉*/
 		CHECK_FOLIO_FROM_FILE_AREA_VALID_MARK(&xas,mapping,folio,p_file_area->pages[page_offset_in_file_area],p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
 
 		/*先清理file_area的writeback标记，再清理file_area里的page的writeback mark。错了，只有file_area的4个page的writeback

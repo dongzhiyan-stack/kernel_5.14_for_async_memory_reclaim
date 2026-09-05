@@ -2163,9 +2163,9 @@ find_page_from_file_area:
 		}
 
 		/*是调试的文件，打印调试信息*/
-		if(mapping->rh_reserved3){
+		/*if(mapping->rh_reserved3){
 			printk("%s mark_towrite mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)page);
-		}
+		}*/
 
 		/*file_area里的4个page都是dirty页吗，那可不一定，必须检测是否有脏页mark的page，才能在file_area里设置towrite mark*/
 		if(is_file_area_page_mark_bit_set(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY)){
@@ -2641,9 +2641,9 @@ void __folio_mark_dirty_for_file_area(struct folio *folio, struct address_space 
 		set_file_area_page_mark_bit(p_file_area,page_offset_in_file_area,PAGECACHE_TAG_DIRTY);
 
 		/*是调试的文件，打印调试信息*/
-		if(mapping->rh_reserved3){
+		/*if(mapping->rh_reserved3){
 			printk("%s mark_dirty mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
-		}
+		}*/
 	}
 	xa_unlock_irqrestore(&mapping->i_pages, flags);
 }
@@ -3006,6 +3006,10 @@ bool __folio_end_writeback_for_file_area(struct folio *folio)
 			}
 			p_file_area = entry_to_file_area(p_file_area);
 			/*检测查找到的page是否正确，不是则crash*/
+
+			/* 有一个关键点是比较原始folio跟p_file_area->pages[page_offset_in_file_area]得到的folio是否一致。正常情况肯定没事，但是
+			 * 完全有可能这个folio此时被kswapd并发内存回收了，导致此时从p_file_area->pages[page_offset_in_file_area]得到的folio指针
+			 * 是非法的，就会panic！没事，凡是调用CHECK_FOLIO_FROM_FILE_AREA_VALID_MARK都有xa_lock_irqsave加锁，不用担心会被并发释放掉*/
 			CHECK_FOLIO_FROM_FILE_AREA_VALID_MARK(&xas,mapping,folio,p_file_area->pages[page_offset_in_file_area],p_file_area,page_offset_in_file_area,((xas.xa_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area));
 
 			/*先清理file_area的writeback标记，再清理file_area里的page的writeback mark。错了，只有file_area的4个page的writeback
@@ -3020,9 +3024,9 @@ bool __folio_end_writeback_for_file_area(struct folio *folio)
 			if(0 == file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_WRITEBACK))
 				xas_clear_mark(&xas, PAGECACHE_TAG_WRITEBACK);
 
-			if(mapping->rh_reserved3){
+			/*if(mapping->rh_reserved3){
 				printk("%s clear_writeback mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
-			}
+			}*/
 
 			if (bdi->capabilities & BDI_CAP_WRITEBACK_ACCT) {
 				struct bdi_writeback *wb = inode_to_wb(inode);
@@ -3187,9 +3191,9 @@ bool __folio_start_writeback_for_file_area(struct folio *folio, bool keep_write)
 		}
 		
 		/*是调试的文件，打印调试信息*/
-		if(mapping->rh_reserved3){
+		/*if(mapping->rh_reserved3){
 			printk("%s clear_dirty mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
-		}
+		}*/
 
 		if (!folio_test_dirty(folio)){
 			//xas_clear_mark(&xas, PAGECACHE_TAG_DIRTY);
@@ -3200,15 +3204,15 @@ bool __folio_start_writeback_for_file_area(struct folio *folio, bool keep_write)
 			if(0 == file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_DIRTY))
 				xas_clear_mark(&xas, PAGECACHE_TAG_DIRTY);
 
-			if(mapping->rh_reserved3){
+			/*if(mapping->rh_reserved3){
 				printk("%s real_clear_dirty mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags);
-			}
+			}*/
 		}
 
 		/*是调试的文件，打印调试信息*/
-		if(mapping->rh_reserved3){
+		/*if(mapping->rh_reserved3){
 			printk("%s clear_towrite mapping:0x%llx file_stat:0x%llx file_area:0x%llx status:0x%x page_offset_in_file_area:%d folio:0x%llx flags:0x%lx keep_write:%d\n",__func__,(u64)mapping,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,page_offset_in_file_area,(u64)folio,folio->flags,keep_write);
-		}
+		}*/
 
 		if (!keep_write){
 			//xas_clear_mark(&xas, PAGECACHE_TAG_TOWRITE);

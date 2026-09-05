@@ -782,7 +782,7 @@ static void inline async_and_kswapd_refault_page_count(struct file_stat_base *p_
 }
 /* 有些writeonly文件内存回收后，file_area移动到了file_stat->free链表，这种file_area有几千个。后续这些file_area又被访问了，
  * 属于write page refault。这些有大量page的file-area零散的分布在file_stat->free链表各处，导致内存紧张时，很难连续的从file_stat->free
- * 链表遍历到这些file_area并回收page，强制把file_stat->free链表遍历一遍，浪费cpu。于是想到这些write refalt的file_area，再add_folio把
+ * 链表遍历到这些file_area并回收page，强制把file_stat->free链表遍历一遍，浪费cpu。于是想到这些write refalt的file_area，在add_folio把
  * page添加到file_area时，直接把file_area移动到file_stat->free链表尾。但是我不想使用file_stat_lock，浪费性能。但是异步内存回收线程
  * 此时也会向file_stat->free链表移入file_area，或者把file_stat->free链表上的file_area移动到file_stat->refault链表，或者释放掉
  * file_area且把file_area从file_stat->free链表剔除。不加锁也有解决办法。异步内存回收线程有这些操作时，
@@ -824,8 +824,11 @@ inline void move_writeonly_file_area_to_free_list_tail(struct file_stat_base *p_
 	 test_and_set_bit(F_file_stat_in_move_free_list_file_area,file_stat_status)加锁，不可能存在add_folio在move_writeonly_file_area_to_free_list_tail()
 	 把file_area移动到file_stat->free链表尾，异步内存回收线程在cold_file_isolate_lru_pages_and_shrink()函数回收该file_area的page。没错，
 	 凡是异步内存回收线程有遍历这些有in_free标记的地方，都有F_file_stat_in_move_free_list_file_area加锁防护。*/
+
     //if(file_stat_in_writeonly_base(p_file_stat_base) && 不能用file_stat_in_writeonly_base，会被第3个进程读写文件时并发清理掉
-    if(file_stat_in_file_stat_writeonly_file_head_list_base(p_file_stat_base) &&
+    /*为了安全，还是file_stat_in_file_stat_writeonly_file_head_list_base和file_stat_in_writeonly_base判断都加上，如果writeonly
+     *文件被并发read而清理掉file_stat_in_writeonly_base标记，就不再把file_area移动到file_stat->free链表尾巴，怕出未知乱子*/
+    if(file_stat_in_file_stat_writeonly_file_head_list_base(p_file_stat_base) &&  file_stat_in_writeonly_base(p_file_stat_base) &&
 			0 == test_and_set_bit(F_file_stat_in_move_free_list_file_area,(void *)(&p_file_stat_base->file_stat_status))){
 
 	    struct file_stat *p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
@@ -982,6 +985,9 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 					/* write page发生refault把file_area移动到file_stat->free链表尾。file_area的每个page发生refault，都会执行一次，这个没啥好办法。
 					 * 其实可以第一次设置in_refault标记，后续有in_refault标记就不再把file_area移动到file_stat->free链表尾了。但是等再次回收file-area
 					 * 的page，还得再清理掉in_refault标记，弄得有点麻烦???????*/
+					/* 有个问题，file_area的page都被回收后，然后每个page都依次被重新被写，这些page都会执行move_writeonly_file_area_to_free_list_tail()
+					 * 把file_area多次移动到file_stat->free链表尾，浪费性能。需要改进，只有这里file_area有了3个page，然后添加最后一个page时，page满了
+					 * 再把file_area移动到file_stat->free链表尾????????????????????*/
 					move_writeonly_file_area_to_free_list_tail(p_file_stat_base,p_file_area);
 				}
 			}
@@ -1157,9 +1163,17 @@ find_page_from_file_area:
 
 		/* 如果有进程此时并发page_cache_delete_for_file_area()里释放该page，这个内存屏障，确保，看到的page不是NULL时，
 		 * page在file_area->file_area_statue的对应的bit位一定是1，不是0*/
+		/* 20260811 还真遇到一个在当前函数遍历file_ara和folio时，folio被方法释放的bug。现场是，上边folio_is_file_area_index_or_shadow_and_clear_NULL()
+		 * 判断p_file_area->pages[page_offset_in_file_area]里的folio是合法的，bit0不是1，但是下边CHECK_FOLIO_FROM_FILE_AREA_VALID()再次使用
+		 * p_file_area->pages[page_offset_in_file_area]时，得到的却是00000261e0018021，然后非法访问地址00000261e0018021而内核crash。
+		 * crash分析得到了file_area指针，file_area->pages[]里的folio全都是0x261e0018001，说明此时file_area里的page全被kswapd释放了。
+		 * 这个是正常现象！解决办法很简单，把CHECK_FOLIO_FROM_FILE_AREA_VALID()里的p_file_area->pages[page_offset_in_file_area]换成folio，
+		 * 使用还没有被kswapd释放的合法的folio。有人会说这不是自欺欺人吗，明明CHECK_FOLIO_FROM_FILE_AREA_VALID()是该folio已经被释放了。
+		 * 没事，因为当前函数并不会使用该folio。而像read_batch、add_folio等会给上层调用者返回folio的函数，都会判断folio是否被并发释放了！*/
 		smp_rmb();
 		/*检测查找到的page是否正确，不是则crash*/
-		CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,mapping,p_file_area->pages[page_offset_in_file_area],p_file_area,page_offset_in_file_area,folio_index_from_xa_index);
+		//CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,mapping,p_file_area->pages[page_offset_in_file_area],p_file_area,page_offset_in_file_area,folio_index_from_xa_index);
+		CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,mapping,folio,p_file_area,page_offset_in_file_area,folio_index_from_xa_index);
 
 		page_offset_in_file_area ++;
 
@@ -1248,7 +1262,7 @@ find_page_from_file_area:
 		 * page在file_area->file_area_statue的对应的bit位一定是1，不是0*/
 		smp_rmb();
 		/*检测查找到的page是否正确，不是则crash*/
-		CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,mapping,p_file_area->pages[page_offset_in_file_area],p_file_area,page_offset_in_file_area,folio_index_from_xa_index);
+		CHECK_FOLIO_FROM_FILE_AREA_VALID(&xas,mapping,folio,p_file_area,page_offset_in_file_area,folio_index_from_xa_index);
 
 		/*如果page_offset_in_file_area是0,则说明file_area的page都被遍历过了，那就到for循环开头xas_prev(&xas)去查找上一个file_area。
 		 *否则，只是令page_offset_in_file_area减1，goto find_page_from_file_area去查找file_area里的上一个page*/

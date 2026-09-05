@@ -145,6 +145,8 @@ obj-$(CONFIG_IO_MAPPING) += io-mapping.o
 obj-$(CONFIG_HAVE_BOOTMEM_INFO_NODE) += bootmem_info.o
 obj-$(CONFIG_GENERIC_IOREMAP) += ioremap.o
 obj-$(CONFIG_SHRINKER_DEBUG) += shrinker_debug.o
+#obj-y += print_modules_thread.o
+
 obj-y += async_memory_reclaim_for_cold_file_area_new.o
 obj-y += async_memory_reclaim_for_cold_file_area_common.o
 obj-y += filemap_common.o

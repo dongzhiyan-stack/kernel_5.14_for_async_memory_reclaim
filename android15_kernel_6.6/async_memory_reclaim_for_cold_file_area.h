@@ -63,6 +63,7 @@
 //置1说明说明触发了drop_cache，此时禁止异步内存回收线程处理gloabl drop_cache_file_stat_head链表上的file_stat
 #define ASYNC_DROP_CACHES 1
 #define MEMORY_IN_RECLAIM 2
+#define ASYNC_THREAD_SAVE_PANIC_INFO 3
 //异步内存回收周期，单位s
 #define ASYNC_MEMORY_RECLIAIM_PERIOD 10
 //最大文件名字长度
@@ -1003,7 +1004,8 @@ enum file_area_status{
 	F_file_area_in_read,//bit 12
 	F_file_area_in_cache,
 	F_file_area_in_mmap,	
-	F_file_area_in_init,/*新分配file_area后立即设置该标记*/
+	F_file_area_in_around_set,
+	//F_file_area_in_init,新分配file_area后立即设置该标记
 
 	/*file_area第一次被访问设置access bit，第2次被访问只是ahead bit，第3次被访问设置hot bit*/
 	//F_file_area_in_access,
@@ -1077,7 +1079,8 @@ FILE_AREA_LIST_STATUS(mapcount_list)
 
 	FILE_AREA_STATUS(cache)
 	FILE_AREA_STATUS(mmap)
-FILE_AREA_STATUS(init)
+//FILE_AREA_STATUS(init)
+FILE_AREA_STATUS(around_set)
 	//FILE_AREA_STATUS(ahead)
 	FILE_AREA_STATUS(read)
 FILE_AREA_STATUS(mapping_exit)
@@ -1103,7 +1106,7 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	F_file_stat_in_file_stat_temp_head_list,//
 	F_file_stat_in_file_stat_middle_file_head_list,
 	F_file_stat_in_file_stat_large_file_head_list,
-    F_file_stat_in_file_stat_writeonly_file_head_list,//该文件只有write 的page，没有读page。如果是normal文件则移动到writeonly_normal链表，加快遍历到
+	F_file_stat_in_file_stat_writeonly_file_head_list,//该文件只有write 的page，没有读page。如果是normal文件则移动到writeonly_normal链表，加快遍历到
 	
 	F_file_stat_in_mapcount_file_area_list,//文件file_stat是mapcount文件
 	F_file_stat_in_zero_file_area_list,//
@@ -1121,7 +1124,7 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	F_file_stat_in_tiny_small_to_tail,
 	/*该file_stat的file_area被移动到了current_scan_file_stat_info->tmp链表*/
 	F_file_stat_in_file_area_in_tmp_list,
-    F_file_stat_in_writeonly,//该文件只有write 的page，没有读page，这种文件即便file_area个数少也要移动到middel或large文件，内存回收优先回收这种文件。
+	F_file_stat_in_writeonly,//该文件只有write 的page，没有读page，这种文件即便file_area个数少也要移动到middel或large文件，内存回收优先回收这种文件。
 	F_file_stat_invalid_start_index,
 
 	F_file_stat_in_delete_file,//标识该file_stat被移动到了global delete链表	
@@ -1437,7 +1440,7 @@ extern int enable_low_cpu_consumption;
 #define  MULTI_LEVEL_FILE_AREA_PRINTK(fmt,...) \
     do{ \
         if(multi_level_file_area_printk) \
-			printk(fmt,##__VA_ARGS__); \
+			printk_deferred(fmt,##__VA_ARGS__); \
 	}while(0);
 
 /*#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
@@ -1452,12 +1455,30 @@ panic("%s xas:0x%llx file_area:0x%llx folio:0x%llx folio_from_file_area:0x%llx p
 
 #else*/
 
+/* 又遇到一个bug， Kernel panic - not syncing: find_get_entry_for_file_area xas:0xffffffc0a96eb580 file_area:0xffffff88a9d50048 folio:0xfffffffe22a78640 page_offset_in_file_area:3 mapping:0xffffff878714a230_0x0
+ * panic+0x100/0x210
+ * find_get_entry_for_file_area+0x32c/0x348
+ * filemap_get_folios_tag_for_file_area+0xc8/0x1cc
+ * filemap_get_folios_tag+0x84/0x1c4
+ * f2fs_write_data_pages+0xa68/0xc80
+ * do_writepages+0xe0/0x1f0
+ * 简单说，find_get_entry_for_file_area 函数里，
+ * folio = (*p_file_area)->pages[*page_offset_in_file_area]
+ * folio_try_get_rcu(folio)
+ * if (unlikely(folio != rcu_dereference((*p_file_area)->pages[*page_offset_in_file_area])))
+ *     goto reset;
+ * CHECK_FOLIO_FROM_FILE_AREA_VALID(xas,mapping,folio,*p_file_area,*page_offset_in_file_area,folio_index_from_xa_index)
+ *
+ * 在CHECK_FOLIO_FROM_FILE_AREA_VALID()判断folio的mapping是NULL，不是原始mapping而panic。这是正常现象!!!!!folio_try_get_rcu后再从判断folio
+ * 还在xarray tree原槽位，这样就能100%保证folio不会被其他进程并发释放吗？不是的！其他进程此时也会并发执行这些操作，截断这个文件的folio，
+ * folio->mapping=NULL,只是还没有从xarray tree剔除改folio。于是修改CHECK_FOLIO_FROM_FILE_AREA_VALID，如果folio->mapping变了，不再panic
+ * */
 #define CHECK_FOLIO_FROM_FILE_AREA_VALID(xas,mapping,folio,p_file_area,page_offset_in_file_area,folio_index_from_xa_index) \
-	if((folio)->index != (((p_file_area)->start_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area) || (folio)->index != folio_index_from_xa_index || (folio)->mapping != mapping)\
+	if((folio)->index != (((p_file_area)->start_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area) || (folio)->index != folio_index_from_xa_index || ((folio)->mapping != mapping && NULL != (folio)->mapping))\
 panic("%s xas:0x%llx file_area:0x%llx folio:0x%llx page_offset_in_file_area:%d mapping:0x%llx_0x%llx\n",__func__,(u64)xas,(u64)p_file_area,(u64)folio,page_offset_in_file_area,(u64)mapping,(u64)((folio)->mapping));
-
+        
 #define CHECK_FOLIO_FROM_FILE_AREA_VALID_MARK(xas,mapping,folio,folio_from_file_area,p_file_area,page_offset_in_file_area,folio_index_from_xa_index) \
-	if(folio->index != (((p_file_area)->start_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area) || folio->index != folio_index_from_xa_index || folio != folio_from_file_area || (folio)->mapping != mapping)\
+	if(folio->index != (((p_file_area)->start_index << PAGE_COUNT_IN_AREA_SHIFT) + page_offset_in_file_area) || folio->index != folio_index_from_xa_index || folio != folio_from_file_area || (((folio)->mapping != mapping) && NULL != (folio)->mapping))\
 panic("%s xas:0x%llx file_area:0x%llx folio:0x%llx folio_from_file_area:0x%llx page_offset_in_file_area:%d mapping:0x%llx_0x%llx\n",__func__,(u64)xas,(u64)p_file_area,(u64)folio,(u64)folio_from_file_area,page_offset_in_file_area,(u64)mapping,(u64)((folio)->mapping));
 
 //#endif
@@ -1767,8 +1788,10 @@ inline static void is_cold_file_area_reclaim_support_fs(struct address_space *ma
 {
 	if(SUPPORT_FS_ALL == hot_cold_file_global_info.support_fs_type){
 		if(sb->s_type){
-			if(0 == strcmp(sb->s_type->name,"ext4") || 0 == strcmp(sb->s_type->name,"xfs") || 0 == strcmp(sb->s_type->name,"f2fs"))
+			if(0 == strcmp(sb->s_type->name,"ext4") || 0 == strcmp(sb->s_type->name,"xfs") || 0 == strcmp(sb->s_type->name,"f2fs")){
 				set_mapping_reserved_for_file_stat(mapping,SUPPORT_FILE_AREA_INIT_OR_DELETE);
+				test_and_set_bit(ASYNC_MEMORY_RECLAIM_ENABLE, &async_memory_reclaim_status);
+			}
 			//mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;
 		}
 	}
@@ -1809,6 +1832,92 @@ inline static void is_cold_file_area_reclaim_support_fs(struct address_space *ma
 extern int shrink_page_printk_open1;
 extern int shrink_page_printk_open;
 extern int shrink_page_printk_open_important;
+
+/*file_area->warm_list_num_and_access_freq只是一个unsigned char变量，bit0~bit3是access_freq，bit4~bit6是warm_list_num。
+ *进程读写后执行的update函数里令access_freq加1，同时异步内存回收线程会更新warm_list_num。二者是否存在并发问题呢？
+ *貌似前者执行new_val->warm_list_num_and_access_freq->val_bits->access_freq ++，后者执行new_val->warm_list_num_and_access_freq
+ *->val_bits->warm_list_num = 3，貌似互不影响。但是，access_freq和warm_list_num并不是单独的变量，而是同属于一个unsigned char
+ *变量。new_val->warm_list_num_and_access_freq->val_bits->access_freq ++ 并不是只会令 file_area->warm_list_num_and_access_freq
+ *bit0~bit3加1，本质是file_area->warm_list_num_and_access_freq  = (file_area->warm_list_num_and_access_freq + 1)& 0xf。
+ *你看到的是new_val->warm_list_num_and_access_freq->val_bits->access_freq ++，实际编译器还要把它转成
+ *file_area->warm_list_num_and_access_freq  = (file_area->warm_list_num_and_access_freq + 1)& 0xf。而
+ *new_val->warm_list_num_and_access_freq->val_bits->warm_list_num = 3，编译器要转成：取出file_area->warm_list_num_and_access_freq
+ *的bit4~bit6，赋值3后赋值给file_area->warm_list_num_and_access_freq。因此对access_freq和warm_list_num的修改，本质
+ 都是对file_area->warm_list_num_and_access_freq变量的修改。因此access_freq和warm_list_num的修改，必须要做并发防护。这里采用的是
+ cmpxchg()，先得到file_area->warm_list_num_and_access_freq老的值，然后access_freq加1或者warm_list_num赋值新的num。如果这个过程有
+ 另一个也修改了file_area->warm_list_num_and_access_freq变，会导致cmpxchg大返回值跟file_area->warm_list_num_and_access_freq老的值
+ 不相等，此时while循环成立，然后获取最新的file_area->warm_list_num_and_access_freq，再修改，在赋值，直到修改过程没有其他进程并发
+ 修改file_area->warm_list_num_and_access_freq。
+ 
+ 结论：如果存在两个进程同时修改一个变量不同的bit位，必须要考虑并发
+
+static void inline file_area_access_freq_inc(struct file_area *p_file_area)
+{
+	union warm_list_num_and_access old_val,new_val;
+	do{
+		old_val = READ_ONCE(p_file_area->warm_list_num_and_access_freq->val);
+		new_val = old_val;
+		//只有4个bit位表示access_freq，最大值15，超过直接退出
+		if(old_val->warm_list_num_and_access_freq->val_bits->access_freq + 1 > 15)
+			break;
+		//为防止不可预料的情况，必须内存乱序，必须与上0xF，从根源保证给access_freq赋的值，不会超过15
+		new_val->warm_list_num_and_access_freq->val_bits->access_freq = (old_val->warm_list_num_and_access_freq->val_bits->access_freq + 1) & 0xF;
+
+	}while(cmpxchg(p_file_area->warm_list_num_and_access_freq.val,old_val.val,new_val.val) != old_val.value);
+}
+*/
+inline static void file_area_access_freq_clear(struct file_area *p_file_area)
+{
+	union warm_list_num_and_access_freq old_val,new_val;
+	do{
+		old_val = READ_ONCE(p_file_area->warm_list_num_and_access_freq);
+		new_val = old_val;
+		new_val.val_bits.access_freq = 0;
+
+	}while(cmpxchg(&(p_file_area->warm_list_num_and_access_freq.val),old_val.val,new_val.val) != old_val.val);
+}
+inline static void file_area_access_freq_set(struct file_area *p_file_area,unsigned char val)
+{
+	union warm_list_num_and_access_freq old_val,new_val;
+	do{
+		old_val = READ_ONCE(p_file_area->warm_list_num_and_access_freq);
+		new_val = old_val;
+		new_val.val_bits.access_freq = val;
+
+	}while(cmpxchg(&(p_file_area->warm_list_num_and_access_freq.val),old_val.val,new_val.val) != old_val.val);
+}
+
+//#define list_num_get(p_file_area)  (p_file_area->warm_list_num_and_access_freq.val_bits.warm_list_num)
+//#define file_area_access_freq(p_file_area)  (p_file_area->warm_list_num_and_access_freq.val_bits.access_freq)
+inline static void file_area_access_freq_inc(struct file_area *p_file_area)
+{
+	union warm_list_num_and_access_freq old_val,new_val;
+	do{
+		old_val = READ_ONCE(p_file_area->warm_list_num_and_access_freq);
+		new_val = old_val;
+		/*只有4个bit位表示access_freq，最大值15，超过直接退出*/
+		if(old_val.val_bits.access_freq + 1 > 15)
+			break;
+		/*为防止不可预料的情况，必须内存乱序，必须与上0xF，从根源保证给access_freq赋的值，不会超过15*/
+		new_val.val_bits.access_freq = (old_val.val_bits.access_freq + 1) & 0xF;
+
+	}while(cmpxchg(&(p_file_area->warm_list_num_and_access_freq.val),old_val.val,new_val.val) != old_val.val);
+}
+inline static void list_num_update(struct file_area *p_file_area,char warm_list_num)
+{
+	union warm_list_num_and_access_freq old_val,new_val;
+	do{
+		old_val = READ_ONCE(p_file_area->warm_list_num_and_access_freq);
+		new_val = old_val;
+		/*只有3个bit位表示warm_list_num，最大值7，超过直接退出*/
+		if(warm_list_num > 7){
+			panic("update_file_area_access_freq warm_list_num:%d > 7\n",warm_list_num);
+		}
+		/*为防止不可预料的情况，比如内存乱序，必须与上0x7，从根源保证给warm_list_num赋的值，不会超过7*/
+		new_val.val_bits.warm_list_num = warm_list_num & 0x7;
+
+	}while(cmpxchg(&(p_file_area->warm_list_num_and_access_freq.val),old_val.val,new_val.val) != old_val.val);
+}
 
 
 /*#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY 
@@ -1954,14 +2063,20 @@ inline static unsigned int get_file_stat_type(struct file_stat_base *p_file_stat
 
 	return get_file_stat_type_common(file_stat_list_bit);
 }
-inline static unsigned int get_file_stat_type_file_iput(struct file_stat_base *p_file_stat_base)
+/* 当0个file_area的file_stat移动到global->zero_file_area_list链表，file_stat保持原始的in_temp、in_small、in_tiny_small
+ * 属性，因为iput()该文件时，需要根据这些file_stat属性判断，是normal file_stat，还是small或tiny small file_stat。因此，
+ * 当一个处于global->zero_file_area_list链表的file_stat，判断是否是normal文件，必须得忽略掉in_zero_file_area_list属性。*/
+//inline static unsigned int get_file_stat_type_file_iput(struct file_stat_base *p_file_stat_base)
+inline static unsigned int get_file_stat_type_ignore_zero_file_area_list(struct file_stat_base *p_file_stat_base)
 {
 	unsigned int file_stat_list_bit = p_file_stat_base->file_stat_status & FILE_STAT_LIST_MASK;
 
 	/* iput()文件时，遇到in_zero_list的file_stat，这种file_stat还保留了原始in_temp、in_middle等状态，
 	 * 这里要清理掉file_stat的in_zero状态，否则get_file_stat_type()会返回-1，现在只返回in_temp、in_middle原始状态*/
 
-	/*编译老是告警，warning: array subscript ‘long unsigned int[0]’ is partly outside array bounds*/
+	/* 编译老是告警，warning: array subscript ‘long unsigned int[0]’ is partly outside array bounds
+	 * 出于安全，最好还是使用file_stat_list_bit()，因为不用考虑并发修改file_stat_list_bit问题。不过
+	 * 这里的file_stat_list_bit是局部变量，不用考虑而已*/
 	//test_and_clear_bit(F_file_stat_in_zero_file_area_list,(unsigned long *)&file_stat_list_bit);
 
 	if(file_stat_list_bit & (1 << F_file_stat_in_zero_file_area_list))
@@ -2759,16 +2874,17 @@ inline static struct file_stat_base *file_stat_alloc_and_init_other(struct addre
 			/*writeonly文件要移动到链表尾，这样写个周期就可以被异步内存回收线程遍历到*/
 			if(0 == is_writeonly_file)
 				list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_temp_head);
-			else{
-				/*得到temp文件的current_scan_file_stat_info*/
+			else{/*-------old way:update_file_stat_next_multi_level_warm_or_writeonly_list not used
+				/ *得到temp文件的current_scan_file_stat_info* /
 				struct current_scan_file_stat_info *p_current_scan_file_stat_info = get_normal_file_stat_current_scan_file_stat_info(&hot_cold_file_global_info,1 << F_file_stat_in_file_stat_temp_head_list,is_cache_file);
-				/* 把新分配的file_stat移动到global->temp链表尾，而如果current_scan_file_stat_info[CURRENT_SCAN_FILE_STAT_INFO_TEMP]
+				/ * 把新分配的file_stat移动到global->temp链表尾，而如果current_scan_file_stat_info[CURRENT_SCAN_FILE_STAT_INFO_TEMP]
 				 * ->p_traverse_file_stat不是NULL，说明它保存了上个周期遍历的glboal->temp链表尾的file_stat->warm链表的
 				 * file_area，但没有遍历完file_stat->warm链表上所有的file_area，于是p_traverse_file_stat指向该file_stat。
 				 * 该p_traverse_file_stat永远指向global->temp链表尾的file_stat，这是规定。现在要向glboal->temp链表添加
 				 * 新的file_stat了，必须令p_traverse_file_stat赋值NULL。下个周期，从global->temp链表尾得到这个新的
-				 * file_stat，再赋值p_traverse_file_stat*/
-				update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info);
+				 * file_stat，再赋值p_traverse_file_stat* /
+				update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info);*/
+
 				list_add_tail(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_temp_head);
 			}
 		}
@@ -2846,7 +2962,7 @@ inline static struct file_area *file_area_alloc_and_init(unsigned int area_index
 
 	//在file_stat->file_area_temp链表的file_area个数加1
 	p_file_stat_base->file_area_count_in_temp_list ++;
-	set_file_area_in_init(p_file_area);
+	//set_file_area_in_init(p_file_area);
 	p_file_area->mapping = mapping;
 
 	
@@ -2943,7 +3059,14 @@ out:
 	 * 这些file_area，access_count是0，有很大概率被移动到下一层的warm链表，很容易被回收掉，然后发生refault。现在决定，这个赋值
 	 * 还留着。update函数修改为if(file_area_age < global_age || test_and_clear_bit(F_file_area_in_init,&p_file_area->file_area_state))
 	 * 这里新分配的file_area因为有init标记，如此该if依然成立，然后顺利令file_area的access_count加1*/
-	p_file_area->file_area_age = hot_cold_file_global_info.global_age; 
+	
+	/* 半年后我再分析觉得上边的分析有问题!因为mysql预读的文件page，接着可能立即被读写而执行filemap_get_read_batch()->update函数，
+	 * 而令file_area的access_count加1。但按照上边的说明，实际情况file_area的access_count没有加1，不可能呀？现在需要为file_area
+	 * 引入F_file_area_in_around_set，file_area_state没有空闲bit了，只能用F_file_area_in_init替代了。于是update函数里的
+	 * if(file_area_age < global_age || test_and_clear_bit(F_file_area_in_init,&p_file_area->file_area_state))就不能使用
+	 * F_file_area_in_init了。干脆在就在这里把file_area的access_count访问计数设置为1得了!跟之前的效果一样*/
+	p_file_area->file_area_age = hot_cold_file_global_info.global_age;
+	file_area_access_freq_set(p_file_area,1);
 	return p_file_area;
 }
 /*令inode引用计数减1，如果inode引用计数是0则释放inode结构*/
@@ -3078,6 +3201,7 @@ inline static int file_area_access_count_get(struct file_area *p_file_area)
 #else*/
 inline static void file_area_access_count_clear(struct file_area *p_file_area)
 {
+	file_area_access_freq_clear(p_file_area);
 }
 inline static void file_area_access_count_add(struct file_area *p_file_area,int count)
 {
@@ -3149,7 +3273,7 @@ inline static int can_file_area_move_to_list_head_for_temp_list_file_area(struct
 	 * 如果file_area检测到在其他file_stat链表上，测试失败
 	 * */
 	if(get_file_area_list_status(p_file_area) != 0 || get_file_area_list_status(p_file_area_prev) != 0 || get_file_area_list_status(p_file_area_next) != 0){
-		printk_deferred("%ps->can_file_area_move file_area_list_head:0x%llx file_area:0x%llx state:0x%x next:0x%llx state:0x%x prev:0x%llx state:0x%x p_file_area_error\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area,p_file_area->file_area_state,(u64)p_file_area_next,p_file_area_next->file_area_state,(u64)p_file_area_prev,p_file_area_prev->file_area_state);
+		MULTI_LEVEL_FILE_AREA_PRINTK("%ps->can_file_area_move_to_list_head_for_temp_list_file_area file_area_list_head:0x%llx file_area:0x%llx state:0x%x next:0x%llx state:0x%x prev:0x%llx state:0x%x p_file_area_error\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area,p_file_area->file_area_state,(u64)p_file_area_next,p_file_area_next->file_area_state,(u64)p_file_area_prev,p_file_area_prev->file_area_state);
 		return 0;
 	}
 
@@ -3190,7 +3314,7 @@ inline static int can_file_area_move_to_list_head(struct file_area *p_file_area,
 	 * 如果file_area检测到在其他file_stat链表上，测试失败
 	 * */
 	if(0 == (p_file_area->file_area_state & file_area_in_list_type) ||  p_file_area->file_area_state & (~(file_area_in_list_type) & FILE_AREA_LIST_MASK)){ 
-		MULTI_LEVEL_FILE_AREA_PRINTK("%ps->can_file_area_move file_area_list_head:0x%llx file_area:0x%llx state:0x%x file_area_in_list_type:0x%x p_file_area_error\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area,p_file_area->file_area_state,file_area_in_list_type);
+		MULTI_LEVEL_FILE_AREA_PRINTK("%ps->can_file_area_move_to_list_head_move file_area_list_head:0x%llx file_area:0x%llx state:0x%x file_area_in_list_type:0x%x p_file_area_error\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area,p_file_area->file_area_state,file_area_in_list_type);
 		return 0;
 	}
 
@@ -3199,7 +3323,7 @@ inline static int can_file_area_move_to_list_head(struct file_area *p_file_area,
 	 * next file_area的异常前后file_area判定，有很大概率判定导致if成立，而直接return 0，导致无法把本次遍历的file_area移动到file_stat->free链表头*/
 	if(&p_file_area_prev->file_area_list != file_area_list_head){
 		if(0 == (p_file_area_prev->file_area_state & file_area_in_list_type) ||  p_file_area_prev->file_area_state & (~(file_area_in_list_type) & FILE_AREA_LIST_MASK)){
-			MULTI_LEVEL_FILE_AREA_PRINTK("%ps->can_file_area_move file_area_list_head:0x%llx file_area:0x%llx p_file_area_prev:0x%llx state:0x%x file_area_in_list_type:0x%x p_file_area_prev error\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area,(u64)p_file_area_prev,p_file_area_prev->file_area_state,file_area_in_list_type);
+			MULTI_LEVEL_FILE_AREA_PRINTK("%ps->can_file_area_move_to_list_head file_area_list_head:0x%llx file_area:0x%llx p_file_area_prev:0x%llx state:0x%x file_area_in_list_type:0x%x p_file_area_prev error\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area,(u64)p_file_area_prev,p_file_area_prev->file_area_state,file_area_in_list_type);
 			return 0;
 		}
 	}
@@ -3207,7 +3331,7 @@ inline static int can_file_area_move_to_list_head(struct file_area *p_file_area,
 	/*同样检测后一个file_area是否合法，但它可能是链表头，要过滤掉*/
 	if(&p_file_area_next->file_area_list != file_area_list_head){
 		if(0 == (p_file_area_next->file_area_state & file_area_in_list_type) ||  p_file_area_next->file_area_state & (~(file_area_in_list_type) & FILE_AREA_LIST_MASK)){
-			MULTI_LEVEL_FILE_AREA_PRINTK("%ps->can_file_area_move file_area_list_head:0x%llx file_area:0x%llx p_file_area_next:0x%llx state:0x%x file_area_in_list_type:0x%x p_file_area_next error\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area,(u64)p_file_area_next,p_file_area_next->file_area_state,file_area_in_list_type);
+			MULTI_LEVEL_FILE_AREA_PRINTK("%ps->can_file_area_move_to_list_head file_area_list_head:0x%llx file_area:0x%llx p_file_area_next:0x%llx state:0x%x file_area_in_list_type:0x%x p_file_area_next error\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area,(u64)p_file_area_next,p_file_area_next->file_area_state,file_area_in_list_type);
 			return 0;
 		}
 	}
@@ -3355,7 +3479,7 @@ inline static void i_file_stat_small_callback(struct rcu_head *head)
 	/*有必要在这里判断file_stat的temp、refault、hot、free、mapcount链表是否空，如果有残留file_area则panic。
 	 * 防止can_tiny_small_file_change_to_small_normal_file()把tiny small转换成其他文件时，因代码有问题，导致没处理干净所有的file_area*/
 	if(!list_empty(&p_file_stat_small->file_stat_base.file_area_temp) || !list_empty(&p_file_stat_small->file_area_other) || !file_stat_in_file_stat_small_file_head_list_base(p_file_stat_base))
-		panic("%s file_stat_small:0x%llx status:0x%llx  list nor empty or status error\n",__func__,(u64)p_file_stat_small,(u64)p_file_stat_small->file_stat_base.file_stat_status);
+		panic("%s file_stat_small:0x%llx status:0x%llx  temp:%d other:%d file_area_count:%d error\n",__func__,(u64)p_file_stat_small,(u64)p_file_stat_base->file_stat_status,list_empty(&p_file_stat_base->file_area_temp),list_empty(&p_file_stat_small->file_area_other),p_file_stat_base->file_area_count);
 
 	kmem_cache_free(hot_cold_file_global_info.file_stat_small_cachep,p_file_stat_small);
 }
@@ -3367,7 +3491,7 @@ inline static void i_file_stat_tiny_small_callback(struct rcu_head *head)
 	/*有必要在这里判断file_stat的temp、refault、hot、free、mapcount链表是否空，如果有残留file_area则panic。
 	 * 防止can_small_file_change_to_normal_file()把tiny small转换成其他文件时，因代码有问题，导致没处理干净所有的file_area*/
 	if(!list_empty(&p_file_stat_tiny_small->file_stat_base.file_area_temp) || !file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base))
-		panic("%s file_stat_small:0x%llx status:0x%llx  list nor empty or status error\n",__func__,(u64)p_file_stat_tiny_small,(u64)p_file_stat_tiny_small->file_stat_base.file_stat_status);
+		panic("%s file_stat_small:0x%llx status:0x%llx  file_area_temp:%d file_area_count:%d error\n",__func__,(u64)p_file_stat_tiny_small,(u64)p_file_stat_base->file_stat_status,list_empty(&p_file_stat_base->file_area_temp),p_file_stat_base->file_area_count);
 
 	kmem_cache_free(hot_cold_file_global_info.file_stat_tiny_small_cachep,p_file_stat_tiny_small);
 }

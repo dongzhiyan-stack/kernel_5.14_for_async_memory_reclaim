@@ -544,8 +544,11 @@ static ssize_t file_area_free_age_dx_write(struct file *file,
 	if (rc)
 		return rc;
 
-	if(val < 1000)
+	if(val < 1000){
 		hot_cold_file_global_info.file_area_free_age_dx_ori = val;
+		/*在这里更新hot_cold_file_global_info.file_area_free_age_dx，原因见change_global_age_dx()函数*/
+		hot_cold_file_global_info.file_area_free_age_dx = val;
+	}
 	else
 		return -EINVAL;
 
@@ -1330,7 +1333,7 @@ direct_global_file_stat:
 
 close:	
 	//filp_close(file_temp, NULL);
-	fput(file_temp);
+	fput(file_temp);//???????????最好还是用filp_close()
 //err:
 	rcu_read_unlock();
 free:
