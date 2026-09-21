@@ -62,7 +62,7 @@
 #include <linux/mmu_notifier.h>
 
 #include "async_memory_reclaim_for_cold_file_area.h"
-
+#include <linux/reboot.h>
 
 #define AGE_DX_CHANGE_REFAULT_SLIGHT 0 
 #define AGE_DX_CHANGE_REFAULT_SERIOUS 1
@@ -102,7 +102,7 @@
 ////每次扫描文件file_stat的mapcount file_area个数
 #define SCAN_MAPCOUNT_FILE_AREA_COUNT_ONCE 8
 /*文件file_stat长时间没有被访问，则对file_stat->refault_page_count清0*/
-#define FILE_STAT_REFAULT_PAGE_COUNT_CLEAR_AGE_DX 300
+#define FILE_STAT_REFAULT_PAGE_COUNT_CLEAR_AGE_DX 3600
 struct hot_cold_file_global hot_cold_file_global_info = {
 	.support_fs_type = SUPPORT_FS_ALL,
 	//.support_fs_type = -1,
@@ -150,7 +150,10 @@ int warm_list_printk = 0;
 
 static void change_global_age_dx(struct hot_cold_file_global *p_hot_cold_file_global);
 static void change_global_age_dx_for_mmap_file(struct hot_cold_file_global *p_hot_cold_file_global);
+
 extern void deactivate_file_folio(struct folio *folio);
+extern void count_global_file_stat_refault_mapping_delete(struct address_space *mapping);
+
 static noinline int check_memory_reclaim_necessary(struct hot_cold_file_global *p_hot_cold_file_global,char limit_printk);
 inline static void check_mapcount_file_area_and_file_stat(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,/*unsigned int file_stat_list_type,*/unsigned int file_type,char is_global_file_stat);
 static void file_stat_other_list_file_area_solve_common(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,unsigned int file_area_type,unsigned int file_type);
@@ -194,11 +197,11 @@ struct file_area_array{
 	/* folio_in_file_area_look_around()里扫描到的一个file_area的folio次数，可能大于4，因为多个进程mmap映射文件时，
 	 * 会多次扫描到file_area里的page，这个变量没意义，因为当多个进程mmap映射file_area的folio，统计到的folio次数非常大。
 	 * 并且file_area只有个别folio mmap映射了，没有映射的folio在folio_in_file_area_look_around函数根本遍历不到呀*/
-    //int scan_page_count_one_file_area;
-	
+	//int scan_page_count_one_file_area;
+
 	/* folio_in_file_area_look_around()里扫描到的一个file_area的mmap folio次数，可能大于4，因为多个进程mmap映射文件时，
 	 * 会多次扫描到file_area里的page*/
-    int scan_mmap_page_count_one_file_area;
+	int scan_mmap_page_count_one_file_area;
 	/*folio_in_file_area_look_around()里扫描到的一个file_area的pte access bit置1的folio次数，也可能大于4，原因跟上边一样*/
 	int scan_active_page_count_one_file_area;
 };
@@ -211,7 +214,7 @@ struct folio_in_file_area_access_count {
 	//pgoff_t             max_folio_index_in_anchor_file_area;
 	int		folio_nr_pages;	/* 每个folio的page个数*/
 	int		nr_scan_pages;/*单次要扫描的page个数,注意是page个数，不是folio个数*/
-    struct file_area_array file_area_array[SCAN_FILE_AREA_COUNT_ONCE];
+	struct file_area_array file_area_array[SCAN_FILE_AREA_COUNT_ONCE];
 	//int anchor_file_area_pages_access_count;
 	//int second_file_area_pages_access_count;
 	//int mmap_folio_count;
@@ -399,7 +402,7 @@ int folio_in_file_area_clear_young_ptes(struct hot_cold_file_global *p_hot_cold_
 	 * 无法文件1的folio都会被判定为冷folio，因为当前folio_in_file_area_clear_young_ptes()算法感知不到进程2对文件1的mmap访问。
 	 * 除非folio_first是folio1，强制从folio1开始rmap_walk()查找，这个没办法，现在的算法没这么精准。mgrlu应该也有同样的问题。
 	 * 后果就是文件1的folio会被内存回收掉，然后再被进程2访问，造成refault。这个问题是个很现实的问题，但是目前没办法解决掉。*/
-	memset(&folio_in_file_area_ctl, 0, sizeof(folio_in_file_area_ctl));
+	memset(&folio_in_file_area_ctl, 0, sizeof(struct folio_in_file_area_access_count));
 
 	/* 扫描file_area里第一个已分配的且mmap的folio，file_area的folio0没有mmap映射 或者没有分配，此时只扫描file_area里folio1、folio2、folio3这3个folio的page,
 	 * 跳出这个循环，folio_first指向folio1。另外，如果file_area的folio都没有mmap映射，folio_not_mmap_count一定是PAGE_COUNT_IN_AREA，至少有一个folio mmap映射
@@ -559,7 +562,7 @@ int folio_in_file_area_clear_young_ptes(struct hot_cold_file_global *p_hot_cold_
 			//printk("%s file_area_index:%d scan_active_page_count_one_file_area:%d scan_mmap_page_count_one_file_area:%d\n",__func__,p_file_area->start_index,folio_in_file_area_ctl.file_area_array[i].scan_active_page_count_one_file_area,folio_in_file_area_ctl.file_area_array[i].scan_mmap_page_count_one_file_area);
 
 			/* 进入到这里说明，file_area0、file_area1、file_area2、file_area3 扫描到了至少一个有效folio，该folio肯定被mmap映射，
-			 * 并扎到了pte。于是设置file_area1、file_area2、file_area3的in_around_set标记，异步内存回收线程将来按照节奏，
+			 * 并探测到了pte。于是设置file_area1、file_area2、file_area3的in_around_set标记，异步内存回收线程将来
 			 * 在traverse_file_stat_multi_level_warm_list函数里里便遍历到这些file_area，发现file_area有in_around_set标记，
 			 * 本次就不再检测这些file_area的folio的pte了。因为之前这里遍历file_area0的folio的pte时已经遍历过了，降低损耗。
 			 * 但是要立即清理到file_area的in_around_set标记，保证下轮在traverse_file_stat_multi_level_warm_list函数里，再
@@ -674,7 +677,11 @@ static void i_file_area_callback(struct rcu_head *head)
 	/*if(p_file_area->file_area_delete.prev || p_file_area->file_area_delete.next)
 		panic("%s file_area:0x%llx file_area_state:0x%x file_area_delete error\n",__func__,(u64)p_file_area,p_file_area->file_area_state);*/
 
-	set_file_area_in_deleted(p_file_area);
+        /* file_area的in_delete标记在cold_file_area_delete函数就做了，这里不再进行了，而只是做个判断。最最还是决定把set_file_area_in_deleted放到
+	 * i_file_area_callback()。最最后决定还是把set_file_area_in_deleted放到cold_file_area_delete函数里*/
+	//set_file_area_in_deleted(p_file_area);
+	if(!file_area_in_deleted(p_file_area))
+		panic("%s file_area:0x%llx file_area_state:0x%x not have delete!!!!!!\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
 
 	kmem_cache_free(hot_cold_file_global_info.file_area_cachep,p_file_area);
 }
@@ -937,13 +944,52 @@ static inline int cold_file_area_delete_lock(struct hot_cold_file_global *p_hot_
 
 	rcu_read_unlock();
 
+	/* 有一个严重的file_area释放后还在使用的bug：file_stat_temp_list_file_area_solve()、file_stat_other_list_file_area_solve()、
+	 * file_stat_small_other_list_file_area_solve()、global_file_stat_zero_page_file_area_list_solve()、hot_file_stat_solve() 等
+	 * 函数都会遍历file_stat->free等链表上的file_area，如果file_area长时间没访问就执行cold_file_area_delete()释放掉file_area，
+	 * 最后执行list_move_enhance()把最后一次遍历的file_area_last到file_stat->free链表尾的file_area(即本次遍历过的file_area)
+	 * 移动到file_stat->free链表头，这样下边从file_stat->free链表尾遍历的file_area才是还没有遍历过的file_area。file_area_last
+	 * 如果被释放了，把这个已经释放的file_area放到file_stat->free链表头，就破坏这个链表了。不会的，因为cold_file_area_delete()
+	 * 里是调用call_rcu异步释放，只有当前进程调度一次，当前cpu才能度过rcu宽限期，才有机会真正释放掉file_area。但是在android15
+	 * 这个允许内核抢占的系统，测试发现check_multi_level_warm_list_file_area_valid()遇到了一个normal file_stat的file_area->
+	 * mapping 是NULL，不是该文件的mapping，触发了panic。最终分析这个file_area是非法的，大概率是被cold_file_area_delete()
+	 * 释放过的无效内存。只有一种可能，就是内核是抢占的，上边那些函数调用cold_file_area_delete()释放file_area_last后，
+	 * 到执行list_move_enhance()这个过程，发生了内核抢占，当前cpu调度了，度过了rcu宽限期，然后立即释放掉file_area_last。
+	 * 然后这个file_area_last可能被立即分配并添加新的文件的file_stat->temp链表，file_stat_temp_list_file_area_solve()
+	 * 函数遍历tiny small file_stat->temp链表上的in_temp、in_free、in_refault的file_area后，此时file_area_last是新的文件
+	 * 的in_temp属性的file_area，它前后的file_area也是新文件的in_temp属性的file_area。于是骗过can_file_area_move_to_list_head_for_temp_list_file_area()
+	 * 对file_area_last、它前后的file_area合法性检查，执行list_move_enhance()把file_area_last以及它后边的file_area移动到
+	 * tiny small file_stat->temp链表头。后续这些file_area会被两个文件共同管理，当新文件被file_area_temp释放掉，而老文件转成
+	 * 了normal file_stat，遍历到file_area_temp，就是无效内存了，它前后的file_area也是，会出现各种非法的file_ara。
+	 *
+	 * 解决办法是:cold_file_area_delete()函数不再调用call_rcu()释放掉file_area，file_area移动到global->rcu_delete_file_area
+	 * 链表，等到异步内存回收最后，再遍历global->rcu_delete_file_area链表释放掉这些file_area。并且，cold_file_area_delete()里要
+	 * 标记file_area的in_delete标记，确保can_file_area_move_to_list_head_for_temp_list_file_area()识别到它是非法file_area，
+	 * 不会再执行list_move_enhance()把已经cold_file_area_delete()标记释放的file_area，移动到file_stat->free、temp等链表头。
+	 * file_area和file_stat的释放目前都做了延迟释放处理，这个规矩后续不能变，file_area和file_stat不能遍历时就释放掉，否则
+	 * 非法内存问题太头疼*/
+
+	/* 我还有一个潜在的可怕的错误认知：因为cold_file_area_delete函数里，全称不休眠，call_rcu(&p_file_area->i_rcu, i_file_area_callback)
+	 * 就不会真正释放掉file_area结构。甚至一度坚持这么认为的！但是那得你先rcu_read_lock()呀，开启当前rcu宽限期，此时
+	 * call_rcu(&p_file_area->i_rcu, i_file_area_callback)后，在非抢占的内核，必须得主动休眠，才能触发真正释放到
+	 * file_area结构。为什么之前会有一个错误认知"只要不休眠，call_rcu异步释放的file_area就不会真正被释放"？还是跟AI
+	 * 的交流中，AI指出了我的认知错误！太可怕！后续并发问题，不管觉得多么简单，都把思路跟AI交流下，让AI指出问题！*/
+
 	/*rcu延迟释放file_area结构*/
 	/* 如果到这里时old_file_area是NULL，说明file_area已经先被iput()进程从xrray tree剔除而移动到
 	 * global_file_stat file_area_delete_list链表了，这个file_area已经无效了，这里不能再call_rcu释放file_area。
 	 * 否则会double free。后续异步内存回收线程会cold_file_area_delete_quick()释放该file_area.*/
 	if(old_file_area){
-		call_rcu(&p_file_area->i_rcu, i_file_area_callback);
-		//set_file_area_in_deleted(p_file_area);
+		//call_rcu(&p_file_area->i_rcu, i_file_area_callback);
+		set_file_area_in_deleted(p_file_area);
+		list_add(&p_file_area->file_area_list,&p_hot_cold_file_global->delay_delete_file_area_list);
+                /* 为什么要这里清理掉file_area的in_free属性，因为file_stat_small_other_list_file_area_solve()函数里。
+		 * 遍历的file_stat->other链表的最后一个file_area，执行cold_file_area_delete()把file_area释放掉，清理掉in_free属性。然后执行
+		 * can_file_area_move_to_list_head_for_small_file_other()判断file_area没有了in_free属性，就不会把这个file_area移动到
+		 * file_stat->other链表头。不用了。最后决定，还是在cold_file_area_delete()函数set_file_area_in_deleted()，不再清理
+		 * clear_file_area_in_free_list()。后续can_file_area_move_to_list_head_for_small_file_other()里判断file_area有
+		 * in_deleted标记，就不再把遍历过的file_area移动到链表头了!*/
+	        //clear_file_area_in_free_list(p_file_area);
 	}else
 		printk("%s file_area:0x%llx delete fail !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area);
 
@@ -1053,7 +1099,8 @@ int cold_file_area_delete_quick(struct hot_cold_file_global *p_hot_cold_file_glo
 
 	/*rcu延迟释放file_area结构*/
 	call_rcu(&p_file_area->i_rcu, i_file_area_callback);
-	//set_file_area_in_deleted(p_file_area);
+	/*释放file_area就标记file_area的in_delete标记，而不是在真正释放file_area的rcu回调里再标记in_delete*/
+	set_file_area_in_deleted(p_file_area);
 
 	if(shrink_page_printk_open1)
 		FILE_AREA_PRINT("%s file_area:0x%llx delete !!!!!!!!!!!!!!!!\n",__func__,(u64)p_file_area);
@@ -1128,7 +1175,23 @@ static void real_rcu_free_file_stat(struct hot_cold_file_global *p_hot_cold_file
 		call_rcu(&p_file_stat_base->i_rcu, i_file_stat_callback);
 	}
 }
+void rcu_delay_free_file_area(struct hot_cold_file_global *p_hot_cold_file_global)
+{
+	int del_file_area_count = 0;
+	struct file_area *p_file_area,*p_file_area_temp;
 
+	list_for_each_entry_safe_reverse(p_file_area,p_file_area_temp,&p_hot_cold_file_global->delay_delete_file_area_list,file_area_list){
+		/*防止删除file_area耗时太长*/
+		if(++ del_file_area_count > 32)
+			break;
+
+		if(!file_area_in_deleted(p_file_area))
+			panic("%s: file_area:0x%llx not delete status:0x%x\n",__func__,(u64)p_file_area,p_file_area->file_area_state);
+
+		list_del_rcu(&p_file_area->file_area_list);
+		call_rcu(&p_file_area->i_rcu, i_file_area_callback); 
+	}
+}
 /*在判定一个文件file_stat的page全部被释放，然后过了很长时间依然没人访问，执行该函数delete file_stat。必须考虑此时有进程并发访问该文件file_stat*/
 int cold_file_stat_delete(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base_del,unsigned int file_type)
 {
@@ -1549,7 +1612,7 @@ static noinline void __destroy_inode_handler_post(struct inode *inode)
 			/*该文件的file_area都移动到了global_file_stat的链表了，直接goto err，把mapping->rh_reserved1清0。*/
 			//if(inode->i_mapping->rh_reserved1 == (u64)(&hot_cold_file_global_info.global_file_stat.file_stat.file_stat_base)){
 			if(get_mapping_reserved_for_file_stat(inode->i_mapping) == (u64)(&hot_cold_file_global_info.global_file_stat.file_stat.file_stat_base)){
-                goto err;
+				goto err;
 			}
 			/* 又遇到一个重大的隐藏bug。如果当前文件文件页page全释放后还是长时间没访问，此时异步内存回收线程正好执行
 			 * cold_file_stat_delete()释放file_stat，并global_lock加锁，标记file_stat delete，然后list_del(p_file_stat)。
@@ -1560,9 +1623,9 @@ static noinline void __destroy_inode_handler_post(struct inode *inode)
 			spin_lock_irq(&hot_cold_file_global_info.global_lock);
 			/*存在极端情况，iput()时，异步内存回收线程正把cache文件转成mmap文件，这里成功加锁后可能把cache file_stat转成mmap文件了，此时就要走mmap文件分支处理了*/
 			if(!file_stat_in_cache_file_base(p_file_stat_base)){
-			    spin_unlock_irq(&hot_cold_file_global_info.global_lock);
+				spin_unlock_irq(&hot_cold_file_global_info.global_lock);
 				printk("%s p_file_stat:0x%llx status:0x%x cache change to mmap!!!!!!!\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
-                goto mmap_file_solve;
+				goto mmap_file_solve;
 			}
 			if(!file_stat_in_delete_base(p_file_stat_base)){
 				/*file_stat不一定只会在global temp链表，也会在global hot等链表，这些标记不清理了*/
@@ -1619,7 +1682,7 @@ mmap_file_solve:
 			/*该文件的file_area都移动到了global_file_stat的链表了，直接goto err，把mapping->rh_reserved1清0。*/
 			//if(inode->i_mapping->rh_reserved1 == (u64)(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base)){
 			if(get_mapping_reserved_for_file_stat(inode->i_mapping) == (u64)(&hot_cold_file_global_info.global_mmap_file_stat.file_stat.file_stat_base)){
-                goto err;
+				goto err;
 			}
 
 			spin_lock_irq(&hot_cold_file_global_info.mmap_file_global_lock);
@@ -1688,6 +1751,8 @@ void disable_mapping_file_area(struct inode *inode)
 	else
 		set_mapping_reserved_for_file_stat(inode->i_mapping,0);
 		//inode->i_mapping->rh_reserved1 = 0;
+
+	count_global_file_stat_refault_mapping_delete(inode->i_mapping);
 
 	/*mapping->rh_reserved1不为NULL就crash，正常情况不可能，但是尤其是引入global_file_stat后，为了安全还是加入这个NULL判断*/
 	//if(inode->i_mapping->rh_reserved1)
@@ -2057,7 +2122,18 @@ inline void hot_file_update_file_status(struct address_space *mapping,struct fil
 		    file_area_access_freq_inc(p_file_area);
 	}
 
-	
+	/*if(p_file_area->file_area_age > 30 && 0 == test_bit(ASYNC_THREAD_SAVE_PANIC_INFO, &async_memory_reclaim_status)){
+	    char ret;
+	    char *p = NULL;
+	    panic("panic test\n");
+	    printk("read access NULL\n");
+            ret = *p;
+	    printk("ret:%d\n",ret);
+	    printk("write access NULL\n");
+	    *p = 0;
+	}*/
+		
+
 /*#if 0/为了进一步降低文件读写的性能损耗，把这个if判断也去掉。取代的办法是，将来异步内存回收线程从file_stat->free
 	   链表遍历到这个file_area，发现有page，说明该file_area内存回收后发生了refault，然后设置file_area的in_refault标记/
 	if(file_area_in_free_list(p_file_area)){
@@ -2639,9 +2715,11 @@ next_folio:
 	 * if(file_area_in_around_set(p_file_area)) return 返回。是否有必要这样做？为了保证mapcount file_area能被及时识别到，
 	 * 还是把这段代码移动到folio_in_file_area_clear_young_ptes了。或者只有内存紧张时才直接return，方便尽快内存回收???????*/
 #if 1
-	if(file_area_in_around_set(p_file_area) ){
+	if(file_area_in_around_set(p_file_area)){
 		clear_file_area_in_around_set(p_file_area);
-		return;
+		/*如果file_area自上次标记around_set后，在60个周期内再次被遍历，则直接return，不再执行folio_in_file_area_clear_young_ptes()探测page的pte*/
+		if(p_hot_cold_file_global->global_age - p_file_area->file_area_age < 60)
+		    return;
 	}
 #endif
 
@@ -2876,13 +2954,14 @@ static unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file
 	unsigned int free_pages = 0;
 	int j,page_count;
 	unsigned int scan_file_area_count = 0,zero_page_file_area_count = 0;
-    char is_global_file_stat = file_stat_in_global_base(p_file_stat_base);
-    char is_cache_file = file_stat_in_cache_file_base(p_file_stat_base);
-    //char is_writeonly_file = file_stat_in_writeonly_base(p_file_stat_base);
+	char is_global_file_stat = file_stat_in_global_base(p_file_stat_base);
+	char is_cache_file = file_stat_in_cache_file_base(p_file_stat_base);
+	//char is_writeonly_file = file_stat_in_writeonly_base(p_file_stat_base);
 	char is_normal_file = (get_file_stat_type(p_file_stat_base) == FILE_STAT_NORMAL);
 	unsigned int scan_file_area_count_in_reclaim = 0,scan_warm_file_area_count = 0,scan_zero_page_file_area_count_in_reclaim = 0;
 	unsigned int scan_file_area_count_reclaim_fail = 0;
 	char file_area_page_reclaim_fail;
+	int free_pages_fail = 0;
 	//int fail_reclaim_file_area_dx = 18;
 
 	is_normal_file = is_global_file_stat ? 1:is_normal_file;
@@ -3305,6 +3384,7 @@ static unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file
 				free_pages += page_count;
 				for(j = 0;j < page_count;j ++){
 					if(folio_ref_count(fbatch.folios[j]) != 0 ){
+						free_pages_fail ++;
 						printk("%s file_stat:0x%llx file_area:0x%llx status:0x%x page:0x%llx flags:0x%lx index:%ld mapping:0x%llx folio_ref_count:%d != 0 !!!!!!\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,(u64)fbatch.folios[j],fbatch.folios[j]->flags,fbatch.folios[j]->index,(u64)mapping,folio_ref_count(fbatch.folios[j]));
 					}
 				}
@@ -3404,6 +3484,14 @@ direct_return:
 	p_hot_cold_file_global->hot_cold_file_shrink_counter.free_pages_count += free_pages;
 	p_hot_cold_file_global->alreay_reclaim_pages += free_pages;
 	p_hot_cold_file_global->all_reclaim_pages_one_period += free_pages;
+
+	/*global_file_stat减少page数*/
+	if(is_global_file_stat){
+		if(is_cache_file)
+			p_hot_cold_file_global->global_file_stat.nr_pages -=  free_pages_fail;
+		else
+			p_hot_cold_file_global->global_mmap_file_stat.nr_pages -=  free_pages_fail;
+	}
 	return scan_file_area_count_in_reclaim;
 }
 inline static void move_file_stat_to_global_delete_list(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,unsigned char file_type,char is_cache_file)
@@ -5701,12 +5789,11 @@ out:
 
 		p_hot_cold_file_global->file_stat_file_area_free_age_dx = p_age_dx->to_writeonly_cold_list_age_dx;
 	}
-
 }
 inline static void check_multi_level_warm_list_file_area_valid(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat *p_file_stat,struct file_area *p_file_area,struct current_scan_file_stat_info *p_current_scan_file_stat_info,char list_num_for_file_area,char is_global_file_stat)
 {
 	if(file_area_in_deleted(p_file_area) || (p_file_area->file_area_state & FILE_AREA_LIST_MASK) != 0)
-		panic("%s file_stat:0x%llx  file_area:0x%llx status:0x%x mapping:0x%llx\n",__func__,(u64)p_file_stat,(u64)p_file_area,p_file_area->file_area_state,(u64)p_file_area->mapping);
+		panic("%s file_stat:0x%llx file_stat_status:0x%x  file_area:0x%llx status:0x%x mapping:0x%llx\n",__func__,(u64)p_file_stat,p_file_stat->file_stat_base.file_stat_status,(u64)p_file_area,p_file_area->file_area_state,(u64)p_file_area->mapping);
 
 	/*这里还能对file_area->file_area_state 更多bit进行异常判断??????????*/
 	if(list_num_for_file_area != p_current_scan_file_stat_info->traverse_list_num || p_file_area->file_area_age > p_hot_cold_file_global->global_age){
@@ -5717,7 +5804,7 @@ inline static void check_multi_level_warm_list_file_area_valid(struct hot_cold_f
 	 * 但如果文件被iput了，file_stat的file_area->mapping会被赋值NULL，此时不能触发panic，因此要加上if(!file_stat_in_delete_base())限制！错了，在遍历普通文件
 	 * 的file_stat时，是inode加锁的，此时文件不可能会被iput()*/
 	if(!is_global_file_stat && p_file_area->mapping != p_file_stat->file_stat_base.mapping){
-		panic("p_file_stat:0x%llx  file_area:0x%llx status:0x%x mapping:0x%llx 0x%llx\n",(u64)p_file_stat,(u64)p_file_area,p_file_area->file_area_state,(u64)p_file_area->mapping,(u64)p_file_stat->file_stat_base.mapping);
+		panic("p_file_stat:0x%llx file_stat_status:0x%x file_area:0x%llx status:0x%x mapping:0x%llx 0x%llx\n",(u64)p_file_stat,p_file_stat->file_stat_base.file_stat_status,(u64)p_file_area,p_file_area->file_area_state,(u64)p_file_area->mapping,(u64)p_file_stat->file_stat_base.mapping);
 	}
 }
 inline static void access_freq_solve_for_writeonly_or_cold_file_area(struct current_scan_file_stat_info *p_current_scan_file_stat_info,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area)
@@ -6126,6 +6213,10 @@ get_next_file_area:
 		 * p_file_area_temp这个file_area能确保是没有遍历过的。不对，上边的循环最后，现有p_file_area=p_file_area_temp，
 		 * 然后才会有遍历的file_area个数超过max导致的遍历结束，执行到这里时，p_file_area和p_file_area_temp是同一个。
 		 * 因此啥都不用改*/
+
+		/* 并且p_file_area_temp赋值给p_traverse_first_file_area，此时的file_area，要么是file_stat->warm链表的file_area成员，
+		 * 要么是链表头，不用担心这个file_area在上边的循环里，因为file_area没有page而被移动到了global_delte_lsit链表，然后
+		 * 该file_area就会被释放掉，导致p_traverse_first_file_area指向的file_area是释放过的内存。这个情况由p_file_area_temp保证是不可能发生的!*/
 		p_current_scan_file_stat_info->p_traverse_first_file_area = p_file_area;
 		//p_current_scan_file_stat_info->p_traverse_first_file_area = p_file_area_temp;
 
@@ -6838,7 +6929,7 @@ static noinline unsigned int file_stat_multi_level_warm_or_writeonly_list_file_a
 	//if(1 != p_current_scan_file_stat_info->traverse_list_num)
 	mult_warm_list_age_dx_level_solve(p_hot_cold_file_global,p_file_stat,is_global_file_stat,p_current_scan_file_stat_info->traverse_list_num,is_cache_file,&mult_warm_list_age_dx);
 
-	MULTI_LEVEL_FILE_AREA_PRINTK("%s: current_scan_file_stat_info:0x%llx file_stat:0x%llx 0x%x global:%d is_cache_file:%d traverse_list_num:%d file_area_cold_level:%d to_down_list_age_dx:%d to_writeonly_cold_list_age_dx:%d file_stat_file_area_free_age_dx:%d\n",__func__,(u64)p_current_scan_file_stat_info,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_in_global_base(p_file_stat_base),is_cache_file,p_current_scan_file_stat_info->traverse_list_num,mult_warm_list_age_dx.file_area_cold_level,mult_warm_list_age_dx.to_down_list_age_dx,mult_warm_list_age_dx.to_writeonly_cold_list_age_dx,p_hot_cold_file_global->file_stat_file_area_free_age_dx);
+	/*MULTI_LEVEL_FILE_AREA_PRINTK*/printk("%s: current_scan_file_stat_info:0x%llx file_stat:0x%llx 0x%x global:%d is_cache_file:%d traverse_list_num:%d file_area_cold_level:%d to_down_list_age_dx:%d to_writeonly_cold_list_age_dx:%d file_stat_file_area_free_age_dx:%d\n",__func__,(u64)p_current_scan_file_stat_info,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,file_stat_in_global_base(p_file_stat_base),is_cache_file,p_current_scan_file_stat_info->traverse_list_num,mult_warm_list_age_dx.file_area_cold_level,mult_warm_list_age_dx.to_down_list_age_dx,mult_warm_list_age_dx.to_writeonly_cold_list_age_dx,p_hot_cold_file_global->file_stat_file_area_free_age_dx);
 
 	/* 重大隐藏bug：如果二者不相等，是否就一定是异常情况然后panic呢？目前想到一种情况：当前normal temp file_stat->warm链表上的file_area没有遍历完，
 	 * 但是大于scan_file_area_max于是结束遍历。等下次循环开始，本应该继续从global->temp链表尾选中这个file_stat开始遍历，但是该file_stat被iput()了，
@@ -8314,12 +8405,35 @@ static unsigned int tiny_small_file_area_move_to_global_file_stat(struct hot_col
 	synchronize_rcu();
 
 	spin_lock(p_global_lock);
-	/*可能此时该文件被iput delete了，要防护*/
+	/*可能此时该文件被iput delete了而执行__destroy_inode_handler_post()，这个函数也会global_lock加锁把file_stat移动到global delete链表，要防护*/
 	if(!file_stat_in_delete_base(p_file_stat_base)){
 		/*该file_stat从老的global链表中剔除，下边call_rcu异步释放掉*/
 		list_del_rcu(&p_file_stat_base->hot_cold_file_list);
-	}
+		/*老的file_stat的file_area和page个数统计到global_file_stat*/
+		p_global_file_stat->file_stat.file_stat_base.file_area_count += p_file_stat_base->file_area_count;
+		p_global_file_stat->nr_pages += p_file_stat_base->mapping->nrpages;
+	}else
+		panic("%s file_stat:0x%llx status:0x%x delete\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status);
+        
 	spin_unlock(p_global_lock);
+
+	/*20260917 再看这段代码，p_file_stat_base如果有in_delete标记，下边还有必要把file_area的file_area移动到global_file_stat的链表吗？
+	 * 这些file_area移动到global_file_stat->zero_page_file_area_list 后也会被释放掉，但是完全没这个必要。并且，下边file_stat还会
+	 * 被设置in_replace标记，file_stat将同时具备in_delete和in_replaced标记，是否会有问题呢?????????????????????????????????????*/
+        /*不对，突然灵光一现，发现了一个潜藏的bug。
+	 * 上边spin_lock(p_global_lock)前，这个文件被iput()了，file_stat被移动到了global->delete链表。下边把它的file_area移动到
+	 * global_file_stat->zero_page_file_area_list、warm等链表。这些file_area因为iput()时所属的文件file_stat，是个普通的文件，
+	 * 不是global_file_stat，因为它的file_area都没有in_mapping_exit标记，被认为是正常的file_area。后期这些file_area因为
+	 * 长时间没人访问于是cold_file_area_delete()，要首先xas_lock_irq(&xas)加锁，但是此时该文件的inode和mapping都释放了呀！
+	 * xas_lock_irq(&xas)加锁就是非法内存访问了！太可怕了。正常属于global_file_stat的file_area，所属文件iput()时，都会
+	 * 标记file_area的in_mapping_exit标记，并且file_area->mapinig = NULL。这种file_area执行cold_file_area_delete标记，
+	 * 发现file_area->mapinig = NULL是NULL，执行cold_file_area_delete就return -1了，后续执行cold_file_area_delete_quick，
+	 * 不用再xas_lock_irq(&xas)加锁。现在的这个bug，file_area所属文件被iput()了，但没有被标记in_mapping_exit和
+	 * file_area->mapping=NULL，导致执行cold_file_area_delete()使用xas_lock_irq(&xas)加锁，访问已经释放内存的inode和mapping。
+	 * 解决方案很简单，上边file_stat_in_delete_base()成立，直接return走。
+	 *
+	 * 不对，上边是先set_mapping_reserved_for_file_stat()把global_file_stat赋值给文件的mapping->rh_reserved1，然后synchronize_rcu()
+	 * 等待rcu退出。更不对，此时执行当前函数时，该文件是inode加锁的，这个文件不可能被iput()，file_stat有delete标记就要panic，异常情况*/
 
 	/*把tiny small->temp链表上的in_free、in_refault、in_mapcount等file_area清理掉原属性清理掉，并移动到global_file_stat对应链表*/
 	list_for_each_entry_safe_reverse(p_file_area,p_file_area_temp,&p_file_stat_base->file_area_temp,file_area_list){
@@ -8369,7 +8483,7 @@ static unsigned int tiny_small_file_area_move_to_global_file_stat(struct hot_col
 	 * 把file_stat_base->file_area_temp链表上的file_area移动到global_file_stat->warm链表。还有一点，不能把
 	 * file_area移动到global_file_stat.file_stat_base.temp链表，否则还得spin_lock(global_file_stat.file_stat_base.file_stat_lock)
 	 * 加锁，因为其他文件会同时向global_file_stat.file_stat_base.temp链表添加file_area。而global_file_stat.file_area_warm
-	 * 链表，只有异步内存回收线程会操作，不用担心并发问题*/
+	 * 链表，只有异步内存回收线程会操作，不用担心并发问题。这里的spin_lock(&p_file_stat_base->file_stat_lock)加锁其实没必要*/
 	spin_lock(&p_file_stat_base->file_stat_lock);
 	/*if(is_cache_file)
 		list_splice_init(&p_file_stat_base->file_area_temp,&p_hot_cold_file_global->global_file_stat.file_stat.file_area_warm);
@@ -9198,7 +9312,7 @@ static noinline unsigned int get_file_area_from_file_stat_list(struct hot_cold_f
 				/*current_scan_file_stat_info_is_list_tail_entry是1表示p_current_scan_file_stat_info->p_traverse_file_stat就是global->temp链表尾的file_stat*/
 				current_scan_file_stat_info_is_list_tail_entry = 1;
 			}else{
-				printk("%s p_traverse_file_stat:0x%llx current_scan_file_stat_info_is_list_tail_entry:%d p_file_stat_base_tail:0x%llx",__func__,(u64)p_current_scan_file_stat_info->p_traverse_file_stat,current_scan_file_stat_info_is_list_tail_entry,(u64)p_file_stat_base_tail);
+				CURRENT_SCAN_FILE_STAT_INFO_PRINT("%s p_traverse_file_stat:0x%llx current_scan_file_stat_info_is_list_tail_entry:%d p_file_stat_base_tail:0x%llx",__func__,(u64)p_current_scan_file_stat_info->p_traverse_file_stat,current_scan_file_stat_info_is_list_tail_entry,(u64)p_file_stat_base_tail);
 			}
 		}
 	}
@@ -9239,7 +9353,7 @@ current_scan_file_stat_info_repeat:
 				 * p_file_stat_base = p_current_scan_file_stat_info->p_traverse_file_stat*/
 				current_scan_file_stat_info_is_list_tail_entry = 2;
 				p_file_stat_base = &p_current_scan_file_stat_info->p_traverse_file_stat->file_stat_base;
-				printk("%s p_traverse_file_stat:0x%llx current_scan_file_stat_info_is_list_tail_entry:%d",__func__,(u64)p_current_scan_file_stat_info->p_traverse_file_stat,current_scan_file_stat_info_is_list_tail_entry);
+				CURRENT_SCAN_FILE_STAT_INFO_PRINT("%s p_traverse_file_stat:0x%llx current_scan_file_stat_info_is_list_tail_entry:%d",__func__,(u64)p_current_scan_file_stat_info->p_traverse_file_stat,current_scan_file_stat_info_is_list_tail_entry);
 			}else{
 				/* 否则，直接使用从global->temp链表尾获取最新的file_stat并赋值给p_current_scan_file_stat_info->p_traverse_file_stat。NO!!!!!!*/
 
@@ -9334,7 +9448,7 @@ current_scan_file_stat_info_repeat:
 				/* current_scan_file_stat_info_is_list_tail_entry是2表示上边发现原始current_scan_file_stat_info->p_traverse_file_stat
 				 * 的file_stat，不是global->temp链表尾的file_stat，这个file_stat因为pages太少被跳过扫描。赋值1表示p_traverse_file_stat无效了*/
 				if(2 == current_scan_file_stat_info_is_list_tail_entry){
-					printk("%s p_traverse_file_stat:0x%llx current_scan_file_stat_info_is_list_tail_entry:%d nrpage < 16\n",__func__,(u64)p_current_scan_file_stat_info->p_traverse_file_stat,current_scan_file_stat_info_is_list_tail_entry);
+					CURRENT_SCAN_FILE_STAT_INFO_PRINT("%s p_traverse_file_stat:0x%llx current_scan_file_stat_info_is_list_tail_entry:%d nrpage < 16\n",__func__,(u64)p_current_scan_file_stat_info->p_traverse_file_stat,current_scan_file_stat_info_is_list_tail_entry);
 					if(p_file_stat_base != p_file_stat_base_current_scan)
 						panic("1:%s p_file_stat_base_current_scan:0x%llx != p_file_stat_base error:0x%llx\n",__func__,(u64)p_file_stat_base_current_scan,(u64)p_file_stat_base);
 					current_scan_file_stat_info_is_list_tail_entry = 1;
@@ -9366,7 +9480,7 @@ current_scan_file_stat_info_repeat:
 				/* current_scan_file_stat_info_is_list_tail_entry是2表示上边发现原始current_scan_file_stat_info->p_traverse_file_stat
 				 * 的file_stat，不是global->temp链表尾的file_stat，这个cache file_stat被转成mmap file_stat了。赋值1表示p_traverse_file_stat无效了*/
 				if(2 == current_scan_file_stat_info_is_list_tail_entry){
-					printk("%s p_traverse_file_stat:0x%llx current_scan_file_stat_info_is_list_tail_entry:%d cache to mmap\n",__func__,(u64)p_current_scan_file_stat_info->p_traverse_file_stat,current_scan_file_stat_info_is_list_tail_entry);
+					CURRENT_SCAN_FILE_STAT_INFO_PRINT("%s p_traverse_file_stat:0x%llx current_scan_file_stat_info_is_list_tail_entry:%d cache to mmap\n",__func__,(u64)p_current_scan_file_stat_info->p_traverse_file_stat,current_scan_file_stat_info_is_list_tail_entry);
 					if(p_file_stat_base != p_file_stat_base_current_scan)
 						panic("1:%s p_file_stat_base_current_scan:0x%llx != p_file_stat_base error:0x%llx\n",__func__,(u64)p_file_stat_base_current_scan,(u64)p_file_stat_base);
 					current_scan_file_stat_info_is_list_tail_entry = 1;
@@ -9447,7 +9561,7 @@ current_scan_file_stat_info_repeat:
 			if(FILE_STAT_NORMAL == file_type){
 				file_stat_warm_or_writeonly_file_area_check_ok = file_stat_traverse_warm_list_num != p_file_stat->traverse_warm_list_num;
 				if(2 == current_scan_file_stat_info_is_list_tail_entry){
-					printk("%s p_traverse_file_stat:0x%llx current_scan_file_stat_info_is_list_tail_entry:%d file_stat_warm_or_writeonly_file_area_check_ok:%d scan_file_area_count:%d scan_file_area_max:%d scan_file_stat_count:%d scan_file_stat_max:%d memory_pressure_level:%d\n",__func__,(u64)p_current_scan_file_stat_info->p_traverse_file_stat,current_scan_file_stat_info_is_list_tail_entry,file_stat_warm_or_writeonly_file_area_check_ok,scan_file_area_count,scan_file_area_max,scan_file_stat_count,scan_file_stat_max,p_hot_cold_file_global->memory_pressure_level);
+					CURRENT_SCAN_FILE_STAT_INFO_PRINT("%s p_traverse_file_stat:0x%llx current_scan_file_stat_info_is_list_tail_entry:%d file_stat_warm_or_writeonly_file_area_check_ok:%d scan_file_area_count:%d scan_file_area_max:%d scan_file_stat_count:%d scan_file_stat_max:%d memory_pressure_level:%d\n",__func__,(u64)p_current_scan_file_stat_info->p_traverse_file_stat,current_scan_file_stat_info_is_list_tail_entry,file_stat_warm_or_writeonly_file_area_check_ok,scan_file_area_count,scan_file_area_max,scan_file_stat_count,scan_file_stat_max,p_hot_cold_file_global->memory_pressure_level);
 
 					if(file_stat_warm_or_writeonly_file_area_check_ok){
 						if(p_file_stat_base != p_file_stat_base_current_scan)
@@ -9456,7 +9570,7 @@ current_scan_file_stat_info_repeat:
 						 * 不是global->temp链表尾的file_stat，warm链表的file_area终于遍历完成了，于是下边goto current_scan_file_stat_info_repeat
 						 * 重新从global->temp链表尾得到新的file_stat。*/
 						current_scan_file_stat_info_is_list_tail_entry = 3;
-						printk("%s p_traverse_file_stat:0x%llx current_scan_file_stat_info_is_list_tail_entry:%d",__func__,(u64)p_current_scan_file_stat_info->p_traverse_file_stat,current_scan_file_stat_info_is_list_tail_entry);
+						CURRENT_SCAN_FILE_STAT_INFO_PRINT("%s p_traverse_file_stat:0x%llx current_scan_file_stat_info_is_list_tail_entry:%d",__func__,(u64)p_current_scan_file_stat_info->p_traverse_file_stat,current_scan_file_stat_info_is_list_tail_entry);
 					}
 				}
 			}
@@ -9483,7 +9597,7 @@ next_file_stat:
 			 * 就会执行update_file_stat_next_multi_level_warm_or_writeonly_list()对current_scan_file_stat_info->p_traverse_file_stat赋值NULL*/
 			//current_scan_file_stat_info->p_traverse_file_stat = NULL;
 			current_scan_file_stat_info_is_list_tail_entry = 1;
-			printk("%s p_traverse_file_stat:0x%llx current_scan_file_stat_info_is_list_tail_entry:%d goto current_scan_file_stat_info_repeat",__func__,(u64)p_current_scan_file_stat_info->p_traverse_file_stat,current_scan_file_stat_info_is_list_tail_entry);
+			CURRENT_SCAN_FILE_STAT_INFO_PRINT("%s p_traverse_file_stat:0x%llx current_scan_file_stat_info_is_list_tail_entry:%d goto current_scan_file_stat_info_repeat",__func__,(u64)p_current_scan_file_stat_info->p_traverse_file_stat,current_scan_file_stat_info_is_list_tail_entry);
 			goto current_scan_file_stat_info_repeat; 
 		}
 
@@ -10031,7 +10145,7 @@ static noinline void walk_throuth_all_file_area(struct hot_cold_file_global *p_h
 
 	memory_reclaim_param_solve(p_hot_cold_file_global,&memory_reclaim_param,is_cache_file);
 
-	MULTI_LEVEL_FILE_AREA_PRINTK("global_age:%d reclaim_pages_target:%d alreay_reclaim_pages:%d memory_pressure_level:%d memory_still_memrgency_after_reclaim:%d scan_temp_file_stat_max:%d scan_temp_file_area_max:%d scan_middle_file_stat_max:%d scan_middle_file_area_max:%d scan_large_file_stat_max:%d scan_large_file_area_max:%d scan_hot_file_area_max:%d file_area_temp_to_cold_age_dx:%d file_area_hot_to_temp_age_dx:%d file_area_refault_to_temp_age_dx:%d mapcount_file_area_max:%d scan_large_file_area_max:%d scan_large_file_stat_max:%d\n",p_hot_cold_file_global->global_age,p_hot_cold_file_global->reclaim_pages_target,p_hot_cold_file_global->alreay_reclaim_pages,p_hot_cold_file_global->memory_pressure_level,p_hot_cold_file_global->memory_still_memrgency_after_reclaim,param->scan_temp_file_stat_max,param->scan_temp_file_area_max,param->scan_middle_file_stat_max,param->scan_middle_file_area_max,param->scan_large_file_stat_max,param->scan_large_file_area_max,param->scan_hot_file_area_max,p_hot_cold_file_global->file_area_temp_to_cold_age_dx,p_hot_cold_file_global->file_area_hot_to_temp_age_dx,p_hot_cold_file_global->file_area_refault_to_temp_age_dx,param->mapcount_file_area_max,param->scan_large_file_area_max,param->scan_large_file_stat_max);
+	/*MULTI_LEVEL_FILE_AREA_PRINTK*/printk("global_age:%d reclaim_pages_target:%d alreay_reclaim_pages:%d memory_pressure_level:%d memory_still_memrgency_after_reclaim:%d scan_temp_file_stat_max:%d scan_temp_file_area_max:%d scan_middle_file_stat_max:%d scan_middle_file_area_max:%d scan_large_file_stat_max:%d scan_large_file_area_max:%d scan_hot_file_area_max:%d file_area_temp_to_cold_age_dx:%d file_area_hot_to_temp_age_dx:%d file_area_refault_to_temp_age_dx:%d mapcount_file_area_max:%d scan_large_file_area_max:%d scan_large_file_stat_max:%d\n",p_hot_cold_file_global->global_age,p_hot_cold_file_global->reclaim_pages_target,p_hot_cold_file_global->alreay_reclaim_pages,p_hot_cold_file_global->memory_pressure_level,p_hot_cold_file_global->memory_still_memrgency_after_reclaim,param->scan_temp_file_stat_max,param->scan_temp_file_area_max,param->scan_middle_file_stat_max,param->scan_middle_file_area_max,param->scan_large_file_stat_max,param->scan_large_file_area_max,param->scan_hot_file_area_max,p_hot_cold_file_global->file_area_temp_to_cold_age_dx,p_hot_cold_file_global->file_area_hot_to_temp_age_dx,p_hot_cold_file_global->file_area_refault_to_temp_age_dx,param->mapcount_file_area_max,param->scan_large_file_area_max,param->scan_large_file_stat_max);
 
 	if(is_cache_file){
 		unsigned int reclaim_pages_from_writeonly_file;
@@ -10310,6 +10424,8 @@ tiny_small_file_change_solve:
          
 	/*在异步内存回收线程最后，再释放掉get_file_area_from_file_stat_list()和file_stat_has_zero_file_area_manage()原本要释放掉的无效file_stat，此时肯定没人用它们了*/
 	real_rcu_free_file_stat(p_hot_cold_file_global);
+	/*在异步内存回收线程最后，再真正释放掉file_area，此时可能没人再使用这些file_arae了*/
+	rcu_delay_free_file_area(p_hot_cold_file_global);
 	//return 0;
 }
 /*6.12内核sysctl_extfrag_threshold不再是全局变量，这里单独定义*/
@@ -10541,8 +10657,10 @@ out:
 			p_hot_cold_file_global->reclaim_pages_target = max(reclaim_pages_target_for_max_zone ,reclaim_pages_target_for_second_zone) + 100;
 			break;
 		case MEMORY_PRESSURE_RECLAIM:
-			//p_hot_cold_file_global->reclaim_pages_target = max(reclaim_pages_target_for_max_zone ,reclaim_pages_target_for_second_zone);
-			p_hot_cold_file_global->reclaim_pages_target = min(reclaim_pages_target_for_max_zone ,reclaim_pages_target_for_second_zone) + 100;
+			if(-1 != second_zone_state)
+				p_hot_cold_file_global->reclaim_pages_target = reclaim_pages_target_for_max_zone - (reclaim_pages_target_for_max_zone >> 2);
+			else/*只有一个max_zone*/
+				p_hot_cold_file_global->reclaim_pages_target = min(reclaim_pages_target_for_max_zone ,reclaim_pages_target_for_second_zone) + 100;
 			break;
 		case MEMORY_LITTLE_RECLAIM:
 			p_hot_cold_file_global->reclaim_pages_target = 64;
@@ -10550,9 +10668,7 @@ out:
 		default:
 			p_hot_cold_file_global->reclaim_pages_target = 0;
 	}
-	if(printk_level){
-	    MULTI_LEVEL_FILE_AREA_PRINTK("printk_level:%d max_zone_state:%d second_zone_state:%d memory_pressure_level:%d reclaim_pages_target_for_max_zone:%d reclaim_pages_target_for_second_zone:%d\n",printk_level,max_zone_state,second_zone_state,memory_pressure_level,reclaim_pages_target_for_max_zone,reclaim_pages_target_for_second_zone);
-	}
+	/*MULTI_LEVEL_FILE_AREA_PRINTK*/printk("printk_level:%d max_zone_state:%d second_zone_state:%d memory_pressure_level:%d reclaim_pages_target_for_max_zone:%d reclaim_pages_target_for_second_zone:%d\n",printk_level,max_zone_state,second_zone_state,memory_pressure_level,reclaim_pages_target_for_max_zone,reclaim_pages_target_for_second_zone);
 
 	return memory_pressure_level;
 }
@@ -10570,10 +10686,10 @@ void static my_sleep_ms(unsigned int ms)
 	set_current_state(TASK_INTERRUPTIBLE);
 	schedule_hrtimeout(&timeout, HRTIMER_MODE_REL);
 }
-void notify_panic_to_async_thread(void)
+int notify_panic_to_async_thread(void)
 {
-    set_bit(ASYNC_THREAD_SAVE_PANIC_INFO, &async_memory_reclaim_status);
-    wake_up_process(hot_cold_file_global_info.async_memory_reclaim);
+    wake_up_process(hot_cold_file_global_info.hot_cold_file_thead);
+    return test_and_set_bit(ASYNC_THREAD_SAVE_PANIC_INFO, &async_memory_reclaim_status);
 }
 bool test_async_thread_stop_run(void)
 {
@@ -10614,11 +10730,19 @@ int hot_cold_file_thread(void *p){
 			/*如果系统触发了panic*/
 			if(unlikely(test_bit(ASYNC_THREAD_SAVE_PANIC_INFO, &async_memory_reclaim_status))){
 				extern void panic_write_to_file(void);
+				extern void kill_all_process(void);
 
-				/*把panic日志写入/data/local/tmp/panic文件*/
-				panic_write_to_file();
 				/*停止运行异步内存回收线程*/
 				clear_bit(ASYNC_MEMORY_RECLAIM_ENABLE, &async_memory_reclaim_status);
+
+				/*把panic日志写入/data/local/tmp/panic文件*/
+				printk("11111111111\n");
+				panic_write_to_file();
+				printk("22222222222\n");
+				kill_all_process();   
+				printk("33333333333\n");
+				mdelay(15000);
+				kernel_restart("userrequested");
 				while(1)
 					msleep(1000);
 			}

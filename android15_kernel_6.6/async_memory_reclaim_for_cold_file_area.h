@@ -67,7 +67,7 @@
 //异步内存回收周期，单位s
 #define ASYNC_MEMORY_RECLIAIM_PERIOD 10
 //最大文件名字长度
-#define MAX_FILE_NAME_LEN 100
+#define MAX_FILE_NAME_LEN 260
 //当一个文件file_stat长时间不被访问，释放掉了所有的file_area，再过FILE_STAT_DELETE_AGE_DX个周期，则释放掉file_stat结构
 #define FILE_STAT_DELETE_AGE_DX  10
 //一个 file_area 包含的page数，默认4个
@@ -624,7 +624,7 @@ struct current_scan_file_stat_info{
  * 依然会移动到global_file_stat链表上(会很少)，赋值生效后，文件的mmap fil_area都会移动到global_mmap_file_stat
  * */
 struct global_file_stat{
-    struct file_stat file_stat;
+	struct file_stat file_stat;
 
 	//struct list_head file_area_warm_cold;
 	struct list_head file_area_warm_middle_hot;
@@ -632,7 +632,7 @@ struct global_file_stat{
 
 	struct list_head file_area_mapcount;
 	struct list_head file_area_refault;
-	
+
 	struct list_head file_area_delete_list;
 	struct list_head file_area_delete_list_temp;
 	struct list_head zero_page_file_area_list;
@@ -640,6 +640,7 @@ struct global_file_stat{
 	char traverse_file_stat_type;
 
 	struct current_scan_file_stat_info current_scan_file_stat_info;
+	unsigned int nr_pages;
 };
 struct memory_reclaim_info_for_one_warm_list{
 	unsigned int scan_file_area_count_in_reclaim;
@@ -972,6 +973,8 @@ struct hot_cold_file_global
 	struct list_head tiny_small_file_stat_free_list_temp;
 	struct list_head small_file_stat_free_list_temp;
 	struct list_head file_stat_free_list_temp;
+
+	struct list_head delay_delete_file_area_list;
 };
 
 
@@ -1005,6 +1008,7 @@ enum file_area_status{
 	F_file_area_in_cache,
 	F_file_area_in_mmap,	
 	F_file_area_in_around_set,
+	FILE_AREA_LIST_END_BIT = F_file_area_in_around_set,
 	//F_file_area_in_init,新分配file_area后立即设置该标记
 
 	/*file_area第一次被访问设置access bit，第2次被访问只是ahead bit，第3次被访问设置hot bit*/
@@ -1442,6 +1446,8 @@ extern int enable_low_cpu_consumption;
         if(multi_level_file_area_printk) \
 			printk_deferred(fmt,##__VA_ARGS__); \
 	}while(0);
+
+#define CURRENT_SCAN_FILE_STAT_INFO_PRINT(fmt,...) {}
 
 /*#ifdef ASYNC_MEMORY_RECLAIM_FILE_AREA_TINY
 
@@ -2872,6 +2878,13 @@ inline static struct file_stat_base *file_stat_alloc_and_init_other(struct addre
 		if(is_cache_file){
 			hot_cold_file_global_info.file_stat_count++;
 			/*writeonly文件要移动到链表尾，这样写个周期就可以被异步内存回收线程遍历到*/
+			/* 这里有spin_lock(global_lock)加锁就能确保把file_stat移动到global->temp链表尾万事大吉吗？no，异步内存回收线程
+			 * 可能正在get_file_area_from_file_stat_list()函数遍历global->temp链表尾的file_stat，并没有spin_lock(global_lock)
+			 * 加锁，只有file_stat_delete_protect_lock()建议原子锁防护，没用的！这两个线程，一个遍历链表尾的file_stat，
+			 * 一个向链表尾添加file_stat，没事吗？两个都写肯定有问题，一个读一个写没事的！get_file_area_from_file_stat_list()
+			 * 从链表尾得到的file_stat，要么是老的file_stat，要么是这里新添加的file_stat，没有其他结果。我原本还想再这里
+			 * 使用file_stat_delete_protect_lock()加锁，但是想想没用，因为在for循环里使用老的file_stat时，并没有
+			 * file_stat_delete_protect_lock()加锁，防护不了*/
 			if(0 == is_writeonly_file)
 				list_add(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_temp_head);
 			else{/*-------old way:update_file_stat_next_multi_level_warm_or_writeonly_list not used
@@ -2882,8 +2895,18 @@ inline static struct file_stat_base *file_stat_alloc_and_init_other(struct addre
 				 * file_area，但没有遍历完file_stat->warm链表上所有的file_area，于是p_traverse_file_stat指向该file_stat。
 				 * 该p_traverse_file_stat永远指向global->temp链表尾的file_stat，这是规定。现在要向glboal->temp链表添加
 				 * 新的file_stat了，必须令p_traverse_file_stat赋值NULL。下个周期，从global->temp链表尾得到这个新的
-				 * file_stat，再赋值p_traverse_file_stat* /
-				update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info);*/
+				 * file_stat，再赋值p_traverse_file_stat*/
+
+				/* 这个操作有点浪费性能，完全可以有替代方案。这里不清空current_scan_file_stat_info。异步内存回收执行
+				 * get_file_area_from_file_stat_list()函数，遍历global->temp链表的file_stat时，如果current_scan_file_stat_info
+				 * 有指向的file_stat，说明上一轮的file_stat没有遍历完file_area。但是global->temp链表尾的是writeonly文件，
+				 * 此时再执行update_file_stat_next_multi_level_warm_or_writeonly_list()函数，清零current_scan_file_stat_info
+				 * 指向的file_stat。直接从链表尾取出writeonly文件遍历！*/
+
+				/* 还有一个问题，这里不能执行update_file_stat_next_multi_level_warm_or_writeonly_list()，因为异步内存回收线程
+				 * 此时也会并发执行该函数，修改global->temp链表的current_scan_file_stat_info，此时就会出现多进程同时修改一个
+				 * current_scan_file_stat_info结构，导致出现不可预料的错误数据，*/
+				//update_file_stat_next_multi_level_warm_or_writeonly_list(p_current_scan_file_stat_info);
 
 				list_add_tail(&p_file_stat_base->hot_cold_file_list,&hot_cold_file_global_info.file_stat_temp_head);
 			}
@@ -3027,7 +3050,17 @@ out:
 	 * 还要考虑一点，如果异步内存回收线程，正在使用的file_stat正好是该p_file_stat_base，会有并发问题吗？想想不会的*/
 	if(file_stat_in_file_stat_tiny_small_file_head_list_base(p_file_stat_base) && p_file_stat_base->file_area_count > NORMAL_TEMP_FILE_AREA_COUNT_LEVEL &&
 			!file_stat_in_tiny_small_to_tail_base(p_file_stat_base)){
-         
+		
+		/* 这里有spin_lock(global_lock)加锁就能确保把file_stat移动到global->tiny small链表尾万事大吉吗？no，异步内存回收线程
+		 * 可能正在get_file_area_from_file_stat_list()函数遍历global->tiny small链表尾的file_stat，并没有spin_lock(global_lock)
+		 * 加锁，只有file_stat_delete_protect_lock()建议原子锁防护，没用的！这两个线程，一个遍历链表尾的file_stat，
+		 * 一个向链表尾添加file_stat，没事吗？两个都写肯定有问题，一个读一个写没事的！get_file_area_from_file_stat_list()
+		 * 从链表尾得到的file_stat，要么是老的file_stat，要么是这里新添加的file_stat，没有其他结果。我原本还想再这里
+		 * 使用file_stat_delete_protect_lock()加锁，但是想想没用，因为在for循环里使用老的file_stat时，并没有
+		 * file_stat_delete_protect_lock()加锁，防护不了。还有一个结果是，这里修改了file_stat在global->tiny small
+		 * 链表的前一个file_stat，即file_stat_temp，但这有啥有问题，仅仅影响get_file_area_from_file_stat_list()函数里，
+		 * 得不到预期的链表尾的file_stat，延迟遍历！不会导致遍历到错误的file_stat，遍历到其他glboal->temp等链表*/
+
 		/*设置in_tiny_small_to_tail标记，保证上边的if只成立一次*/
 		set_file_stat_in_tiny_small_to_tail_base(p_file_stat_base);
 		if(file_stat_in_cache_file_base(p_file_stat_base)){
@@ -3213,6 +3246,32 @@ inline static int file_area_access_count_get(struct file_area *p_file_area)
 //#endif
 //#endif
 
+inline static void set_file_area_in_deleted(struct file_area *p_file_area)
+{
+	/*不能在cold_file_area_delete()调用set_file_area_in_deleted()直接赋值p_file_area->file_area_state = 0xff这样赋值，
+	 * 因为得考虑file_area被udpate函数并发访问，也会并发修改p_file_area->file_area_state呀。就再次犯了并发修改file_area_state
+	 * 的史上最严重的内核bug。不可能，因为cold_file_area_delete()里最后调用set_file_area_in_deleted()时，该file_area已经
+	 * 没有page，并且从xarry tree剔除了。没有会再用到该filie_area，更不会在read_batch或find_get_entry调用update函数并发
+	 * 修改file_area_state，因为执行update函数并发改file_area_state，最起码得保证该file_area有page呀，并且该file_area
+	 * 得在xarray tree！即便在filemap_get_read_batch_for_file_area()函数遍历xarray tree时，该file_area被并发内存回收而
+	 * 剔除xarray tree，此时read_batch函数的for循环里，要么获取page失败，要吗重新遍历xarray tree，无法再得到file_area。
+	 * 总之执行不到update函数，但是file_area没有page。这些情况自然没问题。
+	 *
+	 * 但是有一个场景得重视，read_batchfor循环里，遍历最后一个file_area时，这个file_area因为没有page而被异步内存回收
+	 * 线程并发cold_file_area_delete()，最后执行set_file_area_in_deleted()对p_file_area->file_area_state直接赋值。
+	 * 但是在read_batch函数里，因为这个file_area没有page，直接break跳出循环，然后if(p_file_area && page_offset_in_file_area)
+	 * 成立而执行update函数，令file_area_state的access_freq加1。这就跟异步内存回收线程set_file_area_in_deleted()对
+	 * file_area_state直接赋值冲突了，因为这个赋值不是原子操作！if(page_offset_in_file_area)应该能限制住，因为
+	 * 此时page_offset_in_file_area必然是0，因为file_area一个page都没有！但是为了保险再加个file_area_have_page吧！
+	 *
+	 * 其实更保险的是，把p_file_area->file_area_state直接赋值改为cmpxchg()形式的原子赋值，有这个必要吗???????*/
+	p_file_area->file_area_state = ((1 << FILE_AREA_LIST_END_BIT) - 1);
+}
+inline static char file_area_in_deleted(struct file_area *p_file_area)
+{
+	return (p_file_area->file_area_state == ((1 << FILE_AREA_LIST_END_BIT) - 1));
+}
+
 /*head代表一段链表，first~tail是这个链表尾的几个连续成员，该函数是把first~tail指向的几个成员移动到链表头*/
 //void list_move_enhance(struct list_head *head,struct list_head *first,struct list_head *tail)
 inline static void list_move_enhance(struct list_head *head,struct list_head *first)
@@ -3258,6 +3317,11 @@ inline static int can_file_area_move_to_list_head_for_temp_list_file_area(struct
 	//p_file_area在链表的前一个file_area
 	struct file_area *p_file_area_prev = list_prev_entry(p_file_area, file_area_list);
 
+	if(file_area_in_deleted(p_file_area) || file_area_in_deleted(p_file_area_next) ||file_area_in_deleted(p_file_area_prev)){
+	    printk_deferred("%s file_area:0x%llx state:0x%x next:0x%llx state:0x%x prev:0x%llx state:0x%x delete\n",__func__,(u64)p_file_area,p_file_area->file_area_state,(u64)p_file_area_next,p_file_area_next->file_area_state,(u64)p_file_area_prev,p_file_area_prev->file_area_state);
+	    return 0;
+	}
+
 	/*file_area不能是链表头*/
 	if(&p_file_area->file_area_list == file_area_list_head)
 		return 0;
@@ -3298,6 +3362,11 @@ inline static int can_file_area_move_to_list_head(struct file_area *p_file_area,
 	struct file_area *p_file_area_next = list_next_entry(p_file_area, file_area_list);
 	//p_file_area在链表的前一个file_area
 	struct file_area *p_file_area_prev = list_prev_entry(p_file_area, file_area_list);
+
+	if(file_area_in_deleted(p_file_area) || file_area_in_deleted(p_file_area_next) ||file_area_in_deleted(p_file_area_prev)){
+	    printk_deferred("%s file_area:0x%llx state:0x%x next:0x%llx state:0x%x prev:0x%llx state:0x%x delete\n",__func__,(u64)p_file_area,p_file_area->file_area_state,(u64)p_file_area_next,p_file_area_next->file_area_state,(u64)p_file_area_prev,p_file_area_prev->file_area_state);
+	    return 0;
+	}
 
 	/*file_area不能是链表头*/
 	if(&p_file_area->file_area_list == file_area_list_head)
@@ -3348,6 +3417,11 @@ inline static int can_file_area_move_to_list_head_for_small_file_other(struct fi
 	//p_file_area在链表的前一个file_area
 	struct file_area *p_file_area_prev = list_prev_entry(p_file_area, file_area_list);
 
+	if(file_area_in_deleted(p_file_area) || file_area_in_deleted(p_file_area_next) ||file_area_in_deleted(p_file_area_prev)){
+	    printk_deferred("%s file_area:0x%llx state:0x%x next:0x%llx state:0x%x prev:0x%llx state:0x%x delete\n",__func__,(u64)p_file_area,p_file_area->file_area_state,(u64)p_file_area_next,p_file_area_next->file_area_state,(u64)p_file_area_prev,p_file_area_prev->file_area_state);
+	    return 0;
+	}
+
 	/*file_area不能是链表头*/
 	if(&p_file_area->file_area_list == file_area_list_head)
 		return 0;
@@ -3384,7 +3458,7 @@ inline static int can_file_area_move_to_list_head_for_small_file_other(struct fi
 	}
 
 	if(shrink_page_printk_open1)
-		printk("%ps->can_file_area_move other_list file_area_list_head:0x%llx file_area:0x%llx\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area);
+		printk_deferred("%ps->can_file_area_move other_list file_area_list_head:0x%llx file_area:0x%llx\n",__builtin_return_address(0),(u64)file_area_list_head,(u64)p_file_area);
 	return 1;
 }
 
@@ -3496,14 +3570,6 @@ inline static void i_file_stat_tiny_small_callback(struct rcu_head *head)
 	kmem_cache_free(hot_cold_file_global_info.file_stat_tiny_small_cachep,p_file_stat_tiny_small);
 }
 
-inline static void set_file_area_in_deleted(struct file_area *p_file_area)
-{
-	p_file_area->file_area_state = -1;
-}
-inline static char file_area_in_deleted(struct file_area *p_file_area)
-{
-	return (p_file_area->file_area_state == -1);
-}
 /*#if 0
  ( 如果file_area被iput()释放了，原本是想同时设置file_area的in_free、in_temp、in_refault、in_hot等状态，表示该file_area
  * 被iput()释放了，但是就引入了新的问题：如果该file_area此时正被异步内存回收线程遍历，发现file_area同时具备in_free、in_temp等
@@ -3676,7 +3742,7 @@ extern int reverse_other_file_area_list_common(struct hot_cold_file_global *p_ho
 
 inline void hot_file_update_file_status(struct address_space *mapping,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,int read_or_write);
 //extern void hot_file_update_file_status(struct address_space *mapping,struct file_stat_base *p_file_stat_base,struct file_area *p_file_area,int access_count,int read_or_write/*,unsigned long index*/);
-extern char *get_file_name_buf(char *file_name_path,struct file_stat_base *p_file_stat_base);
+extern void get_file_name_buf(char *file_name_path,struct file_stat_base *p_file_stat_base);
 extern int get_file_name_match(struct file_stat_base *p_file_stat_base,char *file_name1,char *file_name2,char *file_name3); 
 extern char *get_file_name_no_lock_from_mapping(struct address_space *mapping);
 //extern unsigned long cold_file_isolate_lru_pages_and_shrink(struct hot_cold_file_global *p_hot_cold_file_global,struct file_stat_base *p_file_stat_base,struct list_head *file_area_free,struct list_head *file_area_have_mmap_page_head);

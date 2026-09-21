@@ -742,6 +742,8 @@ void replace_page_cache_folio_for_file_area(struct folio *old, struct folio *new
 	folio_put(old);
 }
 EXPORT_SYMBOL(replace_page_cache_folio_for_file_area);
+
+extern void save_full_file_name_and_refault_info(struct address_space *mapping,char real_path);
 static void inline async_and_kswapd_refault_page_count(struct file_stat_base *p_file_stat_base,struct folio *folio_temp,void **shadowp)
 {
 	/* 统计发生refault的page数，跟workingset_refault_file同一个含义。但是有个问题，只有被异步内存回收线程
@@ -766,9 +768,10 @@ static void inline async_and_kswapd_refault_page_count(struct file_stat_base *p_
 
 		/* file_area_refault_file存在多进程并发加1的情况而不准。这只是一个粗略的统计值，只要跟WORKINGSET_REFAULT_FILE统计的refault别偏差太大就行*/
 		hot_cold_file_global_info.file_area_refault_file ++;
-		if(p_file_stat_base->refault_page_count < USHRT_MAX - 2)
+		if(p_file_stat_base->refault_page_count < UINT_MAX - 2)
 			p_file_stat_base->refault_page_count ++;
 
+		save_full_file_name_and_refault_info(p_file_stat_base->mapping,1);
 	}else{
 		/*否则folio_temp非NULL，说明是kswapd内存的page保存的shadow。如果是文件截断回收的page则folio_temp是NULL。但是上边加了if(folio_temp)限制*/
 		if(shadowp)
@@ -776,7 +779,7 @@ static void inline async_and_kswapd_refault_page_count(struct file_stat_base *p_
 
 		/*这是统计kswapd造成的refault page数，有意义吗，反正我也统计不了呀。算了还是先统计吧*/
 		hot_cold_file_global_info.kswapd_file_area_refault_file ++;
-		if(p_file_stat_base->refault_page_count_last < USHRT_MAX - 2)
+		if(p_file_stat_base->refault_page_count_last < UINT_MAX - 2)
 			p_file_stat_base->refault_page_count_last ++;
 	}
 }
@@ -2471,7 +2474,9 @@ retry:
 	  个特殊情况，初始值page_offset_in_file_area是1，然后上边遍历file_area时的第一个page时，因为page内存
 	  被回收了，导致上边异常break，这个page这里并没有被访问，但是这里的if还会成立并更新file_area的age和
 	  access_count。其实也没啥，这个page只是没有访问成功，但毕竟还是访问了。*/
-	if(p_file_area && page_offset_in_file_area)
+	/*why muse add if(file_area_have_page(p_file_area)), file_area may haved cold_file_area_delete() and free.
+	 *a critical concurrent issues! detail commemts see set_file_area_in_deleted()*/
+	if(p_file_area && page_offset_in_file_area && file_area_have_page(p_file_area))
 		hot_file_update_file_status(mapping,p_file_stat_base,p_file_area,FILE_AREA_PAGE_IS_READ);
 
 	rcu_read_unlock();
