@@ -388,21 +388,21 @@ static bool inode_do_switch_wbs_for_file_area(struct inode *inode,
 	int mark_page_count = 0;
 
 	spin_lock(&inode->i_lock);
-	/*¸Ãº¯ÊıÃ»ÓĞrcu_read_lock£¬µ«ÊÇÓĞxa_lock_irq£¬Ò²ÄÜ·ÀÖ¹²¢·¢delete file_statºÍfile_area*/
+	/*è¯¥å‡½æ•°æ²¡æœ‰rcu_read_lockï¼Œä½†æ˜¯æœ‰xa_lock_irqï¼Œä¹Ÿèƒ½é˜²æ­¢å¹¶å‘delete file_statå’Œfile_area*/
 	xa_lock_irq(&mapping->i_pages);
 
 	//p_file_stat = (struct file_stat *)mapping->rh_reserved1;
 	//p_file_stat_base = (struct file_stat_base *)mapping->rh_reserved1;
 	p_file_stat_base = (struct file_stat_base *)get_mapping_reserved_for_file_stat(mapping);
-	/* ±ØĞëÒªÔÚrcu_read_lock()ºó£¬ÔÙÖ´ĞĞsmp_rmb()£¬ÔÙÅĞ¶Ïmapping->rh_reserved1Ö¸ÏòµÄfile_statÊÇ·ñÓĞĞ§¡£
-	 * ÒòÎªÕâ¸öÎÄ¼şfile_stat¿ÉÄÜ³¤Ê±¼äÃ»·ÃÎÊ£¬´ËÊ±cold_file_stat_delete()Õı²¢·¢ÊÍ·Åmapping->rh_reserved1
-	 * Ö¸ÏòµÄÕâ¸öfile_stat½á¹¹£¬²¢ÇÒ¸³Öµmapping->rh_reserved1=1¡£rcu_read_lock()±£Ö¤file_stat²»»áÁ¢¼´±»ÊÍ·Å¡£ 
-	 * smp_rmb()ÊÇÒªÁ¢¼´¸ĞÖªµ½mapping->rh_reserved1µÄ×îĞÂÖµ¡ª¡ª¼´1¡£»¹ÓĞ£¬p_file_stat = (struct file_stat *)mapping->rh_reserved1
-	 * ¸³Öµ±ØĞë·Åµ½smp_rmb()ÄÚ´æÆÁÕÏÇ°±ß£¬ÒòÎª¿ÉÄÜÕâÀï¸³ÖµÊ±mapping->rh_reserved1»¹ÊÇÕı³££¬smp_rmb()Ö´ĞĞºó£¬
-	 * IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)Ö´ĞĞÊ±mapping->rh_reserved1ÒÑ¾­±»cold_file_stat_delete()¸³Öµ1ÁË¡£
-	 * Èç¹û²»ÓÃsmp_rmb()ÄÚ´æÆÁÕÏ¸ô¿ª£¬¿ÉÄÜ»á³öÏÖif(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping))ÏÈÖ´ĞĞ£¬´ËÊ±
-	 * mapping->rh_reserved1»¹ÊÇÕı³£µÄ£¬µ«ÊÇÔÙµÈÖ´ĞĞp_file_stat = (struct file_stat *)mapping->rh_reserved1¾ÍÊÇ1ÁË£¬
-	 * ´ËÊ±¾Í´í¹ıÅĞ¶Ïmapping->rh_reserved1·Ç·¨ÁË£¬È»ºóÖ´ĞĞmapping->rh_reserved1Õâ¸öfile_stat¶øcrash!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	/* å¿…é¡»è¦åœ¨rcu_read_lock()åï¼Œå†æ‰§è¡Œsmp_rmb()ï¼Œå†åˆ¤æ–­mapping->rh_reserved1æŒ‡å‘çš„file_statæ˜¯å¦æœ‰æ•ˆã€‚
+	 * å› ä¸ºè¿™ä¸ªæ–‡ä»¶file_statå¯èƒ½é•¿æ—¶é—´æ²¡è®¿é—®ï¼Œæ­¤æ—¶cold_file_stat_delete()æ­£å¹¶å‘é‡Šæ”¾mapping->rh_reserved1
+	 * æŒ‡å‘çš„è¿™ä¸ªfile_statç»“æ„ï¼Œå¹¶ä¸”èµ‹å€¼mapping->rh_reserved1=1ã€‚rcu_read_lock()ä¿è¯file_statä¸ä¼šç«‹å³è¢«é‡Šæ”¾ã€‚ 
+	 * smp_rmb()æ˜¯è¦ç«‹å³æ„ŸçŸ¥åˆ°mapping->rh_reserved1çš„æœ€æ–°å€¼â€”â€”å³1ã€‚è¿˜æœ‰ï¼Œp_file_stat = (struct file_stat *)mapping->rh_reserved1
+	 * èµ‹å€¼å¿…é¡»æ”¾åˆ°smp_rmb()å†…å­˜å±éšœå‰è¾¹ï¼Œå› ä¸ºå¯èƒ½è¿™é‡Œèµ‹å€¼æ—¶mapping->rh_reserved1è¿˜æ˜¯æ­£å¸¸ï¼Œsmp_rmb()æ‰§è¡Œåï¼Œ
+	 * IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)æ‰§è¡Œæ—¶mapping->rh_reserved1å·²ç»è¢«cold_file_stat_delete()èµ‹å€¼1äº†ã€‚
+	 * å¦‚æœä¸ç”¨smp_rmb()å†…å­˜å±éšœéš”å¼€ï¼Œå¯èƒ½ä¼šå‡ºç°if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping))å…ˆæ‰§è¡Œï¼Œæ­¤æ—¶
+	 * mapping->rh_reserved1è¿˜æ˜¯æ­£å¸¸çš„ï¼Œä½†æ˜¯å†ç­‰æ‰§è¡Œp_file_stat = (struct file_stat *)mapping->rh_reserved1å°±æ˜¯1äº†ï¼Œ
+	 * æ­¤æ—¶å°±é”™è¿‡åˆ¤æ–­mapping->rh_reserved1éæ³•äº†ï¼Œç„¶åæ‰§è¡Œmapping->rh_reserved1è¿™ä¸ªfile_statè€Œcrash!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	 * */
 	smp_rmb();
 	if(unlikely(!IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)))
@@ -430,13 +430,13 @@ static bool inode_do_switch_wbs_for_file_area(struct inode *inode,
 			panic("%s mapping:0x%llx p_file_area:0x%llx  error\n",__func__,(u64)mapping,(u64)p_file_area);
 
 		p_file_area = entry_to_file_area(p_file_area);
-		/*Ô­ÓĞforÑ­»·ÊÇ±éÀú±£´æpageÖ¸ÕëµÄxarray tree£¬Í³¼ÆÓĞ¶àÉÙ¸ödirty markµÄpage¡£ÏÖÔÚÊÇÏÈÍ³¼ÆÓĞ¶àÉÙ¸öÓĞ
-		 *dirty markµÄfile_area£¬ÔÙÍ³¼Æfile_areaÓĞ¶àÉÙ¸öÓĞdirty markµÄpage£¬Ğ§¹ûÒ»Ñù¡£mark_page_countÊÇÓĞdirty markµÄpageÓĞĞ§ĞÔÅĞ¶Ï*/
+		/*åŸæœ‰forå¾ªç¯æ˜¯éå†ä¿å­˜pageæŒ‡é’ˆçš„xarray treeï¼Œç»Ÿè®¡æœ‰å¤šå°‘ä¸ªdirty markçš„pageã€‚ç°åœ¨æ˜¯å…ˆç»Ÿè®¡æœ‰å¤šå°‘ä¸ªæœ‰
+		 *dirty markçš„file_areaï¼Œå†ç»Ÿè®¡file_areaæœ‰å¤šå°‘ä¸ªæœ‰dirty markçš„pageï¼Œæ•ˆæœä¸€æ ·ã€‚mark_page_countæ˜¯æœ‰dirty markçš„pageæœ‰æ•ˆæ€§åˆ¤æ–­*/
 		mark_page_count = 0;
 		for(i = 0;i < PAGE_COUNT_IN_AREA;i ++){
 			//folio = p_file_area->pages[i];
 			folio = rcu_dereference(p_file_area->pages[i]);
-			/*Èç¹ûfolioÊÇfile_areaµÄË÷Òı£¬Ôò¶ÔfolioÇåNULL£¬±ÜÃâfolio¸ÉÈÅºóĞøÅĞ¶Ï*/
+			/*å¦‚æœfolioæ˜¯file_areaçš„ç´¢å¼•ï¼Œåˆ™å¯¹folioæ¸…NULLï¼Œé¿å…folioå¹²æ‰°åç»­åˆ¤æ–­*/
 			folio_is_file_area_index_or_shadow_and_clear_NULL(folio);
 			if (folio && folio_test_dirty(folio)) {
 				nr = folio_nr_pages(folio);
@@ -449,8 +449,8 @@ static bool inode_do_switch_wbs_for_file_area(struct inode *inode,
 		if(mark_page_count != file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_DIRTY)){
 			panic("%s mapping:0x%llx p_file_area:0x%llx xas.xa_index:%ld dirty page count %d %d error\n",__func__,(u64)mapping,(u64)p_file_area,xas.xa_index,mark_page_count,file_area_page_mark_bit_count(p_file_area,PAGECACHE_TAG_DIRTY));
 		}
-		/*ÕâÀïÓĞ¸öforÑ­»·ÍË³öµÄÎÊÌâĞèÒªÉîË¼¡£Ô­±¾forÑ­»·ÊÇÒ»Ö±²éÕÒpage£¬Ö±ÖÁ²éÕÒµÄpageË÷ÒıÊÇULONG_MAX²ÅÍË³ö¡£ÕâÀï¸ÃÔõÃ´´¦Àí£¿
-		 *¼ÙÈçÒ»¹²5¸öpage£¬¶ÔÓ¦2¸öfile_area¡£Õâ¸öforÑ­»·ÀïµÄ´úÂë»áÖ´ĞĞÁ½´Î£¬ÅĞ¶ÏÕâÁ½¸öfile_areaËùÓĞpage£¬ÕâÑùÕıºÃ²»»áÓĞÒÅÂ©¡£¶îÍâ´úÂë²»ÓÃÌí¼Ó*/
+		/*è¿™é‡Œæœ‰ä¸ªforå¾ªç¯é€€å‡ºçš„é—®é¢˜éœ€è¦æ·±æ€ã€‚åŸæœ¬forå¾ªç¯æ˜¯ä¸€ç›´æŸ¥æ‰¾pageï¼Œç›´è‡³æŸ¥æ‰¾çš„pageç´¢å¼•æ˜¯ULONG_MAXæ‰é€€å‡ºã€‚è¿™é‡Œè¯¥æ€ä¹ˆå¤„ç†ï¼Ÿ
+		 *å‡å¦‚ä¸€å…±5ä¸ªpageï¼Œå¯¹åº”2ä¸ªfile_areaã€‚è¿™ä¸ªforå¾ªç¯é‡Œçš„ä»£ç ä¼šæ‰§è¡Œä¸¤æ¬¡ï¼Œåˆ¤æ–­è¿™ä¸¤ä¸ªfile_areaæ‰€æœ‰pageï¼Œè¿™æ ·æ­£å¥½ä¸ä¼šæœ‰é—æ¼ã€‚é¢å¤–ä»£ç ä¸ç”¨æ·»åŠ */
 	}
 
 	xas_set(&xas, 0);
@@ -469,11 +469,11 @@ static bool inode_do_switch_wbs_for_file_area(struct inode *inode,
 		for(i = 0;i < PAGE_COUNT_IN_AREA;i ++){
 			//folio = p_file_area->pages[i];
 			folio = rcu_dereference(p_file_area->pages[i]);
-			/*Èç¹ûfolioÊÇfile_areaµÄË÷Òı£¬Ôò¶ÔfolioÇåNULL£¬±ÜÃâfolio¸ÉÈÅºóĞøÅĞ¶Ï*/
+			/*å¦‚æœfolioæ˜¯file_areaçš„ç´¢å¼•ï¼Œåˆ™å¯¹folioæ¸…NULLï¼Œé¿å…folioå¹²æ‰°åç»­åˆ¤æ–­*/
 			folio_is_file_area_index_or_shadow_and_clear_NULL(folio);
 			if(folio && folio_test_writeback(folio)){
 				nr = folio_nr_pages(folio);
-				/*Õâ¸öÒì³£ÅĞ¶ÏÓÃÁ½¸öpanicÌæ´ú*/
+				/*è¿™ä¸ªå¼‚å¸¸åˆ¤æ–­ç”¨ä¸¤ä¸ªpanicæ›¿ä»£*/
 				//WARN_ON_ONCE(!folio_test_writeback(folio));
 				wb_stat_mod(old_wb, WB_WRITEBACK, -nr);
 				wb_stat_mod(new_wb, WB_WRITEBACK, nr);
@@ -546,8 +546,8 @@ static bool inode_do_switch_wbs(struct inode *inode,
 	struct folio *folio;
 	bool switched = false;
 #ifdef ASYNC_MEMORY_RECLAIM_IN_KERNEL
-	/*pageµÄ´Óxarray tree deleteºÍ ±£´æµ½xarray tree Á½¸ö¹ı³ÌÒòÎª¼ÓËø·À»¤£¬²»»á²¢·¢Ö´ĞĞ£¬Òò´Ë²»ÓÃµ£ĞÄÏÂ±ßµÄ
-	 *ÕÒµ½µÄfolioÊÇfile_area*/
+	/*pageçš„ä»xarray tree deleteå’Œ ä¿å­˜åˆ°xarray tree ä¸¤ä¸ªè¿‡ç¨‹å› ä¸ºåŠ é”é˜²æŠ¤ï¼Œä¸ä¼šå¹¶å‘æ‰§è¡Œï¼Œå› æ­¤ä¸ç”¨æ‹…å¿ƒä¸‹è¾¹çš„
+	 *æ‰¾åˆ°çš„folioæ˜¯file_area*/
 	if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)){
 		//smp_rmb();
 		//if(IS_SUPPORT_FILE_AREA_READ_WRITE(mapping))

@@ -478,7 +478,7 @@ int folio_migrate_mapping_for_file_area(struct address_space *mapping,
 	long entries/*, i*/;
 	
 	struct file_area *p_file_area;
-	//ÁîpageË÷ÒýÓëÉÏ0x3µÃµ½ËüÔÚfile_areaµÄpages[]Êý×éµÄÏÂ±ê
+	//ä»¤pageç´¢å¼•ä¸Žä¸Š0x3å¾—åˆ°å®ƒåœ¨file_areaçš„pages[]æ•°ç»„çš„ä¸‹æ ‡
 	unsigned int page_offset_in_file_area = folio_index(folio) & PAGE_COUNT_IN_AREA_MASK;
 
 	if (!mapping) {
@@ -548,8 +548,8 @@ int folio_migrate_mapping_for_file_area(struct address_space *mapping,
 		xas_store(&xas, newfolio);
 		xas_next(&xas);
 	}*/
-	/*Èç¹û´ËÊ±file_stat»òÕßfile_area cold_file_stat_delete()¡¢cold_file_area_delete±»ÊÍ·ÅÁË£¬ÄÇ¿Ï¶¨ÊÇ²»ºÏÀíµÄ
-	 *ÕâÀï»á´¥·¢panic*/
+	/*å¦‚æžœæ­¤æ—¶file_statæˆ–è€…file_area cold_file_stat_delete()ã€cold_file_area_deleteè¢«é‡Šæ”¾äº†ï¼Œé‚£è‚¯å®šæ˜¯ä¸åˆç†çš„
+	 *è¿™é‡Œä¼šè§¦å‘panic*/
 	if(unlikely(!IS_SUPPORT_FILE_AREA_READ_WRITE(mapping)))
         panic("%s %s %d mapping:0x%llx file_stat:0x%llx has delete,do not use this file_stat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",__func__,current->comm,current->pid,(u64)mapping,get_mapping_reserved_for_file_stat(mapping));
 
