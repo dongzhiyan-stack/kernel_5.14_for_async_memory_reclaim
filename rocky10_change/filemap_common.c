@@ -733,9 +733,9 @@ void replace_page_cache_folio_for_file_area(struct folio *old, struct folio *new
 	folio_put(old);
 }
 EXPORT_SYMBOL(replace_page_cache_folio_for_file_area);
-
-extern void save_full_file_name_and_refault_info(struct address_space *mapping,char real_path);
-inline static void async_and_kswapd_refault_page_count(struct file_stat_base *p_file_stat_base,struct folio *folio_temp,void **shadowp)
+//extern void save_full_file_name_and_refault_info(struct address_space *mapping,char real_path);
+extern void count_global_file_stat_refault_mapping_add(struct address_space *mapping);
+static void inline async_and_kswapd_refault_page_count(struct file_stat_base *p_file_stat_base,struct folio *folio_temp,void **shadowp,struct address_space *mapping)
 {
 	/* 统计发生refault的page数，跟workingset_refault_file同一个含义。但是有个问题，只有被异步内存回收线程
 	 * 回收的page的file_area才会被标记in_free，被kswapd内存回收的page的file_area，就不会标记in_free
@@ -762,7 +762,12 @@ inline static void async_and_kswapd_refault_page_count(struct file_stat_base *p_
 		if(p_file_stat_base->refault_page_count < UINT_MAX - 2)
 			p_file_stat_base->refault_page_count ++;
 
-		save_full_file_name_and_refault_info(p_file_stat_base->mapping,1);
+		/*在add_folio函数里，文件发生refault最原始的地方统计该文件的refault次数*/
+		//save_full_file_name_and_refault_info(mapping,1);
+
+		/*只把global_file_stat的文件mapping保存到hash链表，并统计该文件的refault page个数*/
+		if(file_stat_in_global_base(p_file_stat_base))
+			count_global_file_stat_refault_mapping_add(mapping);
 	}else{
 		/*否则folio_temp非NULL，说明是kswapd内存的page保存的shadow。如果是文件截断回收的page则folio_temp是NULL。但是上边加了if(folio_temp)限制*/
 		if(shadowp)
@@ -819,21 +824,26 @@ inline void move_writeonly_file_area_to_free_list_tail(struct file_stat_base *p_
 	 把file_area移动到file_stat->free链表尾，异步内存回收线程在cold_file_isolate_lru_pages_and_shrink()函数回收该file_area的page。没错，
 	 凡是异步内存回收线程有遍历这些有in_free标记的地方，都有F_file_stat_in_move_free_list_file_area加锁防护。*/
 	//if(file_stat_in_writeonly_base(p_file_stat_base) && 不能用file_stat_in_writeonly_base，会被第3个进程读写文件时并发清理掉
-	/*为了安全，还是file_stat_in_file_stat_writeonly_file_head_list_base和file_stat_in_writeonly_base判断都加上，如果writeonly
-	 *文件被并发read而清理掉file_stat_in_writeonly_base标记，就不再把file_area移动到file_stat->free链表尾巴，怕出未知乱子*/
-	if(file_stat_in_file_stat_writeonly_file_head_list_base(p_file_stat_base) && file_stat_in_writeonly_base(p_file_stat_base) &&
+	
+	/* 现在改版了，任何文件file_stat->free链表上page满了，都把file_area移动到file_stat->free链表尾，方便异步内存回收线程快速遍历到这个file_area，回收到它的page
+	 * 但必须得限制file_area有in_free标记，同时保证异步内存回收线程 1:遍历file_stat->free链表上的file_area时 2:把内存回收后的file_area移动到file_stat->free
+	 * 链表时，禁止这里并发把file_area移动到file_stat->free链表。最后，file_stat必须是normal file_stat*/
+	//if(file_stat_in_file_stat_writeonly_file_head_list_base(p_file_stat_base) && file_stat_in_writeonly_base(p_file_stat_base) &&
+	if(file_area_in_free_list(p_file_area) && get_file_stat_type(p_file_stat_base) == FILE_STAT_NORMAL &&
 			0 == test_and_set_bit(F_file_stat_in_move_free_list_file_area,(void *)(&p_file_stat_base->file_stat_status))){
 
-	    struct file_stat *p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
+		struct file_stat *p_file_stat = container_of(p_file_stat_base,struct file_stat,file_stat_base);
+
+		list_move_tail(&p_file_area->file_area_list,&p_file_stat->file_area_free);
+		
+		smp_rmb();
 		/*必须得保证异步内存回收线程先设置file_area的in_free标记，再把file_area移动到file_stat->free链表*/
 		if(!file_area_in_free_list(p_file_area))
 			panic("%s file_stat:0x%llx  status:0x%x file_area:0x%llx state:0x%x file_area not in_free\n",__func__,(u64)p_file_stat_base,p_file_stat_base->file_stat_status,(u64)p_file_area,p_file_area->file_area_state);
-        smp_rmb();
-
-		list_move_tail(&p_file_area->file_area_list,&p_file_stat->file_area_free);
 		clear_file_stat_in_move_free_list_file_area_base(p_file_stat_base);
-    }
+	}
 }
+
 noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 		struct folio *folio, pgoff_t index, gfp_t gfp, void **shadowp)
 {
@@ -925,7 +935,7 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 
 				/*统计refault page个数，但只有read的refault page才计入refault统计*/
 				if(!(gfp_ori & __GFP_WRITE)){
-					async_and_kswapd_refault_page_count(p_file_stat_base,folio_temp,shadowp);
+					async_and_kswapd_refault_page_count(p_file_stat_base,folio_temp,shadowp,mapping);
 
 					if((file_stat_in_test_base(p_file_stat_base) || is_global_file_stat_file_in_debug(mapping)) && (1 == (u64)folio_temp)){
 						printk("%s refault file_stat:0x%llx file_area:0x%llx status:0x%x index:%ld  %s\n",__func__,(u64)p_file_stat_base,(u64)p_file_area,p_file_area->file_area_state,index,get_file_name_no_lock_from_mapping(mapping));
@@ -938,8 +948,11 @@ noinline int __filemap_add_folio_for_file_area(struct address_space *mapping,
 					 * 的page，还得再清理掉in_refault标记，弄得有点麻烦???????*/
 					/* 有个问题，file_area的page都被回收后，然后每个page都依次被重新被写，这些page都会执行move_writeonly_file_area_to_free_list_tail()
 					 * 把file_area多次移动到file_stat->free链表尾，浪费性能。需要改进，只有这里file_area有了3个page，然后添加最后一个page时，page满了
-					 * 再把file_area移动到file_stat->free链表尾????????????????????*/
-					move_writeonly_file_area_to_free_list_tail(p_file_stat_base,p_file_area);
+					 * 再把file_area移动到file_stat->free链表尾????????????????????
+					 *
+					 * 这里判定已有3个page，这里最后一个page也refault，即page满了，再把file_area移动到file_stat->free链表尾*/
+					if(3 == file_area_have_page_count(p_file_area))
+						move_writeonly_file_area_to_free_list_tail(p_file_stat_base,p_file_area);
 				}
 
 			}

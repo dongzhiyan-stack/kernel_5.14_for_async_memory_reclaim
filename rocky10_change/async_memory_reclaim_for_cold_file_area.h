@@ -28,6 +28,7 @@
 #define POS_WARM_MIDDLE_HOT    4
 #define POS_WARM_HOT           5
 #define POS_ZERO_PAGE           6
+#define POS_MAX           POS_ZERO_PAGE
 
 
 /*极小的文件，pagecache小于1M的文件*/
@@ -38,11 +39,13 @@
 #define FILE_STAT_NORMAL 2
 
 /*file_area个数小于64是极小文件，在64~640是小文件。现在改为file_area个数小于32是极小文件，在32~640是小文件*/
-#define SMALL_FILE_AREA_COUNT_LEVEL 64
+#define TINY_SMALL_FILE_AREA_COUNT_LEVEL  384
+#define SMALL_FILE_AREA_COUNT_LEVEL UINT_MAX /*设置成-1，禁止tiny small文件转成small文件*/
 //#define SMALL_FILE_AREA_COUNT_LEVEL 32
 /*file_area个数在大于640(现改为128，pagecache 2M)，且小于1920是temp文件*/
 //#define NORMAL_TEMP_FILE_AREA_COUNT_LEVEL 640
-#define NORMAL_TEMP_FILE_AREA_COUNT_LEVEL 128
+//#define NORMAL_TEMP_FILE_AREA_COUNT_LEVEL 128
+#define NORMAL_TEMP_FILE_AREA_COUNT_LEVEL 384 /*6M*/
 /*file_area个数在大于1920，且小于6400是middle文件*/
 #define NORMAL_MIDDLE_FILE_AREA_COUNT_LEVEL 1920
 /*file_area个数在大于6400是大型文件*/
@@ -90,7 +93,7 @@
 /*在file_stat->warm上的file_area经过file_area_warm_to_temp_age_dx个周期没有被访问，则移动到file_stat->temp链表*/
 //#define FILE_AREA_WARM_TO_TEMP_AGE_DX  (FILE_AREA_TEMP_TO_COLD_AGE_DX + 10) 
 /*一个冷file_area，如果经过FILE_AREA_FREE_AGE_DX个周期，仍然没有被访问，则释放掉file_area结构*/
-#define FILE_AREA_FREE_AGE_DX  (FILE_AREA_TEMP_TO_COLD_AGE_DX + 600)
+#define FILE_AREA_FREE_AGE_DX  (FILE_AREA_TEMP_TO_COLD_AGE_DX + 3600)
 /*当一个file_area因多次访问被设置了ahead标记，经过FILE_AREA_AHEAD_CANCEL_AGE_DX个周期后file_area没有被访问，才会允许清理file_area的ahead标记*/
 //#define FILE_AREA_AHEAD_CANCEL_AGE_DX (FILE_AREA_TEMP_TO_COLD_AGE_DX + 10)
 
@@ -418,6 +421,7 @@ struct hot_cold_file_area_tree_root
 
 struct file_stat_base
 {
+	char access_process_name[TASK_COMM_LEN];
 	/************base***base***base************/
 	struct address_space *mapping;
 	union{
@@ -604,6 +608,9 @@ struct current_scan_file_stat_info{
 	char   up_list_num;
 	char   down_list_num;
 	char   traverse_file_stat_type;
+	char   memory_zone_tiny;
+	char   memory_zone_tiny_and_traverse_hot_list;
+	unsigned int memory_zone_tiny_down_file_area_count;
 
 	/* 异步内存回收线程当前正在遍历的normal file_stat->warm等链表的file_area时，遇到要要移动到
 	 * 链表头的file_area，先临时移动到这个链表，等遍历完该链表的所有file_area再把这些file_area移动回file_stat->warm等链表*/
@@ -673,6 +680,12 @@ struct memory_reclaim_info{
 	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_warm_cold_list;
 	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_warm_middle_list;
 	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_warm_list;
+	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_warm_middle_hot_list;
+	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_warm_hot_list;
+	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_hot_list;
+	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_free_list;
+	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_refault_list;
+	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_mapcount_list;
 	struct memory_reclaim_info_for_one_warm_list  memory_reclaim_info_direct_reclaim;
 };
 #define CURRENT_SCAN_FILE_STAT_INFO_TEMP 0
@@ -692,7 +705,9 @@ struct hot_cold_file_global
 {
 	struct zone *zone[MAX_ZONE];
 	struct zone *normal_zone;
-	unsigned int normal_zone_high_wmark_reclaim;
+	unsigned int max_zone_high_wmark_ori;
+	unsigned int max_zone_high_wmark_tiny;
+	unsigned int max_zone_high_wmark_enough;
 	unsigned int is_memory_idle_but_normal_zone_memory_tiny_count;
 
 	unsigned int file_stat_in_move_free_list_file_area_count;
@@ -725,7 +740,8 @@ struct hot_cold_file_global
 	struct current_scan_file_stat_info *p_struct_current_scan_file_stat_info;
 	struct memory_reclaim_info memory_reclaim_info;
 	unsigned int alreay_reclaim_pages;
-	unsigned int reclaim_pages_target;
+	/*必须定义成int，会是负数*/
+	int reclaim_pages_target;
 	unsigned int cache_file_warm_list_file_area_up_count;
 	unsigned int mmap_file_warm_list_file_area_up_count;
 	unsigned int cache_file_warm_list_file_area_down_count;
@@ -1129,9 +1145,10 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	/*该file_stat的file_area被移动到了current_scan_file_stat_info->tmp链表*/
 	F_file_stat_in_file_area_in_tmp_list,
 	F_file_stat_in_writeonly,//该文件只有write 的page，没有读page，这种文件即便file_area个数少也要移动到middel或large文件，内存回收优先回收这种文件。
+	F_file_stat_in_metadata_file,//该file_stat是个原数据inode，比如f2fs的inode编号是1、2的inode，该文件的file_area的访问只有find_get_page访问，不是read_batch，故这些file_area都是只写的
+	
 	F_file_stat_invalid_start_index,
-
-	F_file_stat_in_delete_file,//标识该file_stat被移动到了global delete链表	
+	F_file_stat_in_delete_file = F_file_stat_invalid_start_index,//标识该file_stat被移动到了global delete链表	
 	F_file_stat_in_delete,//仅仅表示该file_stat被触发delete了，并不能说明file_stat被移动到了global delete链表
 	//F_file_stat_in_drop_cache,
 	//F_file_stat_in_free_page,//正在遍历file_stat的file_area的page，尝试释放page
@@ -1140,7 +1157,7 @@ enum file_stat_status{//file_area_state是long类型，只有64个bit位可设�
 	//F_file_stat_in_from_small_file,//该文件是从small文件的global small_temp链表移动过来的
 	F_file_stat_in_replaced_file,//file_stat_tiny_small或file_stat_small转成更大的文件时，老的file_stat被标记replaced
 	F_file_stat_in_move_free_list_file_area,
-	F_file_stat_max_index,
+	F_file_stat_max_index = F_file_stat_in_move_free_list_file_area,
 	//F_file_stat_lock,
 	//F_file_stat_lock_not_block,//这个bit位置1，说明inode在删除的，但是获取file_stat锁失败
 };
@@ -1295,6 +1312,7 @@ FILE_STATUS_BASE(global)
 FILE_STATUS_BASE(tiny_small_to_tail)
 FILE_STATUS_BASE(file_area_in_tmp_list)
 FILE_STATUS_BASE(move_free_list_file_area)
+FILE_STATUS_BASE(metadata_file)
 
 
 /*设置/清除file_stat状态使用test_and_set_bit/clear_bit，是异步内存回收1.0版本的产物，现在不再需要。
@@ -1530,6 +1548,11 @@ inline static int is_file_area_page_bit_set(struct file_area *p_file_area,unsign
 inline static int file_area_have_page(struct file_area *p_file_area)
 {
 	return  (READ_ONCE(p_file_area->file_area_state) & ~((1 << PAGE_BIT_OFFSET_IN_FILE_AREA_BASE) - 1));//0XF000 0000
+}
+extern char file_area_page_count[];
+inline static int file_area_have_page_count(struct file_area *p_file_area)
+{
+	return  file_area_page_count[(READ_ONCE(p_file_area->file_area_state) >> PAGE_BIT_OFFSET_IN_FILE_AREA_BASE) & 0xF];//0XF000 0000
 }
 
 /*#if 0
@@ -1796,7 +1819,7 @@ inline static void is_cold_file_area_reclaim_support_fs(struct address_space *ma
 		if(sb->s_type){
 			if(0 == strcmp(sb->s_type->name,"ext4") || 0 == strcmp(sb->s_type->name,"xfs") || 0 == strcmp(sb->s_type->name,"f2fs")){
 				set_mapping_reserved_for_file_stat(mapping,SUPPORT_FILE_AREA_INIT_OR_DELETE);
-				test_and_set_bit(ASYNC_MEMORY_RECLAIM_ENABLE, &async_memory_reclaim_status);
+				//test_and_set_bit(ASYNC_MEMORY_RECLAIM_ENABLE, &async_memory_reclaim_status);
 			}
 			//mapping->rh_reserved1 = SUPPORT_FILE_AREA_INIT_OR_DELETE;
 		}
@@ -2705,12 +2728,12 @@ inline static void update_file_stat_next_multi_level_warm_or_writeonly_list(stru
 		return;
 
 	if(!file_stat_in_file_area_in_tmp_list_base(&p_current_scan_file_stat_info->p_traverse_file_stat->file_stat_base))
-		panic("%s p_current_scan_file_stat_info:0x%llx p_file_stat:0x%llx error",__func__,(u64)p_current_scan_file_stat_info,(u64)p_file_stat);
+		panic("update_file_stat_next_multi_level_warm_or_writeonly_list p_current_scan_file_stat_info:0x%llx p_file_stat:0x%llx status:0x%x error",(u64)p_current_scan_file_stat_info,(u64)p_file_stat,p_file_stat->file_stat_base.file_stat_status);
 
 	clear_file_stat_in_file_area_in_tmp_list_base(&p_current_scan_file_stat_info->p_traverse_file_stat->file_stat_base);
 
 	/*1:当前file_stat的warm链表上的file_area完成了，更新next_num_list，还要把p_traverse_file_stat设置NULL，这样下次遍历同类型的
-	 * file_stat时，才会更新到p_traverse_file_stat。同时，还要先把之前遍历过的移动到temp_head链表上的file_area移动回warm链表头
+	 * file_stat时，才会更新到p_traverse_file_stat。同时，还要先把之前遍历过的移动到temp_head链表上的file_area移动回warm链表头。保证链表尾都是较冷的file_area，内存回收回收时先遍历到
 	 *2:当前file_stat的状态发生变化了，比如normal file_stat转成writeonly文件，或者temp、midle、large文件之间来回转换。执行同样的操作*/
 	if(!list_empty(&p_current_scan_file_stat_info->temp_head)){
 		list_splice_init(&p_current_scan_file_stat_info->temp_head,p_current_scan_file_stat_info->p_traverse_file_area_list_head);
@@ -3097,7 +3120,9 @@ out:
 	 * 而令file_area的access_count加1。但按照上边的说明，实际情况file_area的access_count没有加1，不可能呀？现在需要为file_area
 	 * 引入F_file_area_in_around_set，file_area_state没有空闲bit了，只能用F_file_area_in_init替代了。于是update函数里的
 	 * if(file_area_age < global_age || test_and_clear_bit(F_file_area_in_init,&p_file_area->file_area_state))就不能使用
-	 * F_file_area_in_init了。干脆在就在这里把file_area的access_count访问计数设置为1得了!跟之前的效果一样*/
+	 * F_file_area_in_init了。干脆在就在这里把file_area的access_count访问计数设置为1得了!跟之前的效果一样。终于知道原因了，
+	 * 因为这里file_area_age赋值当前global_age，然后立即自行update函数，因为if(file_area_age < global_age)不成立就不会令
+	 * file_area access_count加1了*/
 	p_file_area->file_area_age = hot_cold_file_global_info.global_age;
 	file_area_access_freq_set(p_file_area,1);
 	return p_file_area;
@@ -3186,6 +3211,14 @@ inline static int file_inode_lock(struct file_stat_base *p_file_stat_base)
 	//加锁成功则令inode引用计数加1，之后就不用担心inode被其他进程释放掉
 	if(0 == lock_fail)
 		atomic_inc(&inode->i_count);
+
+	/*f2fs文件系统的inode编号是1的pagecache回收后几容易refault，设置黑名单，禁止转成global_file_stat，并且最后再回收它的pagecache*/
+	if(inode->i_ino < 5 && !file_stat_in_blacklist_base(p_file_stat_base)){
+	    set_file_stat_in_blacklist_base(p_file_stat_base);
+	    set_file_stat_in_metadata_file_base(p_file_stat_base);
+	    /*这些元数据的inode不会执行read_batch函数，因此清理不掉in_writeonly标记，导致被当作writeonly文化回收page，造成大量refault。于是这里强制清理in_writeonly标记*/
+	    clear_file_stat_in_writeonly_base(p_file_stat_base);
+	}
 
 	spin_unlock(&inode->i_lock);
 	rcu_read_unlock();
